@@ -5,4 +5,4 @@ selenium
 webdriver-manager
 lxml
 fake-useragent
-uncurl
+soccerdata
