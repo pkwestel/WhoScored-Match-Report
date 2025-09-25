@@ -46,8 +46,8 @@ def load_fbref_player_data(page_url, table_index=0):
 
 if __name__ == "__main__":
     # Example usage
-    url = "https://fbref.com/en/comps/10/Championship-Stats"
-    # url = "https://fbref.com/en/comps/22/stats/Major-League-Soccer-Stats"
+    url = "https://fbref.com/en/comps/Big5/stats/players/Big-5-European-Leagues-Stats"
+    # url = "https://fbref.com/en/comps/22/stats/Major-League-Soccer-Stats" # Will not work due to JS rendering
     df = load_fbref_player_data(url, table_index=0)
 
     if df is not None:
