@@ -4,7 +4,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-from driver import get_driver
+from utils.driver import get_driver
 
 
 def load_whoscored_events_data(match_centre_url):

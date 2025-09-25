@@ -1,7 +1,7 @@
 import json
 import time
 
-from driver import get_driver
+from utils.driver import get_driver
 
 
 def get_sofascore_data(match_url, endpoint):

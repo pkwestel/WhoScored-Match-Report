@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from io import StringIO
 from fake_useragent import UserAgent
-from driver import get_driver
+from utils.driver import get_driver
 
 
 def load_fbref_player_data_with_selenium(page_url):
