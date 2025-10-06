@@ -1,4 +1,6 @@
 import pandas as pd
+import requests
+from fake_useragent import UserAgent
 
 
 def load_fbref_player_data(page_url, table_index=0):
@@ -13,8 +15,16 @@ def load_fbref_player_data(page_url, table_index=0):
     pd.DataFrame: A DataFrame containing the player data, or None if error occurs.
     """
     try:
-        # Read all tables from the provided URL
-        tables = pd.read_html(page_url)
+        # Use fake user agent to mimic a real browser request
+        ua = UserAgent()
+        headers = {"User-Agent": ua.random}
+
+        # Make a GET request to the page URL
+        response = requests.get(page_url, headers=headers)
+        response.raise_for_status()
+
+        # Parse all tables from the page using pandas
+        tables = pd.read_html(response.text)
 
         # Check if any tables were found
         if not tables:
