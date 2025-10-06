@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+from fake_useragent import UserAgent
 
 
 def get_transfermarkt_player_info(player_url):
@@ -14,7 +15,7 @@ def get_transfermarkt_player_info(player_url):
     dict: Dictionary containing player information
     """
     try:
-        response = requests.get(player_url)
+        response = requests.get(player_url, headers={"User-Agent": UserAgent().random})
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, "html.parser")
