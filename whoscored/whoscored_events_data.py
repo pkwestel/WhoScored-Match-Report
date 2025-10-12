@@ -45,6 +45,14 @@ def load_whoscored_events_data(match_centre_url):
                 match_json = json.loads(json_text.split(",\n")[0])
                 print("Successfully parsed matchCentreData")
 
+                # Extract player ID-name dictionary
+                player_id_name_dict = match_json.get("playerIdNameDictionary", {})
+
+                if not player_id_name_dict:
+                    print("Warning: No player ID-name dictionary found")
+                else:
+                    print(f"Found {len(player_id_name_dict)} players in dictionary")
+
                 # Extract only events if needed
                 events_dict = match_json.get("events", {})
 
@@ -54,10 +62,40 @@ def load_whoscored_events_data(match_centre_url):
 
                 # Convert to DataFrame
                 df = pd.json_normalize(events_dict)
+
+                # Map player IDs to names if playerId column exists
+                if "playerId" in df.columns:
+                    # Convert playerId: float -> int -> str, handling NaN values
+                    df["playerName"] = df["playerId"].apply(
+                        lambda x: (
+                            player_id_name_dict.get(str(int(x)))
+                            if pd.notna(x)
+                            else None
+                        )
+                    )
+                    print(
+                        f"Added playerName column - {df['playerName'].notna().sum()} names mapped"
+                    )
+                else:
+                    print("Warning: No 'playerId' column found in events data")
+
+                # Also map relatedPlayerId if it exists
+                if "relatedPlayerId" in df.columns:
+                    df["relatedPlayerName"] = df["relatedPlayerId"].apply(
+                        lambda x: (
+                            player_id_name_dict.get(str(int(x)))
+                            if pd.notna(x)
+                            else None
+                        )
+                    )
+                    print(
+                        f"Added relatedPlayerName column - {df['relatedPlayerName'].notna().sum()} names mapped"
+                    )
+
                 return df
 
-            except (ValueError, json.JSONDecodeError) as e:
-                print(f"JSON parsing error: {str(e)}")
+            except Exception as e:
+                print(f"Error parsing match data: {e}")
                 return None
 
     except Exception as e:
