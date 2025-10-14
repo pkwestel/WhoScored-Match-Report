@@ -7,3 +7,4 @@ lxml
 uncurl
 fake-useragent
 soccerdata
+html5lib
