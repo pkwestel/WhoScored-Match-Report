@@ -82,6 +82,7 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing defensive stats..."):
                 defensive_stats = wr.compute_defensive_stats(df)
                 defensive_actions = wr.compute_defensive_actions(df)
+                defensive_action_location = wr.compute_defensive_action_location(df)
             with st.spinner("Computing corners..."):
                 corners = wr.compute_corners(df)
             with st.spinner("Computing totals..."):
@@ -92,7 +93,7 @@ if st.button("Generate Report", type="primary"):
             wb = wr.build_workbook(
                 pp_out, player_totals, team_totals, sca_out,
                 team_summary, player_third, passing_out, totals_out, defensive_actions,
-                home_name, away_name,
+                defensive_action_location, home_name, away_name,
             )
             buf = io.BytesIO()
             wb.save(buf)
@@ -106,9 +107,9 @@ if st.button("Generate Report", type="primary"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
                 ["Totals", "Touches", "Passing", "Shot Creating Actions",
-                 "Defensive Actions", "Progressive Passes"]
+                 "Defensive Actions", "Defensive Action Location", "Progressive Passes"]
             )
             with tab0:
                 st.dataframe(totals_out, use_container_width=True)
@@ -121,6 +122,8 @@ if st.button("Generate Report", type="primary"):
             with tab4:
                 st.dataframe(defensive_actions, use_container_width=True)
             with tab5:
+                st.dataframe(defensive_action_location, use_container_width=True)
+            with tab6:
                 st.subheader("Progressive Passes by Team")
                 st.dataframe(team_totals, use_container_width=True)
                 st.subheader("Progressive Passes by Player")

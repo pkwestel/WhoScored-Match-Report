@@ -54,7 +54,20 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     break this search (since they're recorded as separate rows for both
     sides and aren't genuine turnovers), but only a won *challenge* counts
     as a contributing action - a won aerial does not count, it's simply
-    skipped over so the search can keep looking further back.
+    skipped over so the search can keep looking further back. The same
+    applies to an opponent's Clearance, blocked pass, or keeper Save
+    immediately before the shot - a defender's partial touch that doesn't
+    fully clear the danger (e.g. heading a cross away for it to fall to
+    another attacker) doesn't count as an SCA itself and doesn't break the
+    search either, so the real originating pass still gets found and
+    credited (this matters a lot for headers off crosses/corners).
+    Rebounds are a special case: if the same team's own PREVIOUS shot is
+    the action immediately before this one, that earlier shot IS the SCA
+    (labeled just "Shot") and the search stops there - a rebound never
+    gets a second SCA behind it. A Tackle or Interception winning the ball
+    still counts as an SCA, but a BallRecovery (picking up a loose ball,
+    not winning a contested one) does not - it's skipped over rather than
+    counted, so the search keeps looking for the real contributing action.
   - Shot body part is read directly from WhoScored's own qualifiers on the
     shot event (Head / Left Foot / Right Foot / Other).
   - Pitch thirds: Own third = x < 33.3, Middle third = 33.3 <= x < 66.6,
@@ -100,6 +113,9 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     Shots Blocked uses the player of the 'Save' event immediately after a
     shot with a 'Blocked' qualifier (no direct player field exists for
     shot blocks) - verified to sum to the Totals tab's Blocked Shots.
+  - Defensive Action Location tab (per player, by team): Tackles/
+    Interceptions/Passes Blocked/Ball Recoveries, each split by pitch
+    third (Own/Middle/Final) using the same third() rule as Touches.
   - Possession % (Totals tab): passes-based proxy - team's passes attempted
     / both teams' combined passes attempted. Close to a published benchmark.
   - Corners (Totals tab): count of Pass events with a 'CornerTaken'
@@ -146,11 +162,28 @@ BOX_WIDTH_YD = 44
 OWN_THIRD_MAX = 33.3
 MIDDLE_THIRD_MAX = 66.6
 
-OFFENSIVE_TYPES = {'Pass', 'TakeOn', 'Tackle', 'Interception', 'BallRecovery',
+OFFENSIVE_TYPES = {'Pass', 'TakeOn', 'Tackle', 'Interception',
                     'Clearance', 'Goal', 'SavedShot', 'MissedShots', 'ShotOnPost'}
+# BallRecovery is deliberately excluded: picking up a loose ball isn't itself
+# a shot-creating action, but it also shouldn't break the search - the walk-
+# back just skips over it (same-team events not in OFFENSIVE_TYPES never
+# break the search, only opponent-team events can) to find the real action
+# that created the chance.
 BOUNDARY_TYPES = {'Start', 'End', 'FormationSet', 'SubstitutionOn', 'SubstitutionOff'}
 NON_BREAKING_DUEL_TYPES = {'Aerial', 'Challenge'}
 COUNTABLE_DUEL_TYPES = {'Challenge'}  # Aerial never counts as an SCA, per user instruction
+# Opponent-side events that are a loose-ball/deflection, not a clean turnover -
+# a defender's partial clearance, a blocked shot/pass, or a keeper save can
+# all put the ball right back to the shooting team, so the search should skip
+# past them (not counting them as an SCA, but not breaking the chain either)
+# to find the real originating pass. A genuine opponent Tackle/Interception/
+# BallRecovery still breaks the chain - those represent an actual regain.
+LOOSE_BALL_OPPONENT_TYPES = {'Clearance', 'BlockedPass', 'Save'}
+# Same-team shot events that can turn up as the action immediately before
+# ANOTHER shot - a rebound. In that case the earlier shot IS the SCA (labeled
+# simply "Shot", not the specific outcome type), and the search stops right
+# there - a rebound never gets a second SCA behind it.
+SHOT_TYPES = {'SavedShot', 'MissedShots', 'ShotOnPost', 'Goal'}
 
 # "Open play" = not a corner, free kick (direct/indirect), throw-in, goal kick,
 # or keeper throw. Used to restrict Progressive Passes and the Passing tab's
@@ -515,6 +548,8 @@ def classify_action(row):
     rtype = row['type.displayName']
     if rtype == 'TakeOn':
         return 'take-on'
+    if rtype in SHOT_TYPES:
+        return 'Shot'
     if rtype != 'Pass':
         return rtype
     qn = qual_names(row['qualifiers_parsed'])
@@ -567,10 +602,22 @@ def compute_sca(df):
             if rteam == shot_team:
                 if rtype in OFFENSIVE_TYPES:
                     found.append(j)
+                    if rtype in SHOT_TYPES:
+                        # This shot is a rebound off the previous one - that
+                        # previous shot IS the SCA, and a rebound never gets
+                        # a second SCA behind it, so stop here.
+                        break
             else:
                 if rtype == 'Foul':
                     found.append(j)
                     break
+                elif rtype in LOOSE_BALL_OPPONENT_TYPES:
+                    # A partial clearance/block/save can still put the ball
+                    # right back to the shooting team - keep searching past
+                    # it for the real originating pass, without counting the
+                    # defensive touch itself as an SCA.
+                    j -= 1
+                    continue
                 else:
                     break
             j -= 1
@@ -1034,6 +1081,59 @@ def compute_defensive_actions(df):
 
 
 # ============================================================
+# 5d3. DEFENSIVE ACTION LOCATION (per player, by pitch third)
+# ============================================================
+DEF_ACTION_LOCATION_METRICS = [
+    ('Tackle', 'Tackles'),
+    ('Interception', 'Interceptions'),
+    ('BlockedPass', 'Passes Blocked'),
+    ('BallRecovery', 'Ball Recoveries'),
+]
+DEF_ACTION_LOCATION_THIRDS = [
+    ('Own third', 'Own Third'),
+    ('Middle third', 'Middle Third'),
+    ('Final third', 'Final Third'),
+]
+
+
+def compute_defensive_action_location(df):
+    """
+    Per-player totals for the Defensive Action Location tab, one table per
+    team: Tackles, Interceptions, Passes Blocked, and Ball Recoveries, each
+    broken down by which third of the pitch the action happened in - using
+    the exact same Own/Middle/Final third rule as the Touches tab (third(),
+    based on the event's own x coordinate, 0-100 normalized scale, each
+    team's own attacking direction). Passes Blocked uses the blocking
+    player's own event (same convention as the Defensive Actions tab), not
+    the passer's. Every player who appears anywhere in the match gets a row
+    (zeros where they had none), matching the other tabs' inclusiveness.
+    """
+    all_players = (df.dropna(subset=['playerName', 'team'])
+                    .drop_duplicates(['team', 'playerName'])[['team', 'playerName']]
+                    .rename(columns={'playerName': 'player'}))
+
+    out = all_players
+    value_cols = []
+    for event_type, label in DEF_ACTION_LOCATION_METRICS:
+        work = df[df['type.displayName'] == event_type].copy()
+        work['pitch_third'] = work['x'].apply(third)
+        for third_label, col_suffix in DEF_ACTION_LOCATION_THIRDS:
+            col_name = f'{label} {col_suffix}'
+            value_cols.append(col_name)
+            counts = (work[work['pitch_third'] == third_label].groupby(['team', 'playerName']).size()
+                      .reset_index(name=col_name).rename(columns={'playerName': 'player'}))
+            out = out.merge(counts, on=['team', 'player'], how='left')
+
+    for c in value_cols:
+        out[c] = out[c].fillna(0).astype(int)
+
+    out['_sort_key'] = out[value_cols].sum(axis=1)
+    out = out.sort_values(['team', '_sort_key'], ascending=[True, False]).drop(columns='_sort_key')
+    out = out[['team', 'player'] + value_cols].reset_index(drop=True)
+    return out
+
+
+# ============================================================
 # 5e. TOTALS (team-level rollup)
 # ============================================================
 def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, team_sequences,
@@ -1119,8 +1219,8 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
         'Total Passes', 'Crosses Attempted', 'Crosses Completed',
         'Passes into Final Third', "Passes into Opponent's Box",
         'Progressive Passes', '10+ Pass Sequences', 'Avg Passes per Sequence',
-        'Field Tilt %', 'PPDA',
         'Tackles', 'Successful Tackles', 'Interceptions', 'Blocked Passes', 'Blocked Shots',
+        'Field Tilt %', 'PPDA',
         'Defensive Action Height (m)', 'Corners',
     ]]
     return totals
@@ -1168,7 +1268,7 @@ def autosize(ws):
 
 def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
                     team_summary, player_third, passing_out, totals_out, defensive_actions,
-                    home_name, away_name):
+                    defensive_action_location, home_name, away_name):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -1206,6 +1306,16 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
     for t in teams_for_def:
         t_players = defensive_actions[defensive_actions['team'] == t].drop(columns=['team'])
         rD = write_table(ws, t_players, start_row=rD, title=f'{t} - Defensive Actions') + 3
+    autosize(ws)
+    ws.freeze_panes = 'A3'
+
+    ws = wb.create_sheet('Defensive Action Location')
+    teams_for_defloc = ([t for t in [home_name, away_name] if t is not None]
+                         or sorted(defensive_action_location['team'].unique()))
+    rDL = 1
+    for t in teams_for_defloc:
+        t_players = defensive_action_location[defensive_action_location['team'] == t].drop(columns=['team'])
+        rDL = write_table(ws, t_players, start_row=rDL, title=f'{t} - Defensive Action Location') + 3
     autosize(ws)
     ws.freeze_panes = 'A3'
 
@@ -1250,7 +1360,19 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
         " walking backward through the same team's play. Aerial duels and ground challenges never break"
         " this search, since WhoScored logs them as separate rows for both sides rather than as genuine"
         " turnovers - but a won aerial does NOT count as a contributing action (it's skipped over so the"
-        " search can keep looking further back); a won challenge still counts.",
+        " search can keep looking further back); a won challenge still counts. An opponent's Clearance,"
+        " blocked pass, or keeper Save immediately before the shot is treated the same way - skipped over,"
+        " not counted itself - because a defender's partial touch (e.g. heading a cross away, only for it to"
+        " fall to another attacker) doesn't erase the real originating pass. Without this, headers set up by"
+        " a cross/corner that a defender partially touched first were showing no SCA at all, which was wrong"
+        " - someone still played the pass that created the chance. A genuine opponent Tackle, Interception,"
+        " or BallRecovery still breaks the search, since those ARE real turnovers. Rebounds are a special"
+        " case: if the action immediately before a shot is the SAME team's own previous shot (a rebound),"
+        " that previous shot IS the SCA - labeled simply 'Shot', not the specific outcome type - and the"
+        " search stops there. A rebound never gets a second SCA behind it. On the shooting team's own side,"
+        " a Tackle or Interception winning the ball still counts as an SCA, but a BallRecovery (picking up a"
+        " loose ball rather than winning a contested one) does not - it's skipped over, not counted, so the"
+        " search keeps looking further back for the real contributing action.",
         "",
         "Shot body part (Head / Left Foot / Right Foot / Other) is read directly from WhoScored's own"
         " qualifiers on the shot event.",
@@ -1339,6 +1461,13 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
         " row, credited to the defender or keeper who actually stopped it; that player is used as the"
         " blocker. Verified to sum to the same exact team totals as the Totals tab's Blocked Shots column.",
         "",
+        "Defensive Action Location tab: the same per-player inclusiveness as the Defensive Actions tab, but"
+        " Tackles/Interceptions/Passes Blocked/Ball Recoveries are each split into three columns - Own Third,"
+        " Middle Third, Final Third - using the exact same pitch-third rule as the Touches tab (x < "
+        f"{OWN_THIRD_MAX} / < {MIDDLE_THIRD_MAX} / else, based on the action's own x coordinate). Ball"
+        " Recoveries is a new metric for this tab (WhoScored's 'BallRecovery' event type) not present on the"
+        " Defensive Actions tab.",
+        "",
         "Possession % (Totals tab): a passes-based possession proxy - each team's total passes attempted"
         " divided by both teams' combined passes attempted. Close to insight90's published possession"
         " (60.8% / 39.2% here vs a published 61% / 39%).",
@@ -1401,6 +1530,7 @@ def main():
     print("Computing defensive stats...")
     defensive_stats = compute_defensive_stats(df)
     defensive_actions = compute_defensive_actions(df)
+    defensive_action_location = compute_defensive_action_location(df)
 
     print("Computing corners...")
     corners = compute_corners(df)
@@ -1412,7 +1542,7 @@ def main():
     print("Building workbook...")
     wb = build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
                          team_summary, player_third, passing_out, totals_out, defensive_actions,
-                         home_name, away_name)
+                         defensive_action_location, home_name, away_name)
 
     filename = f"{sanitize_filename(home_name)}_vs_{sanitize_filename(away_name)}.xlsx"
     wb.save(filename)
