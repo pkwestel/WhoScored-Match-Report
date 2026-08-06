@@ -110,6 +110,10 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     against a benchmark; close but not exact (unlike the counts above).
   - Passes Received / Progressive Passes Received (Touches tab): receiver
     inferred as the next event's player, if that event is the same team.
+  - Minutes Played (Touches tab): inferred from SubstitutionOn/
+    SubstitutionOff events and straight red cards, using a continuous
+    cross-period match clock. Doesn't account for a second yellow (an
+    indirect red) - only a card carrying WhoScored's own 'Red' qualifier.
   - Defensive Actions tab (per player, by team): Tackles/Interceptions are
     direct counts; Passes Blocked uses the BlockedPass event's own player;
     Shots Blocked uses the player of the 'Save' event immediately after a
@@ -535,6 +539,48 @@ def _add_cumulative_mins(df):
     return d
 
 
+def compute_minutes_played(df):
+    """
+    Minutes Played per player - inferred from WhoScored's own
+    SubstitutionOn/SubstitutionOff events and straight red cards (a player
+    sent off stops accruing minutes at that point), using the same
+    continuous cross-period clock as compute_carries() below
+    (_add_cumulative_mins), so second-half/stoppage-time minutes count
+    correctly. A player with no SubstitutionOn event played from kickoff
+    (minute 0); a player with no SubstitutionOff or red-card event played
+    to the final whistle. Does NOT account for a second yellow card (an
+    indirect red) - only a card event carrying WhoScored's own 'Red'
+    qualifier directly counts as an early end to a player's minutes.
+    """
+    d = _add_cumulative_mins(df)
+    play_periods = {'FirstHalf', 'SecondHalf', 'FirstPeriodOfExtraTime', 'SecondPeriodOfExtraTime'}
+    playable = d[d['period.displayName'].isin(play_periods)]
+    match_end = playable['cumulative_mins'].max() if len(playable) else 90.0
+
+    sub_on = (d[d['type.displayName'] == 'SubstitutionOn'].dropna(subset=['playerId'])
+              .set_index('playerId')['cumulative_mins'])
+    sub_off = (d[d['type.displayName'] == 'SubstitutionOff'].dropna(subset=['playerId'])
+               .set_index('playerId')['cumulative_mins'])
+
+    is_card = d['type.displayName'] == 'Card'
+    is_red = is_card & d['qualifiers_parsed'].apply(lambda qs: 'Red' in qual_names(qs))
+    red_cards = d[is_red].dropna(subset=['playerId']).set_index('playerId')['cumulative_mins']
+
+    players = df.dropna(subset=['playerId', 'playerName', 'team']).drop_duplicates('playerId')
+    records = []
+    for _, row in players.iterrows():
+        pid = row['playerId']
+        start = sub_on.get(pid, 0.0)
+        candidates = [t for t in [sub_off.get(pid), red_cards.get(pid), match_end] if pd.notna(t)]
+        end = min(candidates) if candidates else match_end
+        records.append({
+            'team': row['team'], 'player': row['playerName'],
+            'minutes_played': round(max(0.0, end - start)),
+        })
+
+    return pd.DataFrame(records, columns=['team', 'player', 'minutes_played'])
+
+
 def compute_carries(df):
     """
     WhoScored/Opta data has no explicit "carry" event, so carries are
@@ -807,9 +853,14 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
         'passes_received': 'Passes Received',
         'progressive_passes_received': 'Progressive Passes Received',
     })
+
+    minutes_played = compute_minutes_played(df)
+    player_third = player_third.merge(minutes_played, on=['team', 'player'], how='left')
+    player_third = player_third.rename(columns={'minutes_played': 'Minutes Played'})
+
     player_third = player_third[[
-        'team', 'player', 'Total Touches', 'Own third', 'Middle third', 'Final third', 'Attacking Box',
-        'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
+        'team', 'player', 'Minutes Played', 'Total Touches', 'Own third', 'Middle third', 'Final third',
+        'Attacking Box', 'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
         'Passes Received', 'Progressive Passes Received',
     ]]
     player_third = player_third.sort_values(['team', 'Total Touches'], ascending=[True, False])
@@ -1585,6 +1636,15 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " scripts do it - the player of the very next event in the full chronological log, provided that"
         " next event belongs to the SAME team (otherwise no receiver is recorded). Progressive Passes"
         " Received uses the same logic, restricted to passes already flagged progressive.",
+        "",
+        "Minutes Played (Touches tab): inferred from WhoScored's own SubstitutionOn/SubstitutionOff"
+        " events plus straight red cards, using a continuous match clock that runs across both halves"
+        " (and extra time, if any) rather than resetting at half-time - so second-half and stoppage-time"
+        " minutes count correctly. A player with no SubstitutionOn event is assumed to have started from"
+        " kickoff (minute 0); a player with no SubstitutionOff event or red card is assumed to have"
+        " played to the final whistle. This does NOT account for a second yellow card (an indirect red) -"
+        " only a card event carrying WhoScored's own 'Red' qualifier directly ends a player's minutes"
+        " early. Rounded to the nearest whole minute.",
         "",
         "Defensive Actions tab: per-player totals, one table per team, for every player who appears"
         " anywhere in the match. Tackles and Interceptions are direct event counts; Passes Blocked counts"
