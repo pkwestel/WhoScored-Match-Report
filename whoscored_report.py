@@ -2,8 +2,9 @@
 WhoScored match report generator.
 
 Scrapes a WhoScored match-centre page and produces a styled Excel workbook
-with tabs: Totals, Touches, Passing, Shot Creating Actions, and Progressive
-Passes (plus a Notes tab documenting every definition/assumption used).
+with tabs: Totals, Against, Touches, Passing, Shot Creating Actions,
+Defensive Actions, Defensive Action Location, and Passing Pairs (plus a
+Notes tab documenting every definition/assumption used).
 
 SETUP (one-time):
     Drop this file into the root of your cloned football-data-webscraping
@@ -80,11 +81,12 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     qualifier; Crosses Attempted/Completed are open-play only (excludes
     corners and free kicks); Passes into Final 1/3 / into the Box are
     completed, open-play passes starting outside and ending inside that
-    zone; Progressive Passes matches the Progressive Passes tab; Shot
-    Assists comes straight from WhoScored's own ShotAssist qualifier; SCA
-    is the combined SCA1+SCA2 total from the Shot Creating Actions tab.
+    zone; Progressive Passes uses the same rolling-window definition
+    described above; Shot Assists comes straight from WhoScored's own
+    ShotAssist qualifier; SCA is the combined SCA1+SCA2 total from the Shot
+    Creating Actions tab.
   - Totals tab (per team): rolls up the same numbers from the Touches,
-    Passing, Shot Creating Actions, and Progressive Passes tabs - Shots is
+    Passing, and Shot Creating Actions tabs - Shots is
     a count of shot events, Total Passes is the sum of each player's Passes
     Attempted, Total SCA is the sum of each player's SCA column.
   - 10+ Pass Sequences / Avg Passes per Sequence: possession sequences use
@@ -326,8 +328,17 @@ def _pass_receiver_map(df):
     return receiver.where(valid)
 
 
-def compute_progressive_passes(df):
+def _compute_progressive_flags(df):
     """
+    Shared core of the progressive-pass rolling-window algorithm, factored
+    out of compute_progressive_passes() so other consumers (e.g. the Pass
+    Map in streamlit_app.py) can mark which individual passes are
+    progressive without re-deriving the rolling baseline differently and
+    risking drift between the two. Returns one row per completed pass with
+    valid end coordinates (boundary events dropped), including an
+    'orig_index' column pointing back at the row's position in the original
+    df, so callers can look a specific event back up by df.index.
+
     Only OPEN PLAY completed passes can be flagged as progressive - corners,
     free kicks (direct/indirect), throw-ins, goal kicks, and keeper throws
     are excluded from the count, even if they'd otherwise meet the distance/
@@ -362,6 +373,7 @@ def compute_progressive_passes(df):
                               ((progress >= PROGRESSIVE_YARD_THRESHOLD) or ends_in_box) and \
                               ((not starts_def) or ends_in_box)
             prog_pass_records.append({
+                'orig_index': row.name,
                 'minute': row['minute'], 'second': row['second'], 'team': team,
                 'player': row['playerName'], 'receiver': receiver_map.get(row.name),
                 'x': row['x'], 'y': row['y'],
@@ -371,7 +383,16 @@ def compute_progressive_passes(df):
             })
             win.append(end_dist)
 
-    prog_passes_all = pd.DataFrame(prog_pass_records)
+    return pd.DataFrame(prog_pass_records)
+
+
+def compute_progressive_passes(df):
+    """
+    Only OPEN PLAY completed passes can be flagged as progressive - see
+    _compute_progressive_flags() above for the full rolling-window
+    definition/logic this reuses.
+    """
+    prog_passes_all = _compute_progressive_flags(df)
     prog_passes = prog_passes_all[prog_passes_all['is_progressive']].copy()
     prog_passes_out = prog_passes[
         ['minute', 'second', 'team', 'player', 'x', 'y', 'endX', 'endY', 'progress_yd', 'ends_in_box']
@@ -404,6 +425,84 @@ def compute_passes_received(df):
     return (received.groupby(['team', 'receiver']).size()
             .reset_index(name='passes_received')
             .rename(columns={'receiver': 'player'}))
+
+
+def compute_passing_pairs(df):
+    """
+    Passing Pairs tab: every distinct passer -> receiver combination
+    (completed passes only, any pass type - open play, corners, free kicks,
+    etc.), with a count of how many times that exact pair happened, split
+    by team. Receiver uses the same next-event, same-team heuristic as
+    _pass_receiver_map()/compute_passes_received() - WhoScored/Opta pass
+    events carry no explicit receiver field. Sorted within each team by
+    count, descending, so the most frequent combinations come first.
+    """
+    receiver_map = _pass_receiver_map(df)
+    work = df.sort_index().copy()
+    work['receiver'] = receiver_map
+    pass_mask = (work['type.displayName'] == 'Pass') & (work['outcomeType.displayName'] == 'Successful')
+    completed = work[pass_mask].dropna(subset=['receiver'])
+    pairs = (completed.groupby(['team', 'playerName', 'receiver']).size()
+             .reset_index(name='count')
+             .rename(columns={'playerName': 'passer'}))
+    pairs = pairs.sort_values(['team', 'count'], ascending=[True, False]).reset_index(drop=True)
+    return pairs[['team', 'passer', 'receiver', 'count']]
+
+
+# ============================================================
+# 3a. PASS MAP (single-player pass events, for the Streamlit pass map)
+# ============================================================
+def classify_pass_category(row):
+    """
+    One of four mutually-exclusive pass-map categories, in priority order:
+    an unsuccessful pass is always 'Incomplete' regardless of anything else
+    (key pass and progressive both require a completed pass by definition,
+    so they never apply to an incomplete one). A completed pass that
+    qualifies as BOTH a key pass (ShotAssist) and progressive is labeled
+    'Key Pass' - the rarer, more specific category wins over
+    the broader 'Progressive' one. Everything else completed is 'Completed'.
+    """
+    if not row['completed']:
+        return 'Incomplete'
+    if row['is_key_pass']:
+        return 'Key Pass'
+    if row['is_progressive']:
+        return 'Progressive'
+    return 'Completed'
+
+
+def get_player_passes(df, player):
+    """
+    Every Pass event (any outcome, open play or set piece) attempted by one
+    player, with the flags needed to color a pass map: completed (successful
+    outcome), is_progressive (the exact same rolling-window definition/logic
+    used for the Progressive Passes column elsewhere in this workbook, via
+    _compute_progressive_flags() - note
+    this is always False for an incomplete or set-piece pass, since the
+    Progressive Passes definition only ever applies to completed, open-play
+    passes), and is_key_pass (WhoScored's own 'ShotAssist' qualifier - same
+    source as the Shot Assists column on the Passing tab). 'category' is the
+    single mutually-exclusive label from classify_pass_category() above,
+    meant for coloring a pass map.
+    """
+    out_cols = ['minute', 'second', 'team', 'player', 'x', 'y', 'endX', 'endY',
+                'completed', 'is_progressive', 'is_key_pass', 'category']
+
+    work = df[(df['type.displayName'] == 'Pass') & (df['playerName'] == player)].copy()
+    if work.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    prog_flags = _compute_progressive_flags(df)
+    prog_lookup = (prog_flags.set_index('orig_index')['is_progressive']
+                   if not prog_flags.empty else pd.Series(dtype=bool))
+
+    work['completed'] = work['outcomeType.displayName'] == 'Successful'
+    work['is_key_pass'] = work['qualifiers_parsed'].apply(lambda qs: 'ShotAssist' in qual_names(qs))
+    work['is_progressive'] = [bool(prog_lookup.get(i, False)) for i in work.index]
+    work['category'] = work.apply(classify_pass_category, axis=1)
+    work = work.rename(columns={'playerName': 'player'})
+
+    return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
 
 
 # ============================================================
@@ -577,8 +676,16 @@ def body_part(row):
     return 'Other'
 
 
+def is_own_goal(row):
+    return row['type.displayName'] == 'Goal' and 'Own goal' in qual_names(row['qualifiers_parsed'])
+
+
 def compute_sca(df):
-    shots_idx = df.index[df['isShot'] == True].tolist()
+    # Own goals carry WhoScored's 'isShot' flag like any other Goal event,
+    # but they aren't a shot taken by the credited team - exclude them so
+    # they don't count as a shot or get their own SCA row.
+    own_goal_mask = df.apply(is_own_goal, axis=1)
+    shots_idx = df.index[(df['isShot'] == True) & ~own_goal_mask].tolist()
     sca_rows = []
     for shot_i in shots_idx:
         shot_team = df.at[shot_i, 'team']
@@ -1146,7 +1253,7 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
     box and carry numbers come from the Touches tab's team summary; Total
     Passes, Crosses, Passes into Final Third/Box, and Total SCA are summed
     from the Passing tab's per-player numbers; Progressive Passes matches
-    the Progressive Passes tab's team totals; 10+ Pass Sequences and Avg
+    the Passing tab's team-level total for that column; 10+ Pass Sequences and Avg
     Passes per Sequence both come from compute_sequences() - the latter is
     the mean passes-per-chain across ALL possession sequences (not just the
     10+ ones), using the exact same sequence definition; Field Tilt and PPDA
@@ -1226,6 +1333,21 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
     return totals
 
 
+def compute_against_totals(totals_out):
+    """
+    'Against' tab: the same columns as the Totals tab, but every stat is the
+    OPPONENT's number rather than the team's own - e.g. the 'vs Man Utd' row's
+    Shots value is Crystal Palace's total shots, since that's how many shots
+    were taken AGAINST Man Utd. Only meaningful (and only supported) for the
+    standard 2-team match case.
+    """
+    if len(totals_out) != 2:
+        raise ValueError("compute_against_totals expects exactly 2 teams in totals_out")
+    against = totals_out.iloc[::-1].reset_index(drop=True).copy()
+    against['team'] = totals_out['team'].apply(lambda t: f'vs {t}').values
+    return against
+
+
 # ============================================================
 # 6. WRITE WORKBOOK
 # ============================================================
@@ -1266,9 +1388,8 @@ def autosize(ws):
         ws.column_dimensions[get_column_letter(col)].width = min(max(w + 2, 10), 42)
 
 
-def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
-                    team_summary, player_third, passing_out, totals_out, defensive_actions,
-                    defensive_action_location, home_name, away_name):
+def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
+                    defensive_action_location, passing_pairs, home_name, away_name, against_totals=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -1276,6 +1397,12 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
     write_table(ws, totals_out, start_row=1)
     autosize(ws)
     ws.freeze_panes = 'A2'
+
+    if against_totals is not None:
+        ws = wb.create_sheet('Against')
+        write_table(ws, against_totals, start_row=1)
+        autosize(ws)
+        ws.freeze_panes = 'A2'
 
     ws = wb.create_sheet('Touches')
     teams = [t for t in [home_name, away_name] if t is not None] or sorted(player_third['team'].unique())
@@ -1319,10 +1446,12 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
     autosize(ws)
     ws.freeze_panes = 'A3'
 
-    ws = wb.create_sheet('Progressive Passes')
-    end1 = write_table(ws, prog_passes_out, start_row=1, title='All Progressive Passes')
-    end2 = write_table(ws, player_totals, start_row=end1 + 3, title='Progressive Passes by Player')
-    write_table(ws, team_totals, start_row=end2 + 3, title='Progressive Passes by Team')
+    ws = wb.create_sheet('Passing Pairs')
+    teams_for_pairs = [t for t in [home_name, away_name] if t is not None] or sorted(passing_pairs['team'].unique())
+    rPP = 1
+    for t in teams_for_pairs:
+        t_pairs = passing_pairs[passing_pairs['team'] == t].drop(columns=['team'])
+        rPP = write_table(ws, t_pairs, start_row=rPP, title=f'{t} - Passing Pairs') + 3
     autosize(ws)
     ws.freeze_panes = 'A3'
 
@@ -1372,7 +1501,10 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
         " search stops there. A rebound never gets a second SCA behind it. On the shooting team's own side,"
         " a Tackle or Interception winning the ball still counts as an SCA, but a BallRecovery (picking up a"
         " loose ball rather than winning a contested one) does not - it's skipped over, not counted, so the"
-        " search keeps looking further back for the real contributing action.",
+        " search keeps looking further back for the real contributing action. Own goals (a 'Goal' event"
+        " carrying WhoScored's 'Own goal' qualifier) are excluded entirely - they carry the same 'isShot'"
+        " flag as a real shot in the raw data, but they aren't a shot taken by the team credited with the"
+        " goal, so they don't count as a shot and don't get a row on this tab.",
         "",
         "Shot body part (Head / Left Foot / Right Foot / Other) is read directly from WhoScored's own"
         " qualifiers on the shot event.",
@@ -1393,19 +1525,20 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
         "Completed are OPEN PLAY only - passes with the 'Cross' qualifier, excluding any also tagged as a"
         " corner or free kick (direct or indirect). Passes into Final 1/3 and Passes into the Box are"
         " completed, open-play passes only (excluding corners, free kicks, throw-ins, goal kicks, and"
-        " keeper throws) that start outside that zone and end inside it. Progressive Passes reuses the same"
-        " definition/numbers as the Progressive Passes tab. Shot Assists is read directly from WhoScored's"
+        " keeper throws) that start outside that zone and end inside it. Progressive Passes uses the same"
+        " rolling-window definition described earlier in this Notes tab. Shot Assists is read directly from WhoScored's"
         " own 'ShotAssist' qualifier on the pass event (the pass immediately preceding a shot attempt),"
         " rather than re-derived from the Shot Creating Actions search. SCA is the combined total of times a"
         " player appears as either the SCA1 or SCA2 contributing action on the Shot Creating Actions tab"
         " (same search/logic as that tab, just totalled per player).",
         "",
         "Totals tab: one row per team, rolling up the same numbers already computed on the other tabs -"
-        " Shots is a count of shot events; Touches/thirds/Attacking Box and the carry columns come from the"
+        " Shots is a count of shot events (same rows as the Shot Creating Actions tab, so own goals are"
+        " excluded here too - see that tab's note); Touches/thirds/Attacking Box and the carry columns come from the"
         " Touches tab's team summary; Total Passes is the sum of each player's Passes Attempted; Crosses"
         " Attempted/Completed, Passes into Final Third, and Passes into Opponent's Box are summed from the"
         " Passing tab (open-play only, as defined there); Total SCA is the sum of each player's SCA column;"
-        " Progressive Passes matches the Progressive Passes tab's team totals.",
+        " Progressive Passes is the sum of each player's Progressive Passes column from the Passing tab.",
         "",
         "10+ Pass Sequences / Avg Passes per Sequence: possession sequences are built using the same"
         " windowed 'possession chain' algorithm found in the open-source WhoScored report notebooks behind"
@@ -1474,6 +1607,17 @@ def build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
         "",
         "Corners (Totals tab): count of Pass events carrying the 'CornerTaken' qualifier. Exact match"
         " against insight90's published corner counts for this match.",
+        "",
+        "Against tab: the mirror image of the Totals tab - same columns, but each row shows the OPPONENT's"
+        " numbers rather than the team's own. E.g. the 'vs Man Utd' row's Shots value is Crystal Palace's"
+        " total shots, since that's how many shots were taken against Man Utd. Only supports the standard"
+        " 2-team match case.",
+        "",
+        "Passing Pairs tab: every distinct passer -> receiver combination (completed passes only, any pass"
+        " type - open play, corners, free kicks, etc.), with a count of how many times that exact pair"
+        " happened, one table per team. Receiver uses the same next-event, same-team heuristic as the"
+        " Passes Received column on the Touches tab - WhoScored/Opta pass events carry no explicit receiver"
+        " field. Sorted by count, descending, within each team.",
     ]
     for i, line in enumerate(notes, start=1):
         c = ws.cell(row=i, column=1, value=line)
@@ -1502,10 +1646,13 @@ def main():
     print(f"Scraped {len(df)} events. Teams: {home_name} vs {away_name}")
 
     print("Computing progressive passes...")
-    prog_passes_out, player_totals, team_totals, progressive_received = compute_progressive_passes(df)
+    _, player_totals, team_totals, progressive_received = compute_progressive_passes(df)
 
     print("Computing passes received...")
     passes_received = compute_passes_received(df)
+
+    print("Computing passing pairs...")
+    passing_pairs = compute_passing_pairs(df)
 
     print("Computing carries...")
     team_carries, player_carries = compute_carries(df)
@@ -1539,10 +1686,12 @@ def main():
     totals_out = compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, team_sequences,
                                  field_tilt, ppda, defensive_stats, corners, home_name, away_name)
 
+    print("Computing against totals...")
+    against_totals = compute_against_totals(totals_out)
+
     print("Building workbook...")
-    wb = build_workbook(prog_passes_out, player_totals, team_totals, sca_out,
-                         team_summary, player_third, passing_out, totals_out, defensive_actions,
-                         defensive_action_location, home_name, away_name)
+    wb = build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
+                         defensive_action_location, passing_pairs, home_name, away_name, against_totals)
 
     filename = f"{sanitize_filename(home_name)}_vs_{sanitize_filename(away_name)}.xlsx"
     wb.save(filename)
