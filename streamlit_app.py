@@ -76,6 +76,8 @@ if st.button("Generate Report", type="primary"):
                 team_carries, player_carries = wr.compute_carries(df)
             with st.spinner("Computing shot-creating actions..."):
                 sca_out = wr.compute_sca(df)
+            with st.spinner("Computing shot pairs..."):
+                shot_pairs = wr.compute_shot_pairs(sca_out)
             with st.spinner("Computing touches..."):
                 team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
                                                                   passes_received, progressive_received)
@@ -101,6 +103,7 @@ if st.button("Generate Report", type="primary"):
             wb = wr.build_workbook(
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                 defensive_action_location, passing_pairs, home_name, away_name, against_totals,
+                shot_pairs,
             )
             buf = io.BytesIO()
             wb.save(buf)
@@ -126,6 +129,7 @@ if st.button("Generate Report", type="primary"):
                 "team_totals": team_totals,
                 "player_totals": player_totals,
                 "passing_pairs": passing_pairs,
+                "shot_pairs": shot_pairs,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_events": len(df),
@@ -341,6 +345,7 @@ if report:
     team_totals = report["team_totals"]
     player_totals = report["player_totals"]
     passing_pairs = report["passing_pairs"]
+    shot_pairs = report["shot_pairs"]
 
     st.success(f"Scraped {report['n_events']} events — {home_name} vs {away_name}")
 
@@ -351,9 +356,9 @@ if report:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tabP = st.tabs(
+    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabP = st.tabs(
         ["Totals", "Against", "Touches", "Passing", "Shot Creating Actions",
-         "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Pass Map"]
+         "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Shot Pairs", "Pass Map"]
     )
     with tab0:
         st.dataframe(totals_out, use_container_width=True)
@@ -364,7 +369,14 @@ if report:
     with tab2:
         st.dataframe(passing_out, use_container_width=True)
     with tab3:
-        st.dataframe(sca_out, use_container_width=True)
+        sca_teams = ([t for t in [home_name, away_name] if t is not None]
+                     or sorted(sca_out["team"].unique()))
+        for t in sca_teams:
+            st.subheader(t)
+            st.dataframe(
+                sca_out[sca_out["team"] == t].drop(columns=["team"]).reset_index(drop=True),
+                use_container_width=True,
+            )
     with tab4:
         st.dataframe(defensive_actions, use_container_width=True)
     with tab5:
@@ -380,6 +392,21 @@ if report:
             st.subheader(t)
             st.dataframe(
                 passing_pairs[passing_pairs["team"] == t].drop(columns=["team"]).reset_index(drop=True),
+                use_container_width=True,
+            )
+    with tab7:
+        st.write(
+            "Every passer -> shot-taker combination, with a count of how many times it happened, split "
+            "by team and sorted most-frequent first. The passer is whoever played the pass immediately "
+            "before the shot (SCA1) - shots preceded by a take-on, duel, rebound, or loose ball with no "
+            "such pass aren't included here."
+        )
+        shot_pairs_teams = ([t for t in [home_name, away_name] if t is not None]
+                             or sorted(shot_pairs["team"].unique()))
+        for t in shot_pairs_teams:
+            st.subheader(t)
+            st.dataframe(
+                shot_pairs[shot_pairs["team"] == t].drop(columns=["team"]).reset_index(drop=True),
                 use_container_width=True,
             )
     with tabP:

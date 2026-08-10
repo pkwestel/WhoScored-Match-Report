@@ -567,6 +567,7 @@ def compute_totals(match_json, shots_df, home_name, away_name):
             **{'Shots on Target': ('On Target', 'sum')},
             Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
             **{'Total xG': ('xG', 'sum')},
+            **{'Total post-shot xG': ('xGOT', 'sum')},
         )
         totals = totals.join(agg, how='left')
 
@@ -574,8 +575,9 @@ def compute_totals(match_json, shots_df, home_name, away_name):
     for c in ['Shots', 'Shots on Target', 'Goals']:
         if c in totals.columns:
             totals[c] = totals[c].astype(int)
-    if 'Total xG' in totals.columns:
-        totals['Total xG'] = totals['Total xG'].round(2)
+    for c in ['Total xG', 'Total post-shot xG']:
+        if c in totals.columns:
+            totals[c] = totals[c].round(2)
 
     # FotMob's own published match-stat groups, if present. Confirmed live
     # path is content.stats.Periods.All.stats[] (each entry: {title, key,
@@ -628,39 +630,229 @@ SHOT_BREAKDOWN_DIMENSIONS = [
     ('By Situation', 'Situation'),
     ('By Body Part', 'Body Part'),
 ]
+# FotMob's own flat expected-goals value for any penalty kick, regardless of
+# what (if anything) the shot map's own per-shot xG field happens to record
+# for it - used to back a penalty's xG out of a group's total (see
+# compute_shot_breakdowns() below) rather than trusting that field directly.
+PENALTY_XG = 0.79
 
 
-def compute_shot_breakdowns(shots_df):
+def extract_player_xa(match_json):
+    """
+    Per-player expected assists (xA) for this match - FotMob's own figure,
+    not derived from our shot map (our shot map has no assist/passer field
+    to compute xA from ourselves). Read from FotMob's per-player match stat
+    groups (content.playerStats, keyed by playerId - each value has a
+    'stats' list of groups, each group's 'stats' a dict keyed by stat label
+    to {key, stat: {value, ...}}). Looked up by matching a stat whose key or
+    label contains "expected assist" (covers however FotMob titles/keys it,
+    e.g. 'expected_assists' / 'Expected assists (xA)'). Players who didn't
+    play (stats: []) are skipped. Returns columns: Team, Player, xA.
+    """
+    columns = ['Team', 'Player', 'xA']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        stat_groups = pdata.get('stats')
+        if not stat_groups:
+            continue  # didn't play
+        xa_value = None
+        for group in stat_groups:
+            group_stats = group.get('stats') if isinstance(group, dict) else None
+            if not isinstance(group_stats, dict):
+                continue
+            for label, entry in group_stats.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get('key', '')).lower()
+                if 'expected_assist' in key or 'expected assist' in str(label).lower():
+                    stat_obj = entry.get('stat')
+                    val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                    if val is not None:
+                        xa_value = val
+                    break
+            if xa_value is not None:
+                break
+        if xa_value is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'xA': xa_value,
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def extract_player_minutes(match_json):
+    """
+    Per-player minutes played for this match - FotMob's own figure, read the
+    same way as extract_player_xa() (content.playerStats, keyed by playerId -
+    each value has a 'stats' list of groups, each group's 'stats' a dict
+    keyed by stat label to {key, stat: {value, ...}}). Looked up by matching
+    the 'top_stats' group's "Minutes played" entry (key 'minutes_played').
+    Players who didn't play (stats: []) are skipped. Returns columns: Team,
+    Player, Minutes Played.
+    """
+    columns = ['Team', 'Player', 'Minutes Played']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        stat_groups = pdata.get('stats')
+        if not stat_groups:
+            continue  # didn't play
+        minutes_value = None
+        for group in stat_groups:
+            group_stats = group.get('stats') if isinstance(group, dict) else None
+            if not isinstance(group_stats, dict):
+                continue
+            for label, entry in group_stats.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get('key', '')).lower()
+                if key == 'minutes_played' or str(label).lower() == 'minutes played':
+                    stat_obj = entry.get('stat')
+                    val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                    if val is not None:
+                        minutes_value = val
+                    break
+            if minutes_value is not None:
+                break
+        if minutes_value is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'Minutes Played': minutes_value,
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
     """
     Roll the shot map up along a few dimensions - by player, by situation
     (open play / set piece / penalty / corner / fast break, per FotMob's own
     'situation' field), and by body part - each broken out per team. Every
-    breakdown uses the same Shots / Shots on Target / Goals / Total xG
-    columns as the Totals tab, just at a finer grain.
+    breakdown uses the same Shots / Goals / Total xG columns as the Totals
+    tab (minus Shots on Target - not carried on this tab), just at a finer
+    grain. If player_xa (from extract_player_xa) is supplied, an extra xA
+    column is merged onto the 'By Player' table only - it's a per-player
+    stat, not something the other two dimensions (situation/body part) can
+    meaningfully carry. Likewise, if player_minutes (from
+    extract_player_minutes) is supplied, a Minutes Played column is merged
+    onto the 'By Player' table only, placed directly to the right of Player
+    (before Shots).
+
+    Penalties are excluded from Shots / Goals / Total xG everywhere on this
+    tab - a penalty kick isn't a shot in the run-of-play sense, so it
+    shouldn't inflate a player's/team's shot volume, expected goals, or
+    actual goals tally. A group's Total xG is computed as that group's full
+    xG total (every shot, penalties included) minus PENALTY_XG (FotMob's own
+    flat 0.79 expected-goals value for any penalty) times however many
+    penalties are in that group - rather than simply summing only the
+    non-penalty shots' own xG figures - so the result doesn't depend on
+    whatever value the shot map's own xG field happens to carry for a
+    penalty. A group made up entirely of penalties (most notably the
+    'Penalty' row that would otherwise appear on the By Situation table)
+    drops out of its breakdown entirely, since after this exclusion it would
+    only ever show up as an all-zero row.
+
+    Any player with xA > 0 is included on the 'By Player' table even if they
+    took zero (non-penalty) shots (e.g. a player who set up a good chance but
+    didn't shoot themselves) - their Shots/Goals/Total xG all show 0 in that
+    case.
 
     Returns an ordered dict: {'By Player': df, 'By Situation': df, 'By Body
     Part': df}, each sorted by team then descending shot count.
     """
     breakdowns = {}
     for label, group_col in SHOT_BREAKDOWN_DIMENSIONS:
-        cols = ['Team', group_col, 'Shots', 'Shots on Target', 'Goals', 'Total xG']
+        cols = ['Team', group_col, 'Shots', 'Goals', 'Total xG']
+        if label == 'By Player':
+            out_cols = ['Team', group_col, 'Minutes Played', 'Shots', 'Goals', 'Total xG', 'xA']
+        else:
+            out_cols = cols
         if shots_df.empty or group_col not in shots_df.columns:
-            breakdowns[label] = pd.DataFrame(columns=cols)
-            continue
-        work = shots_df.dropna(subset=[group_col])
-        if work.empty:
-            breakdowns[label] = pd.DataFrame(columns=cols)
-            continue
-        agg = work.groupby(['Team', group_col]).agg(
-            Shots=('Outcome', 'size'),
-            **{'Shots on Target': ('On Target', 'sum')},
-            Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
-            **{'Total xG': ('xG', 'sum')},
-        ).reset_index()
-        agg['Shots on Target'] = agg['Shots on Target'].astype(int)
-        agg['Total xG'] = agg['Total xG'].round(2)
+            agg = pd.DataFrame(columns=cols)
+        else:
+            work = shots_df.dropna(subset=[group_col]).copy()
+            if work.empty:
+                agg = pd.DataFrame(columns=cols)
+            else:
+                work['xG'] = work['xG'].fillna(0.0)
+                is_pen = work['Situation'] == 'Penalty'
+                non_pen = work[~is_pen]
+
+                if non_pen.empty:
+                    agg = pd.DataFrame(columns=cols)
+                else:
+                    group_keys = ['Team', group_col]
+                    total_xg_all = work.groupby(group_keys)['xG'].sum()
+                    pen_counts = is_pen.groupby([work['Team'], work[group_col]]).sum()
+
+                    agg = non_pen.groupby(group_keys).agg(
+                        Shots=('Outcome', 'size'),
+                        Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
+                    ).reset_index()
+                    agg = agg.set_index(group_keys)
+                    non_pen_xg = (total_xg_all.reindex(agg.index).fillna(0.0)
+                                  - PENALTY_XG * pen_counts.reindex(agg.index).fillna(0))
+                    agg['Total xG'] = non_pen_xg.clip(lower=0).round(2)
+                    agg = agg.reset_index()
+                    agg = agg[cols]
+
+        if label == 'By Player':
+            if player_xa is not None and not player_xa.empty:
+                agg = agg.merge(player_xa, how='left', on=['Team', 'Player'])
+            else:
+                agg['xA'] = 0.0
+            agg['xA'] = agg['xA'].fillna(0.0).round(2)
+
+            if player_minutes is not None and not player_minutes.empty:
+                agg = agg.merge(player_minutes, how='left', on=['Team', 'Player'])
+            else:
+                agg['Minutes Played'] = None
+
+            # Add zero-shot rows for any player with xA > 0 who isn't already
+            # in the table (took no shots themselves, but created a chance).
+            if player_xa is not None and not player_xa.empty:
+                existing = set(zip(agg['Team'], agg['Player']))
+                extra = player_xa[
+                    (player_xa['xA'] > 0)
+                    & ~player_xa.apply(lambda r: (r['Team'], r['Player']) in existing, axis=1)
+                ].copy()
+                if not extra.empty:
+                    extra['Shots'] = 0
+                    extra['Goals'] = 0
+                    extra['Total xG'] = 0.0
+                    extra['xA'] = extra['xA'].round(2)
+                    if player_minutes is not None and not player_minutes.empty:
+                        extra = extra.merge(player_minutes, how='left', on=['Team', 'Player'])
+                    else:
+                        extra['Minutes Played'] = None
+                    agg = pd.concat([agg, extra[out_cols]], ignore_index=True)
+
         agg = agg.sort_values(['Team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
-        breakdowns[label] = agg[cols]
+        breakdowns[label] = agg[out_cols]
     return breakdowns
 
 
@@ -772,11 +964,15 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         ws_breakdown = wb.create_sheet('Shot Breakdown')
         row = 1
         for label, df in shot_breakdowns.items():
-            c = ws_breakdown.cell(row=row, column=1, value=label)
-            c.font = Font(name='Arial', bold=True, size=12)
-            row += 1
-            row = write_table(ws_breakdown, df, start_row=row)
-            row += 1  # blank row between tables
+            teams_for_breakdown = ([t for t in [home_name, away_name] if t is not None]
+                                    or sorted(df['Team'].dropna().unique()))
+            for t in teams_for_breakdown:
+                t_df = df[df['Team'] == t].drop(columns=['Team']).reset_index(drop=True)
+                c = ws_breakdown.cell(row=row, column=1, value=f'{t} - {label}')
+                c.font = Font(name='Arial', bold=True, size=12)
+                row += 1
+                row = write_table(ws_breakdown, t_df, start_row=row)
+                row += 1  # blank row between tables
         autosize(ws_breakdown)
 
     ws_notes = wb.create_sheet('Notes')
@@ -796,18 +992,40 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         " hasn't been independently verified yet against a known reference; worth a sanity"
         " check against the match's actual shot chart before relying on them for plotting.",
         "",
-        "Totals tab: Shots / Shots on Target / Goals / Total xG are rolled up directly from"
-        " the Shots tab (Total xG is the sum of that team's shot-map xG values - this should"
-        " be very close to FotMob's own published xG stat for the match, worth spot-checking"
-        " on first run). All other columns are whichever aggregate stat groups FotMob itself"
+        "Totals tab: Shots / Shots on Target / Goals / Total xG / Total post-shot xG are rolled"
+        " up directly from the Shots tab (Total xG is the sum of that team's shot-map xG values -"
+        " this should be very close to FotMob's own published xG stat for the match, worth"
+        " spot-checking on first run; Total post-shot xG is the sum of xGOT - FotMob's expected"
+        " goals ON TARGET model, i.e. based on where the shot actually went rather than pre-shot"
+        " quality alone - so it only reflects shots that were on target, unlike Total xG which"
+        " covers every shot). All other columns are whichever aggregate stat groups FotMob itself"
         " published for this specific match (varies by competition/match - lower-profile"
         " matches may be missing groups like Expected Goals or Big Chances).",
         "",
-        "Shot Breakdown tab: the same Shots/Shots on Target/Goals/Total xG columns as the"
-        " Totals tab, rolled up per team along three dimensions instead of one - By Player,"
-        " By Situation (FotMob's own categorization: RegularPlay, FastBreak, SetPiece,"
-        " FromCorner, Penalty, etc.), and By Body Part. Shots missing that dimension's value"
-        " are dropped from that particular breakdown (rare).",
+        "Shot Breakdown tab: Shots/Goals/Total xG (no Shots on Target here - just Shots, Goals,"
+        " and Total xG), rolled up along three dimensions - By Player, By Situation (FotMob's own"
+        " categorization: RegularPlay, FastBreak, SetPiece, FromCorner, Penalty, etc.), and By Body"
+        " Part - each split into two separate tables, one per team, rather than one combined table"
+        " with a Team column. Unlike the Totals tab, EVERY penalty is excluded from these"
+        " columns here - a penalty kick isn't a shot in the run-of-play sense, so it doesn't count"
+        " as a Shot or a Goal on this tab, and its xG isn't included in Total xG either (so these"
+        " numbers will intentionally be lower than the Totals tab's for a match with any"
+        " penalties). Total xG for a group is that group's full xG total (every shot, penalties"
+        " included) minus 0.79 - FotMob's own flat expected-goals value for any penalty - times"
+        " however many penalties were in that group, rather than simply summing the non-penalty"
+        " shots' own xG figures, so the result doesn't depend on whatever the shot map's own xG"
+        " field happens to carry for a penalty. A group made up entirely of penalties (most notably"
+        " the 'Penalty' row that would otherwise appear on the By Situation table) drops out of its"
+        " breakdown entirely, since it would only ever show up as an all-zero row after this"
+        " exclusion. Shots missing that dimension's value are dropped from that particular"
+        " breakdown (rare). The By Player table additionally has a Minutes Played column (directly"
+        " to the right of Player) and an xA (expected assists) column - both FotMob's own"
+        " per-player match figures (read from their per-player match stat groups, not derived from"
+        " our shot map, since the shot map has no minutes/passer/assist fields to compute them from"
+        " ourselves). Players with shots but no resolvable Minutes Played figure show blank; no"
+        " resolvable xA figure shows 0.0. Any player with xA > 0 is included even if they took zero"
+        " non-penalty shots themselves (their Shots/Goals/Total xG all show 0) - so a player who"
+        " only created chances, without shooting, still shows up on this table.",
         "",
         "xG Breakdown table (second table on the Totals tab): independent cuts of the same"
         " shot map - 1st Half Shots / 2nd Half Shots and 1st Half xG / 2nd Half xG (from FotMob's"
@@ -866,7 +1084,8 @@ def main():
     totals_df = compute_totals(match_json, shots_df, home_name, away_name)
 
     print("Computing shot breakdowns...")
-    shot_breakdowns = compute_shot_breakdowns(shots_df)
+    player_xa = extract_player_xa(match_json)
+    shot_breakdowns = compute_shot_breakdowns(shots_df, player_xa)
 
     print("Computing xG breakdown...")
     xg_breakdown = compute_xg_breakdown(shots_df, home_name, away_name)

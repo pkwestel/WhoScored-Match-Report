@@ -91,7 +91,9 @@ if st.button("Generate Report", type="primary"):
                 totals_df = fr.compute_totals(match_json, shots_df, home_name, away_name)
 
             with st.spinner("Computing shot breakdowns..."):
-                shot_breakdowns = fr.compute_shot_breakdowns(shots_df)
+                player_xa = fr.extract_player_xa(match_json)
+                player_minutes = fr.extract_player_minutes(match_json)
+                shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
 
             with st.spinner("Computing xG breakdown..."):
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, home_name, away_name)
@@ -120,7 +122,14 @@ if st.button("Generate Report", type="primary"):
             with tab2:
                 for label, df in shot_breakdowns.items():
                     st.subheader(label)
-                    st.dataframe(df, use_container_width=True)
+                    breakdown_teams = ([t for t in [home_name, away_name] if t is not None]
+                                        or sorted(df["Team"].dropna().unique()))
+                    for t in breakdown_teams:
+                        st.caption(t)
+                        st.dataframe(
+                            df[df["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
+                            use_container_width=True,
+                        )
 
             raw_json_path = os.path.join(out_dir, f"fotmob_raw_{match_id}.json")
             if os.path.exists(raw_json_path):

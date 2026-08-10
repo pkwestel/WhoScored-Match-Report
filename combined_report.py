@@ -11,10 +11,12 @@ own plain name, since there's nothing to disambiguate there - see
 build_combined_workbook() below.
 
 The one genuinely new thing here is the "Shot Creating Actions" tab -
-WhoScored's own shot-creating-actions table (Player, Team, Distance, Body
-Part, SCA1/SCA2) with FotMob's own Minute/Added Time plus its shot-quality
-fields (xG, PSxG, Outcome, Situation) attached to each row - see
-compute_combined_shots() for the matching logic and its limitations.
+WhoScored's own shot-creating-actions table (Player, Distance, Body Part,
+SCA1/SCA2) with FotMob's own Minute/Added Time plus its shot-quality fields
+(xG, PSxG, Outcome, Situation) attached to each row - see
+compute_combined_shots() for the matching logic and its limitations. Split
+into two tables (one per team), each followed by a small "Top 3 Shots by
+xG" mini table for that team - see build_combined_workbook() below.
 
 This module has no scraping of its own - combined_streamlit_app.py drives
 whoscored_report.py and fotmob_report.py's own scrape/compute/build_workbook
@@ -218,7 +220,7 @@ def _copy_sheet(src_ws, dst_wb, new_title):
     return dst_ws
 
 
-def build_combined_workbook(wb_ws, wb_fm, combined_shots):
+def build_combined_workbook(wb_ws, wb_fm, combined_shots, home_name=None, away_name=None):
     """
     Assembles the combined workbook from two ALREADY-BUILT standalone
     workbooks (whoscored_report.build_workbook() / fotmob_report.
@@ -230,6 +232,14 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots):
     "Shot Creating Actions" sheet and FotMob's own "Shots" sheet are
     dropped entirely, since they're replaced by the single new merged
     "Shot Creating Actions" tab built here instead.
+
+    home_name/away_name (WhoScored's own team names, matching the Team
+    values already on combined_shots - see compute_combined_shots) control
+    which team's table is written first; if not supplied, teams are ordered
+    alphabetically. The merged Shot Creating Actions tab is split into two
+    tables, one per team, and each team's table is followed - two blank
+    rows down - by a small "Top 3 Shots by xG" table (Minute, Player, xG)
+    for that team, before moving on to the next team's section.
     """
     wb = Workbook()
     wb.remove(wb.active)
@@ -243,7 +253,19 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots):
             # WhoScored workbook, rather than landing after every other
             # WS tab.
             ws = wb.create_sheet('Shot Creating Actions')
-            wr.write_table(ws, combined_shots, start_row=1)
+            teams_for_sca = ([t for t in [home_name, away_name] if t is not None]
+                              or sorted(combined_shots['Team'].dropna().unique()))
+            row = 1
+            for t in teams_for_sca:
+                t_shots = combined_shots[combined_shots['Team'] == t].drop(columns=['Team']).reset_index(drop=True)
+                row = wr.write_table(ws, t_shots, start_row=row, title=f'{t} - Shot Creating Actions') + 3
+
+                top3 = (t_shots[['Minute', 'Player', 'xG']]
+                        .dropna(subset=['xG'])
+                        .sort_values('xG', ascending=False)
+                        .head(3)
+                        .reset_index(drop=True))
+                row = wr.write_table(ws, top3, start_row=row, title=f'{t} - Top 3 Shots by xG') + 3
             wr.autosize(ws)
             ws.freeze_panes = 'A2'
             continue
@@ -267,10 +289,15 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots):
         " from each standalone report) for the full methodology behind every column on those tabs.",
         "",
         "Shot Creating Actions tab (the one genuinely new tab here, not just a copy): one row per"
-        " shot, using WhoScored's own shot list as the spine for Player, Team, Distance, Body Part,"
-        " and SCA1/SCA2 (already excludes own goals, see 'WS - Notes'), with FotMob's own Minute and"
+        " shot, using WhoScored's own shot list as the spine for Player, Distance, Body Part, and"
+        " SCA1/SCA2 (already excludes own goals, see 'WS - Notes'), with FotMob's own Minute and"
         " Added Time plus its shot-quality fields (xG, PSxG = FotMob's post-shot xG/xGOT, Outcome,"
-        " Situation) attached to each row.",
+        " Situation) attached to each row. Split into two tables, one per team, rather than one"
+        " combined table with a Team column. Right under each team's table (two blank rows down) is"
+        " a small 'Top 3 Shots by xG' table for that team - just Minute, Player, and xG, sorted"
+        " highest xG first - pulled from that same team's shot list above it; shots with no"
+        " resolvable xG (a shot-count mismatch between the two sources - see below) are left out of"
+        " this ranking rather than sorting to either end.",
         "",
         "WhoScored and FotMob don't share any common shot ID, so shots are matched by TEAM, then"
         " paired up in strict chronological order within that team - a team's 1st shot of the match"

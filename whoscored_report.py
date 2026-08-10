@@ -3,8 +3,8 @@ WhoScored match report generator.
 
 Scrapes a WhoScored match-centre page and produces a styled Excel workbook
 with tabs: Totals, Against, Touches, Passing, Shot Creating Actions,
-Defensive Actions, Defensive Action Location, and Passing Pairs (plus a
-Notes tab documenting every definition/assumption used).
+Defensive Actions, Defensive Action Location, Passing Pairs, and Shot Pairs
+(plus a Notes tab documenting every definition/assumption used).
 
 SETUP (one-time):
     Drop this file into the root of your cloned football-data-webscraping
@@ -110,10 +110,6 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     against a benchmark; close but not exact (unlike the counts above).
   - Passes Received / Progressive Passes Received (Touches tab): receiver
     inferred as the next event's player, if that event is the same team.
-  - Minutes Played (Touches tab): inferred from SubstitutionOn/
-    SubstitutionOff events and straight red cards, using a continuous
-    cross-period match clock. Doesn't account for a second yellow (an
-    indirect red) - only a card carrying WhoScored's own 'Red' qualifier.
   - Defensive Actions tab (per player, by team): Tackles/Interceptions are
     direct counts; Passes Blocked uses the BlockedPass event's own player;
     Shots Blocked uses the player of the 'Save' event immediately after a
@@ -539,48 +535,6 @@ def _add_cumulative_mins(df):
     return d
 
 
-def compute_minutes_played(df):
-    """
-    Minutes Played per player - inferred from WhoScored's own
-    SubstitutionOn/SubstitutionOff events and straight red cards (a player
-    sent off stops accruing minutes at that point), using the same
-    continuous cross-period clock as compute_carries() below
-    (_add_cumulative_mins), so second-half/stoppage-time minutes count
-    correctly. A player with no SubstitutionOn event played from kickoff
-    (minute 0); a player with no SubstitutionOff or red-card event played
-    to the final whistle. Does NOT account for a second yellow card (an
-    indirect red) - only a card event carrying WhoScored's own 'Red'
-    qualifier directly counts as an early end to a player's minutes.
-    """
-    d = _add_cumulative_mins(df)
-    play_periods = {'FirstHalf', 'SecondHalf', 'FirstPeriodOfExtraTime', 'SecondPeriodOfExtraTime'}
-    playable = d[d['period.displayName'].isin(play_periods)]
-    match_end = playable['cumulative_mins'].max() if len(playable) else 90.0
-
-    sub_on = (d[d['type.displayName'] == 'SubstitutionOn'].dropna(subset=['playerId'])
-              .set_index('playerId')['cumulative_mins'])
-    sub_off = (d[d['type.displayName'] == 'SubstitutionOff'].dropna(subset=['playerId'])
-               .set_index('playerId')['cumulative_mins'])
-
-    is_card = d['type.displayName'] == 'Card'
-    is_red = is_card & d['qualifiers_parsed'].apply(lambda qs: 'Red' in qual_names(qs))
-    red_cards = d[is_red].dropna(subset=['playerId']).set_index('playerId')['cumulative_mins']
-
-    players = df.dropna(subset=['playerId', 'playerName', 'team']).drop_duplicates('playerId')
-    records = []
-    for _, row in players.iterrows():
-        pid = row['playerId']
-        start = sub_on.get(pid, 0.0)
-        candidates = [t for t in [sub_off.get(pid), red_cards.get(pid), match_end] if pd.notna(t)]
-        end = min(candidates) if candidates else match_end
-        records.append({
-            'team': row['team'], 'player': row['playerName'],
-            'minutes_played': round(max(0.0, end - start)),
-        })
-
-    return pd.DataFrame(records, columns=['team', 'player', 'minutes_played'])
-
-
 def compute_carries(df):
     """
     WhoScored/Opta data has no explicit "carry" event, so carries are
@@ -795,6 +749,29 @@ def compute_sca(df):
     return pd.DataFrame(sca_rows)
 
 
+def compute_shot_pairs(sca_out):
+    """
+    Shot Pairs tab: every distinct passer -> shot-taker combination, with a
+    count of how many times that exact pair happened, split by team. The
+    passer is whoever played the SCA1 action (from compute_sca() above) for
+    that shot, and only counts when that immediate preceding action was
+    itself a pass (any type - open play, corner, free kick, etc., i.e. any
+    classify_action() value starting with "Pass"). Shots whose SCA1 was a
+    take-on, duel, rebound off a blocked/saved shot, or a loose ball with no
+    such preceding pass aren't a passer -> shooter "pair" and are excluded.
+    Sorted within each team by count, descending, so the most frequent
+    combinations come first.
+    """
+    work = sca_out.copy()
+    pass_mask = work['sca1_action'].astype(str).str.startswith('Pass')
+    paired = work[pass_mask].dropna(subset=['sca1_player'])
+    pairs = (paired.groupby(['team', 'player', 'sca1_player']).size()
+             .reset_index(name='count')
+             .rename(columns={'player': 'shot_taker', 'sca1_player': 'passer'}))
+    pairs = pairs.sort_values(['team', 'count'], ascending=[True, False]).reset_index(drop=True)
+    return pairs[['team', 'shot_taker', 'passer', 'count']]
+
+
 # ============================================================
 # 5. TOUCHES (renamed from "Touches by Third"), with carries merged in
 # ============================================================
@@ -854,13 +831,9 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
         'progressive_passes_received': 'Progressive Passes Received',
     })
 
-    minutes_played = compute_minutes_played(df)
-    player_third = player_third.merge(minutes_played, on=['team', 'player'], how='left')
-    player_third = player_third.rename(columns={'minutes_played': 'Minutes Played'})
-
     player_third = player_third[[
-        'team', 'player', 'Minutes Played', 'Total Touches', 'Own third', 'Middle third', 'Final third',
-        'Attacking Box', 'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
+        'team', 'player', 'Total Touches', 'Own third', 'Middle third', 'Final third', 'Attacking Box',
+        'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
         'Passes Received', 'Progressive Passes Received',
     ]]
     player_third = player_third.sort_values(['team', 'Total Touches'], ascending=[True, False])
@@ -1440,7 +1413,8 @@ def autosize(ws):
 
 
 def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
-                    defensive_action_location, passing_pairs, home_name, away_name, against_totals=None):
+                    defensive_action_location, passing_pairs, home_name, away_name, against_totals=None,
+                    shot_pairs=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -1474,9 +1448,13 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
     ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Shot Creating Actions')
-    write_table(ws, sca_out, start_row=1)
+    teams_for_sca = [t for t in [home_name, away_name] if t is not None] or sorted(sca_out['team'].unique())
+    rSCA = 1
+    for t in teams_for_sca:
+        t_sca = sca_out[sca_out['team'] == t].drop(columns=['team']).reset_index(drop=True)
+        rSCA = write_table(ws, t_sca, start_row=rSCA, title=f'{t} - Shot Creating Actions') + 3
     autosize(ws)
-    ws.freeze_panes = 'A2'
+    ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Defensive Actions')
     teams_for_def = [t for t in [home_name, away_name] if t is not None] or sorted(defensive_actions['team'].unique())
@@ -1505,6 +1483,17 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         rPP = write_table(ws, t_pairs, start_row=rPP, title=f'{t} - Passing Pairs') + 3
     autosize(ws)
     ws.freeze_panes = 'A3'
+
+    if shot_pairs is not None:
+        ws = wb.create_sheet('Shot Pairs')
+        teams_for_shot_pairs = ([t for t in [home_name, away_name] if t is not None]
+                                 or sorted(shot_pairs['team'].unique()))
+        rSP = 1
+        for t in teams_for_shot_pairs:
+            t_shot_pairs = shot_pairs[shot_pairs['team'] == t].drop(columns=['team'])
+            rSP = write_table(ws, t_shot_pairs, start_row=rSP, title=f'{t} - Shot Pairs') + 3
+        autosize(ws)
+        ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Notes')
     notes = [
@@ -1637,14 +1626,8 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " next event belongs to the SAME team (otherwise no receiver is recorded). Progressive Passes"
         " Received uses the same logic, restricted to passes already flagged progressive.",
         "",
-        "Minutes Played (Touches tab): inferred from WhoScored's own SubstitutionOn/SubstitutionOff"
-        " events plus straight red cards, using a continuous match clock that runs across both halves"
-        " (and extra time, if any) rather than resetting at half-time - so second-half and stoppage-time"
-        " minutes count correctly. A player with no SubstitutionOn event is assumed to have started from"
-        " kickoff (minute 0); a player with no SubstitutionOff event or red card is assumed to have"
-        " played to the final whistle. This does NOT account for a second yellow card (an indirect red) -"
-        " only a card event carrying WhoScored's own 'Red' qualifier directly ends a player's minutes"
-        " early. Rounded to the nearest whole minute.",
+        "Shot Creating Actions tab: one table per team (own goals already excluded - see the Totals"
+        " tab note above) rather than one combined table with a Team column.",
         "",
         "Defensive Actions tab: per-player totals, one table per team, for every player who appears"
         " anywhere in the match. Tackles and Interceptions are direct event counts; Passes Blocked counts"
@@ -1678,6 +1661,13 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " happened, one table per team. Receiver uses the same next-event, same-team heuristic as the"
         " Passes Received column on the Touches tab - WhoScored/Opta pass events carry no explicit receiver"
         " field. Sorted by count, descending, within each team.",
+        "",
+        "Shot Pairs tab: every distinct passer -> shot-taker combination, with a count of how many times"
+        " that exact pair happened, one table per team. The passer is whoever played the SCA1 action (the"
+        " very first Shot Creating Actions column) for that shot, and only counts when that immediate"
+        " preceding action was itself a pass (any type). Shots whose SCA1 was a take-on, a duel, a rebound"
+        " off a blocked/saved shot, or a loose ball with no such preceding pass aren't a passer -> shooter"
+        " pair and are excluded from this tab. Sorted by count, descending, within each team.",
     ]
     for i, line in enumerate(notes, start=1):
         c = ws.cell(row=i, column=1, value=line)
@@ -1720,6 +1710,9 @@ def main():
     print("Computing shot-creating actions...")
     sca_out = compute_sca(df)
 
+    print("Computing shot pairs...")
+    shot_pairs = compute_shot_pairs(sca_out)
+
     print("Computing touches...")
     team_summary, player_third = compute_touches(df, team_carries, player_carries,
                                                   passes_received, progressive_received)
@@ -1751,7 +1744,8 @@ def main():
 
     print("Building workbook...")
     wb = build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
-                         defensive_action_location, passing_pairs, home_name, away_name, against_totals)
+                         defensive_action_location, passing_pairs, home_name, away_name, against_totals,
+                         shot_pairs)
 
     filename = f"{sanitize_filename(home_name)}_vs_{sanitize_filename(away_name)}.xlsx"
     wb.save(filename)
