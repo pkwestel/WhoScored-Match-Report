@@ -126,8 +126,14 @@ if st.button("Generate Combined Report", type="primary"):
                 player_minutes = fr.extract_player_minutes(fm_match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
-                player_windows = fr.extract_player_windows(fm_match_json, player_minutes)
+                player_windows = fr.extract_player_windows(fm_match_json, player_minutes, shots_df)
                 plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)
+                plus_minus_warning = (
+                    "Plus Minus is empty - FotMob didn't return any lineup/substitution data for "
+                    "this match (no starters/subs list at all), which happens most often for a "
+                    "match FotMob hasn't fully finished processing yet. Try again later, or check "
+                    "the 'lineup' section of the saved fotmob_raw_*.json debug file."
+                ) if player_windows.empty else None
 
             wb_fm = fr.build_workbook(shots_df, fm_totals_df, fm_home_name, fm_away_name, fm_match_id,
                                        shot_breakdowns, xg_breakdown, plus_minus)
@@ -162,6 +168,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
                 "plus_minus": plus_minus,
+                "plus_minus_warning": plus_minus_warning,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_ws_events": len(df),
@@ -311,9 +318,12 @@ if report:
             "team into one probability rather than summing them, since two shots in the same "
             "minute are almost certainly a rebound/scramble in the same phase of play."
         )
+        if report.get("plus_minus_warning"):
+            st.warning(report["plus_minus_warning"])
         plus_minus = report["plus_minus"]
-        pm_teams = ([t for t in [report["fm_home_name"], report["fm_away_name"]] if t is not None]
-                    or sorted(plus_minus["Team"].dropna().unique()))
+        pm_teams = ([] if plus_minus.empty else
+                    ([t for t in [report["fm_home_name"], report["fm_away_name"]] if t is not None]
+                     or sorted(plus_minus["Team"].dropna().unique())))
         for t in pm_teams:
             st.subheader(t)
             st.dataframe(

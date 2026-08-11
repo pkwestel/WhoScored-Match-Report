@@ -98,8 +98,19 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing xG breakdown..."):
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, home_name, away_name)
 
+            with st.spinner("Computing plus/minus..."):
+                player_windows = fr.extract_player_windows(match_json, player_minutes, shots_df)
+                plus_minus = fr.compute_plus_minus(shots_df, player_windows, home_name, away_name)
+                if player_windows.empty:
+                    st.warning(
+                        "Plus Minus is empty - FotMob didn't return any lineup/substitution data for "
+                        "this match (no starters/subs list at all), which happens most often for a "
+                        "match FotMob hasn't fully finished processing yet. Try again later, or check "
+                        "the 'lineup' section of the saved fotmob_raw_*.json debug file."
+                    )
+
             wb = fr.build_workbook(shots_df, totals_df, home_name, away_name, match_id,
-                                    shot_breakdowns, xg_breakdown)
+                                    shot_breakdowns, xg_breakdown, plus_minus)
             buf = io.BytesIO()
             wb.save(buf)
             buf.seek(0)
@@ -112,7 +123,7 @@ if st.button("Generate Report", type="primary"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            tab0, tab1, tab2 = st.tabs(["Totals", "Shots", "Shot Breakdown"])
+            tab0, tab1, tab2, tab3 = st.tabs(["Totals", "Shots", "Shot Breakdown", "Plus Minus"])
             with tab0:
                 st.dataframe(totals_df, use_container_width=True)
                 st.subheader("xG Breakdown (by half, by phase)")
@@ -130,6 +141,22 @@ if st.button("Generate Report", type="primary"):
                             df[df["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
                             use_container_width=True,
                         )
+            with tab3:
+                st.write(
+                    "Goals/Shots/xG For and Against, totaled for exactly the minutes each player was "
+                    "on the pitch. Penalties are excluded, and xG combines same-minute shots by the "
+                    "same team into one probability rather than summing them - see the Notes tab in "
+                    "the downloaded workbook for the full methodology."
+                )
+                pm_teams = ([] if plus_minus.empty else
+                            ([t for t in [home_name, away_name] if t is not None]
+                             or sorted(plus_minus["Team"].dropna().unique())))
+                for t in pm_teams:
+                    st.subheader(t)
+                    st.dataframe(
+                        plus_minus[plus_minus["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
+                        use_container_width=True,
+                    )
 
             raw_json_path = os.path.join(out_dir, f"fotmob_raw_{match_id}.json")
             if os.path.exists(raw_json_path):

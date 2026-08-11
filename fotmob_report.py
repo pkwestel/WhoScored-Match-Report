@@ -754,7 +754,7 @@ def extract_player_minutes(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
-def extract_player_windows(match_json, player_minutes=None):
+def extract_player_windows(match_json, player_minutes=None, shots_df=None):
     """
     Per-player on-pitch window for this match: Team, Player, start_minute,
     end_minute, Minutes Played, subbed_off. Backs the Plus Minus tab (see
@@ -769,16 +769,24 @@ def extract_player_windows(match_json, player_minutes=None):
 
     start_minute is that player's 'subIn' time if they came on as a
     substitute, else 0 (they started the match). end_minute is their
-    'subOut' time if they were substituted off at some point; otherwise
-    (played to the final whistle - whether a starter never subbed off, or
-    a substitute who stayed on) end_minute is start_minute + their own
-    total Minutes Played figure (from extract_player_minutes/FotMob's own
-    per-player stat, passed in via player_minutes or computed here if not
-    given) - using their own actual total rather than assuming a flat
-    90/95 for everyone means stoppage time, and a player sent off without
-    being substituted (their own Minutes Played already reflects the
-    early end), are both handled correctly without any extra red-card
-    detection logic.
+    'subOut' time if they were substituted off - this case needs nothing
+    else, since sub_in/sub_out times alone fully define their window.
+    Otherwise (played to the final whistle - a starter never subbed off,
+    or a substitute who stayed on) end_minute is start_minute + however
+    many minutes they're known to have played: preferably FotMob's own
+    per-player Minutes Played figure (from extract_player_minutes, passed
+    in via player_minutes or computed here if not given) since that
+    already correctly accounts for stoppage time; but FotMob's per-player
+    stats (unlike the shot map) are sometimes missing or incomplete, most
+    often for a very recently finished match FotMob hasn't fully processed
+    yet - when that per-player figure isn't available for a player who
+    otherwise clearly appeared (has a lineup rating, or a sub event),
+    end_minute falls back to a match-wide estimate instead: the latest
+    effective minute (Minute + Added Time) seen anywhere on the shot map
+    (passed in via shots_df), or a flat 90 if there's no shot map either.
+    That fallback is necessarily an approximation - it can't know about
+    stoppage time beyond whatever the shot map itself shows - which is
+    why FotMob's own figure is always preferred when it's there.
 
     subbed_off (bool) tells compute_plus_minus() how to treat the boundary
     at end_minute: a player who WAS subbed off doesn't get credit for the
@@ -787,9 +795,14 @@ def extract_player_windows(match_json, player_minutes=None):
     minute itself (so a stoppage-time shot at the very end still counts
     for them).
 
-    Bench players who never actually appeared (no resolvable Minutes
-    Played figure at all) are skipped entirely - there's no on-pitch
-    window to give them.
+    Bench players who never actually appeared (no lineup rating, no sub
+    event, and no resolvable Minutes Played figure) are skipped entirely -
+    there's no on-pitch window to give them. If FotMob returns no lineup
+    detail at all for this match (a bare team name/id with no starters/
+    subs lists - this does happen, most often for a match FotMob hasn't
+    finished processing), this returns an empty DataFrame; there is
+    nothing to fall back to in that case since there's no per-player data
+    of any kind to start from.
     """
     columns = ['Team', 'Player', 'start_minute', 'end_minute', 'Minutes Played', 'subbed_off']
     lineup = match_json.get('lineup') if isinstance(match_json, dict) else None
@@ -799,6 +812,12 @@ def extract_player_windows(match_json, player_minutes=None):
     if player_minutes is None:
         player_minutes = extract_player_minutes(match_json)
     minutes_lookup = {(r['Team'], r['Player']): r['Minutes Played'] for _, r in player_minutes.iterrows()}
+
+    fallback_end = 90.0
+    if shots_df is not None and not shots_df.empty:
+        eff = shots_df['Minute'].fillna(0) + shots_df['Added Time'].fillna(0)
+        if len(eff):
+            fallback_end = max(fallback_end, eff.max())
 
     rows = []
     for side_key in ('homeTeam', 'awayTeam'):
@@ -811,23 +830,30 @@ def extract_player_windows(match_json, player_minutes=None):
             if not isinstance(p, dict):
                 continue
             name = p.get('name')
-            minutes_played = minutes_lookup.get((team_name, name))
-            if minutes_played is None:
-                continue  # never actually appeared
-
             perf = p.get('performance') or {}
             sub_events = perf.get('substitutionEvents') or []
             sub_in = next((e.get('time') for e in sub_events if e.get('type') == 'subIn'), None)
             sub_out = next((e.get('time') for e in sub_events if e.get('type') == 'subOut'), None)
+            rating = perf.get('rating')
+            minutes_played = minutes_lookup.get((team_name, name))
+
+            appeared = minutes_played is not None or sub_in is not None or sub_out is not None or rating is not None
+            if not appeared:
+                continue  # never actually appeared (unused bench player)
 
             start = sub_in if sub_in is not None else 0
             subbed_off = sub_out is not None
-            end = sub_out if subbed_off else (start + minutes_played)
+            if subbed_off:
+                end = sub_out
+            elif minutes_played is not None:
+                end = start + minutes_played
+            else:
+                end = fallback_end  # FotMob's own per-player total wasn't available - best effort
 
             rows.append({
                 'Team': team_name, 'Player': name,
                 'start_minute': start, 'end_minute': end,
-                'Minutes Played': round(minutes_played),
+                'Minutes Played': round(minutes_played) if minutes_played is not None else round(end - start),
                 'subbed_off': subbed_off,
             })
 
@@ -1227,6 +1253,16 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         " a player who finished the match DOES get credit for the final whistle minute itself, so"
         " a stoppage-time shot right at the end still counts for them. Bench players who never"
         " actually appeared aren't included - there's no on-pitch window to give them.",
+        "",
+        "FotMob's own per-player Minutes Played figure is sometimes missing or incomplete - most"
+        " often for a very recently finished match FotMob hasn't fully processed yet - even when"
+        " the shot map itself is already complete. When that happens for a player who otherwise"
+        " clearly appeared (a lineup rating, or a sub event) and wasn't substituted off, their"
+        " window falls back to an estimated match end (the latest minute seen anywhere on the shot"
+        " map, or a flat 90 if there's no shot map either) rather than being left out - see"
+        " extract_player_windows(). If FotMob returns NO lineup detail at all for this match (no"
+        " starters/subs list, just a bare team name), this tab is empty entirely - there's no"
+        " per-player data of any kind to build a window from in that case.",
         "",
         "Penalties are excluded from every one of the six Plus Minus columns, the same treatment as"
         " the Shot Breakdown tab. xG/xG Against are NOT a simple sum of each shot's own xG value -"
