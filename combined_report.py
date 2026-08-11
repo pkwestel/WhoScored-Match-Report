@@ -5,10 +5,12 @@ Combined WhoScored + FotMob Match Report
 Merges the two independently-scraped reports (whoscored_report.py and
 fotmob_report.py) for the SAME match into one workbook: every tab from
 each source is kept exactly as that source's own build_workbook() already
-produces it. Only Totals and Notes - the two names that collide between
-the sources - are prefixed ("WS - " / "FM - "); every other tab keeps its
-own plain name, since there's nothing to disambiguate there - see
-build_combined_workbook() below.
+produces it, EXCEPT each source's own "Notes" tab - those are dropped
+entirely (along with this module's own former "Notes" tab), by request;
+none of "WS - Notes" / "FM - Notes" / "Notes" appear in this workbook.
+Totals is the only remaining name that collides between the sources, so
+it's the only tab still prefixed ("WS - " / "FM - "); every other tab
+keeps its own plain name - see build_combined_workbook() below.
 
 The one genuinely new thing here is the "Shot Creating Actions" tab -
 WhoScored's own shot-creating-actions table (Player, Distance, Body Part,
@@ -30,7 +32,6 @@ from copy import copy
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font
 
 import whoscored_report as wr
 
@@ -225,13 +226,16 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots, home_name=None, away_n
     Assembles the combined workbook from two ALREADY-BUILT standalone
     workbooks (whoscored_report.build_workbook() / fotmob_report.
     build_workbook()) plus the new merged shots table. Every sheet from
-    each source is copied over wholesale. Only the Totals and Notes tabs -
-    the two names that collide between the sources - are prefixed
-    "WS - " / "FM - "; every other tab keeps its own plain name, since
-    there's no naming conflict to resolve there. WhoScored's own
-    "Shot Creating Actions" sheet and FotMob's own "Shots" sheet are
-    dropped entirely, since they're replaced by the single new merged
-    "Shot Creating Actions" tab built here instead.
+    each source is copied over wholesale, EXCEPT: WhoScored's own
+    "Shot Creating Actions" sheet and FotMob's own "Shots" sheet, which are
+    dropped entirely since they're replaced by the single new merged
+    "Shot Creating Actions" tab built here instead; and both sources' own
+    "Notes" sheets, along with the combined report's own former "Notes"
+    tab, which are dropped entirely and not rebuilt here - none of the
+    three ("WS - Notes", "FM - Notes", "Notes") are included in this
+    workbook, by request. Totals is the only remaining name that collides
+    between the sources, so it's the only tab still prefixed "WS - " /
+    "FM - "; every other tab keeps its own plain name.
 
     home_name/away_name (WhoScored's own team names, matching the Team
     values already on combined_shots - see compute_combined_shots) control
@@ -239,14 +243,21 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots, home_name=None, away_n
     alphabetically. The merged Shot Creating Actions tab is split into two
     tables, one per team, and each team's table is followed - two blank
     rows down - by a small "Top 3 Shots by xG" table (Minute, Player, xG)
-    for that team, before moving on to the next team's section.
+    for that team, before moving on to the next team's section. Penalties
+    (Situation == 'Penalty') are excluded from that mini table specifically -
+    a penalty's xG is a fixed, known value rather than a reflection of shot
+    quality, so it would otherwise crowd out more meaningful entries. The
+    main per-team Shot Creating Actions table above it still includes
+    penalties untouched.
     """
     wb = Workbook()
     wb.remove(wb.active)
 
-    ws_prefixed_titles = {'Totals', 'Notes'}
+    ws_prefixed_titles = {'Totals'}
 
     for title in wb_ws.sheetnames:
+        if title == 'Notes':
+            continue  # Notes tabs are dropped entirely from the combined report
         if title == 'Shot Creating Actions':
             # Replaced by the new merged tab, inserted right here so it
             # keeps the same relative position it held in the standalone
@@ -260,7 +271,7 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots, home_name=None, away_n
                 t_shots = combined_shots[combined_shots['Team'] == t].drop(columns=['Team']).reset_index(drop=True)
                 row = wr.write_table(ws, t_shots, start_row=row, title=f'{t} - Shot Creating Actions') + 3
 
-                top3 = (t_shots[['Minute', 'Player', 'xG']]
+                top3 = (t_shots[t_shots['Situation'] != 'Penalty'][['Minute', 'Player', 'xG']]
                         .dropna(subset=['xG'])
                         .sort_values('xG', ascending=False)
                         .head(3)
@@ -273,59 +284,9 @@ def build_combined_workbook(wb_ws, wb_fm, combined_shots, home_name=None, away_n
         _copy_sheet(wb_ws[title], wb, new_title)
 
     for title in wb_fm.sheetnames:
-        if title == 'Shots':
-            continue  # replaced by the new merged tab above
+        if title in ('Shots', 'Notes'):
+            continue  # Shots is replaced by the new merged tab above; Notes tabs are dropped entirely
         new_title = (f'FM - {title}' if title in ws_prefixed_titles else title)[:31]
         _copy_sheet(wb_fm[title], wb, new_title)
-
-    ws = wb.create_sheet('Notes')
-    notes = [
-        "Combined WhoScored + FotMob Match Report",
-        "",
-        "This workbook merges two independently-scraped sources for the same match. Only the Totals"
-        " and Notes tabs are prefixed 'WS -'/'FM -' (the two names that would otherwise collide"
-        " between the sources) - every other tab keeps its own plain name straight from whichever"
-        " report it came from, unchanged. See the 'WS - Notes' / 'FM - Notes' tabs (copied verbatim"
-        " from each standalone report) for the full methodology behind every column on those tabs.",
-        "",
-        "Shot Creating Actions tab (the one genuinely new tab here, not just a copy): one row per"
-        " shot, using WhoScored's own shot list as the spine for Player, Distance, Body Part, and"
-        " SCA1/SCA2 (already excludes own goals, see 'WS - Notes'), with FotMob's own Minute and"
-        " Added Time plus its shot-quality fields (xG, PSxG = FotMob's post-shot xG/xGOT, Outcome,"
-        " Situation) attached to each row. Split into two tables, one per team, rather than one"
-        " combined table with a Team column. Right under each team's table (two blank rows down) is"
-        " a small 'Top 3 Shots by xG' table for that team - just Minute, Player, and xG, sorted"
-        " highest xG first - pulled from that same team's shot list above it; shots with no"
-        " resolvable xG (a shot-count mismatch between the two sources - see below) are left out of"
-        " this ranking rather than sorting to either end.",
-        "",
-        "WhoScored and FotMob don't share any common shot ID, so shots are matched by TEAM, then"
-        " paired up in strict chronological order within that team - a team's 1st shot of the match"
-        " on WhoScored is matched to that team's 1st shot on FotMob, 2nd to 2nd, and so on. Each"
-        " source's own minute field is only used to sort that source's own shots into order, not to"
-        " match across sources directly, since the two sites don't always log stoppage-time minutes"
-        " identically - matching on relative order within the team is more reliable than matching on"
-        " the minute value itself. This assumes both sources recorded the same NUMBER of shots for"
-        " that team; if one side has more (most likely a scrape gap), the extra shot(s) at the end of"
-        " that team's list are left with blank FotMob fields (xG/PSxG/Outcome/Situation), since"
-        " there's no way to tell which specific shot is the unmatched one from timing alone.",
-        "",
-        "Team matching (needed since WhoScored and FotMob don't always spell a club's name the same"
-        " way - e.g. 'Man Utd' vs 'Manchester United', 'Spurs' vs 'Tottenham Hotspur'): team names are"
-        " canonicalized via a lookup table (TEAM_NAME_ALIASES in combined_report.py) before matching,"
-        " covering common Premier League/Championship short forms. A club whose name genuinely isn't"
-        " in that table yet, and differs between the two sites, would need a new entry added there.",
-        "",
-        "Outcome: FotMob's 'Hit Post' result is relabeled 'Woodwork' in this column specifically -"
-        " this relabeling does NOT apply to the FM - Shot Breakdown or FM - Totals tabs, which still"
-        " show FotMob's own 'Hit Post' wording untouched.",
-        "",
-        "The Pass Map feature (per-player pass visualization) is exclusive to the standalone"
-        " WhoScored report/app - it isn't included here.",
-    ]
-    for i, line in enumerate(notes, start=1):
-        c = ws.cell(row=i, column=1, value=line)
-        c.font = Font(name='Arial', bold=(i == 1))
-    ws.column_dimensions['A'].width = 120
 
     return wb

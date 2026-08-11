@@ -239,8 +239,9 @@ if report:
         st.write(
             "One row per shot - WhoScored's own shot list (Player/Distance/Body Part/SCA1/SCA2), "
             "with FotMob's own Minute/Added Time and xG/PSxG/Outcome/Situation attached to each row by "
-            "matching team and chronological order. See the Notes tab in the downloaded workbook for "
-            "the full matching methodology and its limits."
+            "matching team and chronological order (shots matched by team + chronological order; a "
+            "shot-count mismatch between the two sources leaves the extra shot(s) with blank FotMob "
+            "fields)."
         )
         combined_shots = report["combined_shots"]
         for t in [ws_home_name, ws_away_name]:
@@ -307,8 +308,8 @@ if report:
         st.write(
             "Goals/Shots/xG For and Against, totaled for exactly the minutes each player was on "
             "the pitch. Penalties are excluded, and xG combines same-minute shots by the same "
-            "team into one probability rather than summing them - see the 'FM - Notes' tab in the "
-            "downloaded workbook for the full methodology."
+            "team into one probability rather than summing them, since two shots in the same "
+            "minute are almost certainly a rebound/scramble in the same phase of play."
         )
         plus_minus = report["plus_minus"]
         pm_teams = ([t for t in [report["fm_home_name"], report["fm_away_name"]] if t is not None]
