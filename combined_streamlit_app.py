@@ -126,9 +126,11 @@ if st.button("Generate Combined Report", type="primary"):
                 player_minutes = fr.extract_player_minutes(fm_match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
+                player_windows = fr.extract_player_windows(fm_match_json, player_minutes)
+                plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)
 
             wb_fm = fr.build_workbook(shots_df, fm_totals_df, fm_home_name, fm_away_name, fm_match_id,
-                                       shot_breakdowns, xg_breakdown)
+                                       shot_breakdowns, xg_breakdown, plus_minus)
 
             with st.spinner("Merging Shot Creating Actions + Shots..."):
                 combined_shots = cr.compute_combined_shots(sca_out, shots_df)
@@ -159,6 +161,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "fm_totals_df": fm_totals_df,
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
+                "plus_minus": plus_minus,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_ws_events": len(df),
@@ -205,11 +208,11 @@ if report:
     ws_home_name, ws_away_name = report["ws_home_name"], report["ws_away_name"]
 
     (tabWSTotals, tabWSAgainst, tabWSTouches, tabWSPassing, tabSCA, tabWSDef, tabWSDefLoc,
-     tabWSPairs, tabWSShotPairs, tabFMTotals, tabFMBreakdown) = st.tabs([
+     tabWSPairs, tabWSShotPairs, tabFMTotals, tabFMBreakdown, tabFMPlusMinus) = st.tabs([
         "WS - Totals", "Against", "Touches", "Passing",
         "Shot Creating Actions", "Defensive Actions",
         "Defensive Action Location", "Passing Pairs", "Shot Pairs",
-        "FM - Totals", "Shot Breakdown",
+        "FM - Totals", "Shot Breakdown", "Plus Minus",
     ])
 
     with tabWSTotals:
@@ -245,7 +248,7 @@ if report:
             t_shots = combined_shots[combined_shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
             st.dataframe(t_shots, use_container_width=True)
 
-            top3 = (t_shots[["Minute", "Player", "xG"]]
+            top3 = (t_shots[t_shots["Situation"] != "Penalty"][["Minute", "Player", "xG"]]
                     .dropna(subset=["xG"])
                     .sort_values("xG", ascending=False)
                     .head(3)
@@ -300,6 +303,22 @@ if report:
                     bdf[bdf["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
                     use_container_width=True,
                 )
+    with tabFMPlusMinus:
+        st.write(
+            "Goals/Shots/xG For and Against, totaled for exactly the minutes each player was on "
+            "the pitch. Penalties are excluded, and xG combines same-minute shots by the same "
+            "team into one probability rather than summing them - see the 'FM - Notes' tab in the "
+            "downloaded workbook for the full methodology."
+        )
+        plus_minus = report["plus_minus"]
+        pm_teams = ([t for t in [report["fm_home_name"], report["fm_away_name"]] if t is not None]
+                    or sorted(plus_minus["Team"].dropna().unique()))
+        for t in pm_teams:
+            st.subheader(t)
+            st.dataframe(
+                plus_minus[plus_minus["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
+                use_container_width=True,
+            )
 
     with st.expander("FotMob debug log (scrape_match console output)"):
         st.code(report.get("fm_debug_log") or "(nothing captured)")

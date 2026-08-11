@@ -15,6 +15,13 @@ Scrapes a FotMob match page and builds an Excel workbook with:
     cards, passes, etc. - whichever stat groups FotMob includes for a
     given match). A second table below it splits xG by half and by
     phase (Open Play vs Set Piece).
+  - Plus Minus: one table per team, one row per player, showing Goals
+    For/Against, Shots For/Against, and xG For/Against for exactly the
+    minutes that player was on the pitch (from FotMob's own lineup/
+    substitution data - see extract_player_windows() and
+    compute_plus_minus()). Penalties are excluded, and xG is combined
+    per-sequence (same-team shots at the same minute) rather than simply
+    summed.
   - Notes: definitions/assumptions, kept in sync with this docstring.
 
 WHY THIS LOOKS DIFFERENT FROM whoscored_report.py
@@ -747,6 +754,172 @@ def extract_player_minutes(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+def extract_player_windows(match_json, player_minutes=None):
+    """
+    Per-player on-pitch window for this match: Team, Player, start_minute,
+    end_minute, Minutes Played, subbed_off. Backs the Plus Minus tab (see
+    compute_plus_minus() below) - it's the "which minutes was this player
+    actually on the pitch for" data that FotMob's shot map alone can't
+    answer.
+
+    Read from FotMob's own lineup data (content.lineup.homeTeam/awayTeam,
+    each with 'starters' + 'subs' lists). Each player's own
+    'performance.substitutionEvents' list carries a 'subIn' and/or 'subOut'
+    entry with its own 'time' (in minutes) when applicable.
+
+    start_minute is that player's 'subIn' time if they came on as a
+    substitute, else 0 (they started the match). end_minute is their
+    'subOut' time if they were substituted off at some point; otherwise
+    (played to the final whistle - whether a starter never subbed off, or
+    a substitute who stayed on) end_minute is start_minute + their own
+    total Minutes Played figure (from extract_player_minutes/FotMob's own
+    per-player stat, passed in via player_minutes or computed here if not
+    given) - using their own actual total rather than assuming a flat
+    90/95 for everyone means stoppage time, and a player sent off without
+    being substituted (their own Minutes Played already reflects the
+    early end), are both handled correctly without any extra red-card
+    detection logic.
+
+    subbed_off (bool) tells compute_plus_minus() how to treat the boundary
+    at end_minute: a player who WAS subbed off doesn't get credit for the
+    exact minute they left (that minute belongs to whoever replaced them),
+    while a player who finished the match does get credit for the final
+    minute itself (so a stoppage-time shot at the very end still counts
+    for them).
+
+    Bench players who never actually appeared (no resolvable Minutes
+    Played figure at all) are skipped entirely - there's no on-pitch
+    window to give them.
+    """
+    columns = ['Team', 'Player', 'start_minute', 'end_minute', 'Minutes Played', 'subbed_off']
+    lineup = match_json.get('lineup') if isinstance(match_json, dict) else None
+    if not isinstance(lineup, dict):
+        return pd.DataFrame(columns=columns)
+
+    if player_minutes is None:
+        player_minutes = extract_player_minutes(match_json)
+    minutes_lookup = {(r['Team'], r['Player']): r['Minutes Played'] for _, r in player_minutes.iterrows()}
+
+    rows = []
+    for side_key in ('homeTeam', 'awayTeam'):
+        side = lineup.get(side_key)
+        if not isinstance(side, dict):
+            continue
+        team_name = side.get('name')
+        players = (side.get('starters') or []) + (side.get('subs') or [])
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            name = p.get('name')
+            minutes_played = minutes_lookup.get((team_name, name))
+            if minutes_played is None:
+                continue  # never actually appeared
+
+            perf = p.get('performance') or {}
+            sub_events = perf.get('substitutionEvents') or []
+            sub_in = next((e.get('time') for e in sub_events if e.get('type') == 'subIn'), None)
+            sub_out = next((e.get('time') for e in sub_events if e.get('type') == 'subOut'), None)
+
+            start = sub_in if sub_in is not None else 0
+            subbed_off = sub_out is not None
+            end = sub_out if subbed_off else (start + minutes_played)
+
+            rows.append({
+                'Team': team_name, 'Player': name,
+                'start_minute': start, 'end_minute': end,
+                'Minutes Played': round(minutes_played),
+                'subbed_off': subbed_off,
+            })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None):
+    """
+    Plus Minus tab: for every player, totals of Goals For/Against, Shots
+    For/Against, and xG For/Against for exactly the minutes they were on
+    the pitch (their window from extract_player_windows() above) - the
+    shot/goal/xG state that existed specifically while that player was out
+    there, not the match's grand total. E.g. if a player is subbed off
+    having played 70 minutes, their row shows the totals through that 70th
+    minute; whoever replaces them shows the totals for the remaining
+    minutes of the match.
+
+    Penalties are excluded from every one of these six columns (Situation
+    == 'Penalty') - the same treatment as the Shot Breakdown tab, and for
+    the same reason: a penalty isn't a shot in the run-of-play sense.
+
+    xG For/Against is NOT a simple sum of each shot's own xG value. Shots
+    by the SAME team at the exact same effective minute (Minute + Added
+    Time) are treated as one sequence - almost certainly a rebound/scramble
+    in the same phase of play, since FotMob's shot map carries no separate
+    possession/sequence ID to group on more precisely - and combined into a
+    single probability (1 minus the product of (1 - xG) across that
+    sequence's shots) rather than added together, since simply summing
+    individual shot xG values overstates the true combined chance of
+    scoring from one spell of play. Shots in different minutes are treated
+    as independent and their (already sequence-combined) values are simply
+    added together as usual.
+
+    Returns one DataFrame with a Team column - split into two tables, one
+    per team, when written to the workbook/UI (see build_workbook()).
+    Columns: Team, Player, Minutes Played, Goals For, Goals Against, Shots,
+    Shots Against, xG, xG Against.
+    """
+    out_cols = ['Team', 'Player', 'Minutes Played', 'Goals For', 'Goals Against',
+                'Shots', 'Shots Against', 'xG', 'xG Against']
+    if shots_df.empty or player_windows.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    work = shots_df[shots_df['Situation'] != 'Penalty'].copy()
+    work['xG'] = work['xG'].fillna(0.0)
+    work['Minute'] = work['Minute'].fillna(0)
+    work['Added Time'] = work['Added Time'].fillna(0)
+    work['_effective_minute'] = work['Minute'] + work['Added Time']
+
+    # Sequence-combine xG: shots by the same team at the exact same
+    # effective minute become one combined probability, not a plain sum.
+    seq = (work.groupby(['Team', '_effective_minute'])['xG']
+           .apply(lambda xs: 1 - (1 - xs).prod())
+           .reset_index(name='seq_xG'))
+
+    teams_all = ([t for t in [home_name, away_name] if t is not None]
+                 or sorted(player_windows['Team'].dropna().unique()))
+    opponent = {teams_all[0]: teams_all[1], teams_all[1]: teams_all[0]} if len(teams_all) == 2 else {}
+
+    records = []
+    for _, prow in player_windows.iterrows():
+        team = prow['Team']
+        opp = opponent.get(team)
+        start, end, subbed_off = prow['start_minute'], prow['end_minute'], prow['subbed_off']
+
+        if subbed_off:
+            mask = lambda m: (m >= start) & (m < end)
+        else:
+            mask = lambda m: (m >= start) & (m <= end)
+
+        own_shots = work[(work['Team'] == team) & mask(work['_effective_minute'])]
+        opp_shots = work[(work['Team'] == opp) & mask(work['_effective_minute'])] if opp else work.iloc[0:0]
+        own_seq = seq[(seq['Team'] == team) & mask(seq['_effective_minute'])]
+        opp_seq = seq[(seq['Team'] == opp) & mask(seq['_effective_minute'])] if opp else seq.iloc[0:0]
+
+        records.append({
+            'Team': team,
+            'Player': prow['Player'],
+            'Minutes Played': prow['Minutes Played'],
+            'Goals For': int((own_shots['Outcome'] == 'Goal').sum()),
+            'Goals Against': int((opp_shots['Outcome'] == 'Goal').sum()),
+            'Shots': int(len(own_shots)),
+            'Shots Against': int(len(opp_shots)),
+            'xG': round(own_seq['seq_xG'].sum(), 2),
+            'xG Against': round(opp_seq['seq_xG'].sum(), 2),
+        })
+
+    out = pd.DataFrame(records, columns=out_cols)
+    out = out.sort_values(['Team', 'Minutes Played'], ascending=[True, False]).reset_index(drop=True)
+    return out
+
+
 def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
     """
     Roll the shot map up along a few dimensions - by player, by situation
@@ -942,7 +1115,7 @@ def autosize(ws, min_width=10, max_width=40):
 
 
 def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_breakdowns=None,
-                    xg_breakdown=None):
+                    xg_breakdown=None, plus_minus=None):
     wb = Workbook()
 
     ws_totals = wb.active
@@ -974,6 +1147,20 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
                 row = write_table(ws_breakdown, t_df, start_row=row)
                 row += 1  # blank row between tables
         autosize(ws_breakdown)
+
+    if plus_minus is not None and not plus_minus.empty:
+        ws_pm = wb.create_sheet('Plus Minus')
+        teams_for_pm = ([t for t in [home_name, away_name] if t is not None]
+                         or sorted(plus_minus['Team'].dropna().unique()))
+        row = 1
+        for t in teams_for_pm:
+            t_pm = plus_minus[plus_minus['Team'] == t].drop(columns=['Team']).reset_index(drop=True)
+            c = ws_pm.cell(row=row, column=1, value=f'{t} - Plus Minus')
+            c.font = Font(name='Arial', bold=True, size=12)
+            row += 1
+            row = write_table(ws_pm, t_pm, start_row=row)
+            row += 1  # blank row between tables
+        autosize(ws_pm)
 
     ws_notes = wb.create_sheet('Notes')
     notes = [
@@ -1026,6 +1213,31 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         " resolvable xA figure shows 0.0. Any player with xA > 0 is included even if they took zero"
         " non-penalty shots themselves (their Shots/Goals/Total xG all show 0) - so a player who"
         " only created chances, without shooting, still shows up on this table.",
+        "",
+        "Plus Minus tab: one table per team, one row per player, with Minutes Played directly next"
+        " to the player's name, then Goals For, Goals Against, Shots, Shots Against, xG, and xG"
+        " Against - all totaled for exactly the minutes that player was on the pitch, not the"
+        " match's grand total. A player's on-pitch window comes from FotMob's own lineup and"
+        " substitution data (see extract_player_windows()): starts at 0 unless they came on as a"
+        " substitute (start = their subIn minute), and ends at their subOut minute if they were"
+        " substituted off, or otherwise at start + their own total Minutes Played figure (which"
+        " already correctly accounts for stoppage time, and for a player sent off without being"
+        " substituted, an early end to their minutes). A player who was subbed off does NOT get"
+        " credit for the exact minute they left (that minute belongs to whoever replaced them);"
+        " a player who finished the match DOES get credit for the final whistle minute itself, so"
+        " a stoppage-time shot right at the end still counts for them. Bench players who never"
+        " actually appeared aren't included - there's no on-pitch window to give them.",
+        "",
+        "Penalties are excluded from every one of the six Plus Minus columns, the same treatment as"
+        " the Shot Breakdown tab. xG/xG Against are NOT a simple sum of each shot's own xG value -"
+        " shots by the same team at the exact same effective minute (Minute + Added Time) are"
+        " treated as one sequence (almost certainly a rebound/scramble in the same phase of play,"
+        " since the shot map has no separate possession/sequence ID to group on more precisely)"
+        " and combined into a single probability - 1 minus the product of (1 - xG) across that"
+        " sequence's shots - rather than added together, since simply summing individual shot xG"
+        " values would overstate the true combined chance of scoring from one spell of play. Shots"
+        " in different minutes are treated as independent and their (already sequence-combined)"
+        " values are simply added together as usual.",
         "",
         "xG Breakdown table (second table on the Totals tab): independent cuts of the same"
         " shot map - 1st Half Shots / 2nd Half Shots and 1st Half xG / 2nd Half xG (from FotMob's"
