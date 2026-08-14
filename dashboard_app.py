@@ -46,10 +46,6 @@ from pitch_viz import plot_pass_map, PASS_CATEGORY_COLORS, TITLE_COLOR
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
 st.title("Match History Dashboard")
-st.caption(
-    "Read-only view over every match that's been published to the database. Run the combined "
-    "report app locally and use its 'Save to Database' step to add more matches here."
-)
 
 
 def _database_url():
