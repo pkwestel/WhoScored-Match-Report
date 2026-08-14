@@ -105,9 +105,10 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
   - Tackles/Successful Tackles/Interceptions/Blocked Passes/Blocked Shots:
     exact counts from discrete WhoScored event types/qualifiers - verified
     to match a published benchmark exactly.
-  - Defensive Action Height (m): median x position of Tackle/Clearance/
-    BallRecovery/Challenge/Aerial events, converted to metres. Tuned
-    against a benchmark; close but not exact (unlike the counts above).
+  - Defensive Action Height (m): MEAN x position of Tackle/Interception/
+    Clearance/BallRecovery/Challenge events (goalkeeper excluded), converted
+    to metres. Tuned against two real matches via diagnose_def_action_height.py;
+    close but not exact (unlike the counts above).
   - Passes Received / Progressive Passes Received (Touches tab): receiver
     inferred as the next event's player, if that event is the same team.
   - Defensive Actions tab (per player, by team): Tackles/Interceptions are
@@ -1180,7 +1181,52 @@ def compute_ppda(df, cutoff=PPDA_CUTOFF, action_types=PPDA_ACTION_TYPES):
 # ============================================================
 # 5d2. DEFENSIVE STATS
 # ============================================================
-DEF_ACTION_HEIGHT_TYPES = {'Tackle', 'Clearance', 'BallRecovery', 'Challenge', 'Aerial'}
+# Formula history for Defensive Action Height, since it's an approximation
+# (insight90's real source isn't public) that's now been tuned against TWO
+# real matches instead of one, via diagnose_def_action_height.py:
+#   v1 (original): median x of {Tackle, Clearance, BallRecovery, Challenge,
+#       Aerial} - fit ONE match well (41.42m vs published 41.44m for Man
+#       Utd, 31.4m vs 31.81m for Crystal Palace) but fell apart on a second
+#       match (Man Utd vs Brentford: 21.21m vs a published 26.55m, 36.44m
+#       vs 38.47m) - a classic overfit-to-one-example failure.
+#   v2 (current): MEAN (not median) x of {Tackle, Interception, Clearance,
+#       BallRecovery, Challenge} - Aerial dropped entirely (it was actively
+#       hurting the fit: including it pushed the combined error on the
+#       Crystal Palace match up to 10+ metres in testing), goalkeeper events
+#       excluded (see _guess_goalkeepers() below). This combination won a
+#       grid search across 22 candidate formulas run against BOTH matches:
+#       combined error 3.88m total (Brentford: 25.96/36.55 vs 26.55/38.47;
+#       Crystal Palace: 41.61/33.01 vs 41.44/31.81) - noticeably tighter
+#       than v1's fit once you require it to work on more than one match.
+DEF_ACTION_HEIGHT_TYPES = {'Tackle', 'Interception', 'Clearance', 'BallRecovery', 'Challenge'}
+
+
+def _guess_goalkeepers(df):
+    """
+    Best-effort per-team goalkeeper identification, used to exclude GK
+    events from Defensive Action Height below (a team's average defensive
+    LINE height is meant to represent the outfield block, not wherever the
+    keeper happens to touch the ball - and a keeper sweeping/clearing very
+    close to their own goal would otherwise drag a team's number down for
+    reasons that have nothing to do with their outfield defenders' shape).
+
+    WhoScored's own event stream carries no explicit position field, so
+    this infers it indirectly: whichever player recorded the most 'Save'
+    events on a team is almost certainly that team's keeper (outfield
+    players essentially never record a Save). If a keeper somehow made zero
+    saves in a match, this returns no answer for that team and every event
+    is included for them instead of guessing wrong - a graceful fallback,
+    not a crash. Verified against two real matches (correctly identified
+    both keepers in each) as part of tuning this formula - see
+    diagnose_def_action_height.py's own version of this same logic.
+    """
+    saves = df[df['type.displayName'] == 'Save']
+    gks = {}
+    for team, grp in saves.groupby('team'):
+        counts = grp['playerName'].value_counts()
+        if not counts.empty:
+            gks[team] = counts.index[0]
+    return gks
 
 
 def compute_defensive_stats(df):
@@ -1193,13 +1239,15 @@ def compute_defensive_stats(df):
     'BlockedPass' events (the blocking team's own event); Blocked Shots
     counts the OPPONENT's shot attempts carrying a 'Blocked' qualifier,
     credited to this team (the side that did the blocking). Defensive
-    Action Height is the median x position (converted to metres) of this
-    team's Tackle/Clearance/BallRecovery/Challenge/Aerial events - the one
-    metric here that's tuned/approximate rather than an exact event count,
-    since the source's precise definition isn't public (this combination
-    of action types and using the median came closest to the benchmark:
-    41.42m vs a published 41.44m for Man Utd, 31.4m vs 31.81m for Crystal
-    Palace).
+    Action Height is the MEAN x position (converted to metres) of this
+    team's Tackle/Interception/Clearance/BallRecovery/Challenge events,
+    EXCLUDING that team's own goalkeeper (see _guess_goalkeepers()) - the
+    one metric here that's tuned/approximate rather than an exact event
+    count, since the source's precise definition isn't public. This
+    specific formula (mean, no Aerial, no GK) was chosen by grid-searching
+    22 candidate formulas against two real matches at once rather than one -
+    see the version-history comment above DEF_ACTION_HEIGHT_TYPES for the
+    exact numbers, and diagnose_def_action_height.py for the search itself.
     """
     teams = [t for t in df['team'].dropna().unique()]
 
@@ -1219,7 +1267,9 @@ def compute_defensive_stats(df):
         blocked_shots[t] = shots_blocked[shots_blocked['team'] == opp].shape[0] if opp else 0
 
     da = df[df['type.displayName'].isin(DEF_ACTION_HEIGHT_TYPES)]
-    def_action_height = (da.groupby('team')['x'].median() * (PITCH_LEN_M / 100)).round(2)
+    gk_names = _guess_goalkeepers(df)
+    da = da[~da.apply(lambda r: gk_names.get(r['team']) == r['playerName'], axis=1)]
+    def_action_height = (da.groupby('team')['x'].mean() * (PITCH_LEN_M / 100)).round(2)
 
     out = pd.DataFrame({
         'Tackles': tackles,
@@ -1691,12 +1741,13 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " did the blocking). These verified as EXACT matches against insight90's published numbers for this"
         " match.",
         "",
-        "Defensive Action Height (m): the median x position (converted to metres) of a team's Tackle,"
-        " Clearance, Ball Recovery, Challenge, and Aerial events - unlike the counts above, this one is"
-        " tuned/approximate rather than an exact event count, since the source's precise definition isn't"
-        " public. This combination of action types and using the median came closest to insight90's"
-        " published numbers for this match (41.42m vs a published 41.44m for Man Utd, 31.4m vs 31.81m for"
-        " Crystal Palace).",
+        "Defensive Action Height (m): the MEAN x position (converted to metres) of a team's Tackle,"
+        " Interception, Clearance, Ball Recovery, and Challenge events, excluding that team's own"
+        " goalkeeper - unlike the counts above, this one is tuned/approximate rather than an exact event"
+        " count, since the source's precise definition isn't public. Chosen by grid-searching formula"
+        " variants (event types, mean vs median, with/without the goalkeeper) against TWO real matches at"
+        " once rather than one - the earlier median-based, Aerial-included, GK-included version fit one"
+        " match well but fell apart on a second (see diagnose_def_action_height.py for the full search).",
         "",
         "Passes Received / Progressive Passes Received (Touches tab): WhoScored/Opta pass events have no"
         " explicit receiver field, so the receiver is inferred the same way most open-source pass-network"
