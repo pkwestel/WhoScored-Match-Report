@@ -3,8 +3,7 @@ pandas
 beautifulsoup4
 selenium
 webdriver-manager
-lxml
-uncurl
-fake-useragent
-soccerdata
-html5lib
+streamlit
+matplotlib
+openpyxl
+psycopg2-binary

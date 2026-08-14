@@ -15,8 +15,10 @@ Local use:
     This is a THIRD, separate app - streamlit_app.py (WhoScored only) and
     fotmob_streamlit_app.py (FotMob only) are unchanged and still work on
     their own. Use this one specifically when you want both sources merged
-    into a single file. The Pass Map feature is exclusive to
-    streamlit_app.py - it isn't offered here.
+    into a single file. There's no live Pass Map preview in this app itself
+    (that's still streamlit_app.py's tab) - but "Save to Database" below
+    does publish every pass in the match, so the Pass Map/Passes Received
+    visuals show up on the read-only dashboard_app.py site once saved.
 
     NOTE: if you edit whoscored_report.py, fotmob_report.py, or
     combined_report.py while Streamlit is already running, clicking
@@ -43,7 +45,9 @@ half will visibly pop up a Chrome window for a few seconds.
 """
 
 import contextlib
+import datetime
 import io
+import os
 import tempfile
 import traceback
 
@@ -52,6 +56,7 @@ import streamlit as st
 import whoscored_report as wr
 import fotmob_report as fr
 import combined_report as cr
+import history_db as hdb
 
 st.set_page_config(page_title="Combined Match Report", layout="wide")
 st.title("Combined WhoScored + FotMob Match Report Generator")
@@ -106,6 +111,12 @@ if st.button("Generate Combined Report", type="primary"):
                                                 chains_df, team_sequences, field_tilt, ppda,
                                                 defensive_stats, corners, ws_home_name, ws_away_name)
                 against_totals = wr.compute_against_totals(totals_out)
+                # Every pass in the match (both ends, all outcomes) - computed
+                # once here rather than per-player, purely so "Save to
+                # Database" below can publish the Pass Map / Passes Received
+                # data for every player in one shot (see compute_all_passes()'s
+                # own docstring in whoscored_report.py).
+                all_passes = wr.compute_all_passes(df)
 
             wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
                                        defensive_actions, defensive_action_location, passing_pairs,
@@ -164,11 +175,13 @@ if st.button("Generate Combined Report", type="primary"):
                 "passing_pairs": passing_pairs,
                 "shot_pairs": shot_pairs,
                 "combined_shots": combined_shots,
+                "fm_match_id": fm_match_id,
                 "fm_totals_df": fm_totals_df,
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
                 "plus_minus": plus_minus,
                 "plus_minus_warning": plus_minus_warning,
+                "all_passes": all_passes,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_ws_events": len(df),
@@ -211,6 +224,83 @@ if report:
         file_name=report["filename"],
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # -----------------------------------------------------------------------
+    # Save to Database - pushes this match into the hosted history DB (see
+    # history_db.py) so it accumulates across matches for the read-only
+    # dashboard_app.py site, instead of only existing in this one-off
+    # downloaded workbook. Building a season-long database was the whole
+    # point of this - see history_db.py's own docstring for the schema.
+    # -----------------------------------------------------------------------
+    with st.expander("Save to Database", expanded=False):
+        st.write(
+            "Pushes this match's team/player/shot data into the history database (SQLite locally, "
+            "or your hosted Postgres once you've set one up) so it accumulates across matches for "
+            "the season-long dashboard."
+        )
+        default_db_url = os.environ.get("DATABASE_URL", "sqlite:///history.db")
+        db_url = st.text_input(
+            "Database URL",
+            value=default_db_url,
+            help="sqlite:///history.db for local testing, or postgresql://user:pass@host:port/dbname "
+                 "for your hosted database. Defaults to the DATABASE_URL environment variable if set.",
+        )
+        competition = st.text_input("Competition", value="Premier League")
+        match_date = st.date_input("Match date", value=datetime.date.today())
+
+        if st.button("Save this match to the database"):
+            try:
+                match_id = report["fm_match_id"]
+
+                # Team stats: WhoScored's Totals + FotMob's Totals, namespaced
+                # separately per team rather than merged, since the two
+                # sources don't share a column schema (see history_db.py's
+                # own docstring on this).
+                team_stats = {}
+                for _, row in report["totals_out"].iterrows():
+                    t = row["team"]
+                    team_stats.setdefault(t, {})["ws_totals"] = row.drop("team").to_dict()
+                for _, row in report["fm_totals_df"].iterrows():
+                    t = row["team"]
+                    team_stats.setdefault(t, {})["fm_totals"] = row.drop("team").to_dict()
+
+                # Player stats: WhoScored Passing + Defensive Actions, and
+                # FotMob Plus Minus, each nested under their own key.
+                player_stats = {}
+                for _, row in report["passing_out"].iterrows():
+                    key = (row["team"], row["player"])
+                    player_stats.setdefault(key, {})["ws_passing"] = (
+                        row.drop(["team", "player"]).to_dict())
+                for _, row in report["defensive_actions"].iterrows():
+                    key = (row["team"], row["player"])
+                    player_stats.setdefault(key, {})["ws_defensive"] = (
+                        row.drop(["team", "player"]).to_dict())
+                if not report["plus_minus"].empty:
+                    for _, row in report["plus_minus"].iterrows():
+                        key = (row["Team"], row["Player"])
+                        player_stats.setdefault(key, {})["fm_plus_minus"] = (
+                            row.drop(["Team", "Player"]).to_dict())
+
+                db = hdb.get_db(db_url)
+                hdb.init_schema(db)
+                hdb.publish_report(
+                    db, match_id=match_id,
+                    home_team=report["ws_home_name"], away_team=report["ws_away_name"],
+                    team_stats=team_stats, player_stats=player_stats,
+                    shots_df=report["combined_shots"],
+                    passes_df=report["all_passes"],
+                    competition=competition, match_date=match_date.isoformat(),
+                    ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
+                )
+                db.close()
+                st.success(
+                    f"Saved match {match_id} to the database, including "
+                    f"{len(report['all_passes'])} passes for the dashboard's Pass Map/Passes "
+                    "Received tabs."
+                )
+            except Exception as e:
+                st.error(f"Couldn't save to the database: {e}")
+                st.code(traceback.format_exc())
 
     ws_home_name, ws_away_name = report["ws_home_name"], report["ws_away_name"]
 

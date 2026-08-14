@@ -547,6 +547,42 @@ def get_player_passes_received(df, player):
     return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
 
 
+def compute_all_passes(df):
+    """
+    Every Pass event in the match (any player, any outcome), with the same
+    completed/is_progressive/is_key_pass/category flags as get_player_passes()
+    and get_player_passes_received() - the shared source both of those are
+    really just a player-filtered view of. Computed once for the whole match
+    (not per-player) so publishing every player's passes to the history
+    database doesn't mean re-running the progressive-passes rolling window
+    once per player.
+    """
+    out_cols = ['minute', 'second', 'team', 'passer', 'receiver', 'x', 'y', 'endX', 'endY',
+                'completed', 'is_progressive', 'is_key_pass', 'category']
+    work = df[df['type.displayName'] == 'Pass'].copy()
+    if work.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    receiver_map = _pass_receiver_map(df)
+    prog_flags = _compute_progressive_flags(df)
+    prog_lookup = (prog_flags.set_index('orig_index')['is_progressive']
+                   if not prog_flags.empty else pd.Series(dtype=bool))
+
+    work['completed'] = work['outcomeType.displayName'] == 'Successful'
+    work['is_key_pass'] = work['qualifiers_parsed'].apply(lambda qs: 'ShotAssist' in qual_names(qs))
+    work['is_progressive'] = [bool(prog_lookup.get(i, False)) for i in work.index]
+    work['category'] = work.apply(classify_pass_category, axis=1)
+    work['receiver'] = receiver_map.reindex(work.index)
+    # An incomplete pass's "receiver" (same-team next event) isn't really a
+    # receiver in any meaningful sense - null it out so downstream Passes
+    # Received queries (which should only ever show completed passes) can't
+    # accidentally pick one up.
+    work.loc[~work['completed'], 'receiver'] = None
+    work = work.rename(columns={'playerName': 'passer'})
+
+    return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
+
+
 # ============================================================
 # 3b. CARRIES
 # ============================================================
