@@ -196,6 +196,152 @@ OPEN_PLAY_EXCLUDE_QUALIFIERS = {'CornerTaken', 'FreekickTaken', 'IndirectFreekic
 
 
 # ============================================================
+# 0. FIXTURE DISCOVERY (batch runner support)
+# ============================================================
+def _search_for_dicts_with_keys(obj, required_keys, max_depth=25):
+    """
+    Recursively search a nested dict/list for every dict that contains ALL
+    of `required_keys` - the same general "search by key name, not by exact
+    path" resilience pattern fotmob_report.py's own _search_for_key() uses,
+    generalized here to find every matching dict (not just the first) since
+    get_fixture_urls() below needs the whole list of fixture rows, not one
+    value.
+    """
+    found = []
+    stack = [(obj, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        if isinstance(cur, dict):
+            if required_keys.issubset(cur.keys()):
+                found.append(cur)
+            for v in cur.values():
+                stack.append((v, depth + 1))
+        elif isinstance(cur, list):
+            for v in cur:
+                stack.append((v, depth + 1))
+    return found
+
+
+FIXTURE_FINISHED_STATUSES = {'fulltime', 'ft', 'finished', 'played', 'full time'}
+
+
+def get_fixture_urls(fixtures_url, only_finished=True):
+    """
+    Best-effort scraper for a WhoScored competition fixtures/results page
+    (e.g. the Premier League's own "Fixtures" tab) - returns a list of
+    {match_url, home_name, away_name, status} dicts, one per match found on
+    that page. Built to support a "run the whole weekend's matches" batch
+    workflow, so you don't have to copy/paste each match URL by hand.
+
+    HONESTY NOTE - READ BEFORE RELYING ON THIS: unlike scrape_match() above
+    (built and debugged against real, saved matchCentreData JSON from actual
+    matches earlier in this project), this function has NOT been verified
+    against a live WhoScored fixtures page - there was no way to open a
+    browser and inspect the real page from the environment this was written
+    in. It reuses the same general technique that's already proven reliable
+    for match-centre pages (look for embedded JSON in a <script> tag, then
+    search that JSON structurally by key name rather than hard-coding one
+    exact path/variable name) - but the exact shape of a "fixture row"
+    object here (homeTeamName/awayTeamName/matchId/status field names) is an
+    educated guess based on WhoScored's own match-centre naming
+    conventions, not a confirmed one.
+
+    If this raises RuntimeError, or silently returns an empty/wrong list on
+    a real run: that's expected first-try friction for an unverified
+    scraper, not a sign the rest of the project is broken. The fix is the
+    same as every other WhoScored/FotMob schema surprise handled elsewhere
+    in this project (see extract_player_windows()'s own history) - save the
+    page's HTML (or just the relevant <script> tag contents) and share it,
+    and this can be corrected against real data instead of more guessing.
+    In the meantime, the batch runner UI always offers pasting match URLs
+    in by hand as a fallback, so a broken auto-detect doesn't block you.
+
+    only_finished: if True (default), keeps only matches whose guessed
+    status field looks like "finished" (see FIXTURE_FINISHED_STATUSES) -
+    if the status field can't be found at all for a match, it's INCLUDED
+    rather than silently dropped, so you can still see and manually decide
+    on anything this can't confidently classify.
+    """
+    print(f"Opening {fixtures_url} ...")
+    with get_driver() as driver:
+        driver.get(fixtures_url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        page_source = driver.page_source
+
+    soup = BeautifulSoup(page_source, "html.parser")
+
+    candidates = []
+    for script_tag in soup.find_all("script"):
+        text = script_tag.string or script_tag.text or ""
+        if not text.strip():
+            continue
+        for marker in ("= {", "= ["):
+            if marker not in text:
+                continue
+            _, _, after = text.partition(marker)
+            json_text = marker[-1] + after
+            json_text = json_text.split(";\n")[0].rstrip("; \n")
+            try:
+                data = json.loads(json_text)
+            except json.JSONDecodeError:
+                continue
+            candidates.extend(_search_for_dicts_with_keys(data, {"homeTeamName", "awayTeamName"}))
+
+    if not candidates:
+        raise RuntimeError(
+            "Couldn't find any fixture data on this page - see get_fixture_urls()'s own "
+            "docstring (this scraper was never verified against a live page). WhoScored may "
+            "structure this page differently than assumed here, may require different "
+            "navigation (e.g. clicking to a specific date/gameweek) to reveal the fixture list "
+            "at all, or may have blocked the automated browser. Paste match URLs manually "
+            "instead of using auto-detect for now, and share the page's script tag contents so "
+            "this can be fixed against real data."
+        )
+
+    results = []
+    seen_ids = set()
+    for fixture in candidates:
+        home_name = fixture.get("homeTeamName")
+        away_name = fixture.get("awayTeamName")
+        match_id = fixture.get("matchId") or fixture.get("id")
+        if not (home_name and away_name and match_id) or match_id in seen_ids:
+            continue
+        seen_ids.add(match_id)
+
+        # Prefer a direct URL/link field already embedded in the fixture
+        # object if WhoScored provides one - only fall back to constructing
+        # a URL by hand (a guess at WhoScored's slug format) if no such
+        # field exists, since a hand-built slug is the least certain part
+        # of this whole function.
+        match_url = (fixture.get("url") or fixture.get("matchUrl")
+                     or fixture.get("matchCentreUrl"))
+        if match_url and match_url.startswith("/"):
+            match_url = f"https://www.whoscored.com{match_url}"
+        if not match_url:
+            slug_home = re.sub(r"[^a-z0-9]+", "-", home_name.lower()).strip("-")
+            slug_away = re.sub(r"[^a-z0-9]+", "-", away_name.lower()).strip("-")
+            match_url = f"https://www.whoscored.com/matches/{match_id}/live/{slug_home}-{slug_away}"
+
+        status = str(fixture.get("statusName") or fixture.get("status") or "").strip()
+        is_finished = status.lower() in FIXTURE_FINISHED_STATUSES
+        if only_finished and status and not is_finished:
+            continue
+
+        results.append({
+            "match_url": match_url,
+            "home_name": home_name,
+            "away_name": away_name,
+            "status": status or "(unknown)",
+        })
+
+    return results
+
+
+# ============================================================
 # 1. SCRAPE
 # ============================================================
 def scrape_match(match_centre_url):

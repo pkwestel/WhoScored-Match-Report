@@ -243,6 +243,132 @@ def _search_for_key(obj, target_keys, max_depth=25):
     return None
 
 
+def _search_for_dicts_with_keys(obj, required_keys, max_depth=25):
+    """
+    Like _search_for_key() above, but returns EVERY dict containing all of
+    `required_keys` instead of just the first value for one key - used by
+    find_fotmob_match_url() below, which needs the whole list of that day's
+    fixtures, not a single value.
+    """
+    found = []
+    stack = [(obj, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        if isinstance(cur, dict):
+            if required_keys.issubset(cur.keys()):
+                found.append(cur)
+            for v in cur.values():
+                stack.append((v, depth + 1))
+        elif isinstance(cur, list):
+            for v in cur:
+                stack.append((v, depth + 1))
+    return found
+
+
+def find_fotmob_match_url(date_str, home_name, away_name):
+    """
+    Best-effort matcher for the batch runner: loads FotMob's day-schedule
+    page for `date_str` (YYYY-MM-DD) and looks for a fixture whose team
+    names match `home_name`/`away_name` (via combined_report's
+    canonical_team_name(), so 'Man Utd' vs 'Manchester United', 'Spurs' vs
+    'Tottenham Hotspur', etc. still match across the two sites' different
+    naming), returning a FotMob match URL for it, or None if no match was
+    found.
+
+    HONESTY NOTE - READ BEFORE RELYING ON THIS: unlike _extract_via_network_
+    logs() above (built and confirmed against a real captured 'matchdetails'
+    response), the response this function looks for (anything with 'match'
+    in its URL, containing dicts with 'home'/'away' keys) is an educated
+    guess at FotMob's day-schedule API shape, not a verified one - there was
+    no way to open a browser and inspect the real page/response from the
+    environment this was written in. If this returns None for a match you
+    know exists on FotMob, that's expected first-try friction for an
+    unverified scraper - paste the FotMob URL manually instead (the batch
+    runner UI always supports this), and share the day-schedule page's
+    captured network responses so this can be corrected against real data,
+    the same way every other WhoScored/FotMob schema surprise in this
+    project got fixed.
+
+    A local import of combined_report is used here (rather than importing
+    it at module level) specifically so fotmob_report.py stays independently
+    usable on its own (as fotmob_streamlit_app.py already relies on) for
+    everyone NOT using the batch runner - this is the only function in this
+    file that needs cross-source team-name matching at all.
+    """
+    from combined_report import canonical_team_name
+
+    target_home = canonical_team_name(home_name)
+    target_away = canonical_team_name(away_name)
+    day_url = f"https://www.fotmob.com/matches?date={date_str.replace('-', '')}"
+
+    print(f"Opening {day_url} ...")
+    with get_driver(track_network=True) as driver:
+        driver.get(day_url)
+        WebDriverWait(driver, PAGE_LOAD_WAIT_SEC).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        time.sleep(HYDRATION_POLL_INTERVAL_SEC * 4)
+
+        try:
+            logs = driver.get_log('performance')
+        except Exception as e:
+            raise RuntimeError(
+                f"Couldn't read performance logs (was track_network=True used?): {e}"
+            )
+
+    fixture_dicts = []
+    for entry in logs:
+        try:
+            message = json.loads(entry['message'])['message']
+        except (KeyError, json.JSONDecodeError, TypeError):
+            continue
+        if message.get('method') != 'Network.responseReceived':
+            continue
+        params = message.get('params', {})
+        resp_url = params.get('response', {}).get('url', '')
+        if 'match' not in resp_url.lower():
+            continue
+        request_id = params.get('requestId')
+        try:
+            body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+        except Exception:
+            continue
+        text = body.get('body', '')
+        if body.get('base64Encoded'):
+            try:
+                text = base64.b64decode(text).decode('utf-8', errors='replace')
+            except Exception:
+                continue
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        fixture_dicts.extend(_search_for_dicts_with_keys(data, {'home', 'away'}))
+
+    print(f"Day-schedule scan: found {len(fixture_dicts)} fixture-like object(s) for {date_str}.")
+
+    for fixture in fixture_dicts:
+        home = fixture.get('home')
+        away = fixture.get('away')
+        h_name = home.get('name') if isinstance(home, dict) else None
+        a_name = away.get('name') if isinstance(away, dict) else None
+        if not h_name or not a_name:
+            continue
+        if canonical_team_name(h_name) != target_home or canonical_team_name(a_name) != target_away:
+            continue
+        match_id = (fixture.get('id') or fixture.get('matchId')
+                    or (home.get('id') if isinstance(home, dict) else None))
+        if not match_id:
+            continue
+        slug_home = re.sub(r'[^a-z0-9]+', '-', h_name.lower()).strip('-')
+        slug_away = re.sub(r'[^a-z0-9]+', '-', a_name.lower()).strip('-')
+        return f"https://www.fotmob.com/matches/{slug_home}-vs-{slug_away}#{match_id}"
+
+    return None
+
+
 def _get_first(d, keys, default=None):
     """Return the first present, non-None value among several candidate keys."""
     if not isinstance(d, dict):
@@ -806,6 +932,12 @@ def extract_player_windows(match_json, player_minutes=None, shots_df=None):
     """
     columns = ['Team', 'Player', 'start_minute', 'end_minute', 'Minutes Played', 'subbed_off']
     lineup = match_json.get('lineup') if isinstance(match_json, dict) else None
+    if not isinstance(lineup, dict):
+        # Some responses nest lineup under a 'content' key instead of
+        # carrying it top-level (same shape variance _shots_list/
+        # extract_player_xa already handle) - fall back to a full search
+        # before concluding there's really no lineup data at all.
+        lineup = _search_for_key(match_json, {'lineup'})
     if not isinstance(lineup, dict):
         return pd.DataFrame(columns=columns)
 
