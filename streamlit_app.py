@@ -34,10 +34,12 @@ Hosting it so it's reachable from any device (Streamlit Community Cloud):
 """
 
 import io
+import os
 import traceback
 
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+import matplotlib.image as mpimg
+import matplotlib.patheffects as path_effects
 from matplotlib.patches import Arc, Rectangle
 import streamlit as st
 
@@ -152,7 +154,11 @@ if st.button("Generate Report", type="primary"):
 # ---------------------------------------------------------------------------
 PITCH_LIGHT = "#eeeeee"
 PITCH_DARK = "#dcdcdc"
-MAIN_BG = "#e5e5e5"  # midpoint between PITCH_LIGHT/PITCH_DARK - the area outside the pitch boundary
+# The area outside the pitch's own black touchlines - matches PITCH_DARK
+# exactly (rather than a separate near-white shade) so the striping reads as
+# fully contained inside the black lines, with one clean solid color outside
+# them, instead of a third tone that made the pitch boundary look blurry.
+MAIN_BG = PITCH_DARK
 N_PITCH_STRIPES = 12  # alternating bands, stacked along the pitch LENGTH (horizontal rows)
 PITCH_LINE_COLOR = "#1a1a1a"  # near-black
 PITCH_LINE_WIDTH = 2.4
@@ -179,6 +185,40 @@ PASS_CATEGORY_STYLE = {
 # important ones (Progressive, then Key Pass) stay visible even when a lot
 # of ordinary completed passes overlap them.
 PASS_CATEGORY_DRAW_ORDER = ["Incomplete", "Completed", "Progressive", "Key Pass"]
+
+# Title/subtitle/legend font (per request - Arial specifically, not
+# matplotlib's default DejaVu Sans). Assumes Arial is actually installed on
+# whatever machine renders this (true by default on Windows/macOS; on Linux
+# it may not be, in which case matplotlib silently falls back to its default
+# rather than erroring).
+PASS_MAP_FONT = "Arial"
+
+# Small watermark-style logo drawn in the pass map's top-left corner. Kept
+# next to this file (same folder) so a relative path works regardless of
+# the machine's working directory - if it's ever missing, the logo is just
+# skipped rather than crashing the whole Pass Map render.
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kwest_thoughts_logo_v2.png")
+
+
+def _load_logo():
+    """
+    Read the logo image fresh each call - NOT cached across reruns. (An
+    earlier version cached the result in a module-level dict; if the very
+    first load failed - e.g. before the file existed locally - that failure
+    was cached forever for the life of the Streamlit process, so the logo
+    would stay missing even after the file was added, until a full server
+    restart. Re-reading a small PNG each render is cheap, so there's no real
+    cost to just always trying again.)
+
+    Returns None (and shows a one-time warning with the exact path tried) if
+    the file is missing/unreadable, so a bad path is visible instead of
+    silently doing nothing.
+    """
+    try:
+        return mpimg.imread(LOGO_PATH)
+    except Exception as e:
+        st.warning(f"Pass Map logo not found/readable at {LOGO_PATH} ({e}) - skipping it.")
+        return None
 
 
 def _to_m_x(x):
@@ -248,17 +288,44 @@ def draw_pitch(ax):
     ax.set_aspect("equal")
     ax.axis("off")
 
-    # Watermark - positioned in pitch DATA coordinates (not axes-fraction)
-    # so it sits just below and a bit right of the center circle regardless
-    # of pitch dimensions. Drawn on top of everything else (zorder above the
-    # pass arrows) but semi-transparent so it doesn't compete with the passes.
-    watermark_x = center_x + 15
-    watermark_y = length / 2 - 9.15 - 3
-    ax.text(watermark_x, watermark_y, "@pkwestel", ha="center", va="center",
-            color=PITCH_LINE_COLOR, fontsize=13, fontweight="bold", alpha=0.45, zorder=3)
+    # Watermark - positioned in pitch DATA coordinates (not axes-fraction),
+    # centered on the pitch's horizontal midline (which is also the
+    # horizontal center of the whole figure, since this axes sits
+    # symmetrically within it). Placed in the MIDDLE of one of the LIGHTER
+    # stripe bands (stripe index 4, 0-indexed from the bottom - always light
+    # since PITCH_LIGHT is used at even indices), using PITCH_DARK's own
+    # color for the text - so it reads as a subtle tonal shift in the turf
+    # itself (dark-on-light here, the inverse of light-on-dark) rather than
+    # a bold overlay competing with the passes.
+    watermark_x = center_x
+    watermark_y = 4.5 * stripe_h
+    # zorder=1.5 - above the striping (0) and pitch markings (1), but below
+    # the pass lines (2) and their endpoint markers (3), so passes drawn on
+    # top of the pitch visually cover the watermark where they cross it,
+    # same as they'd cover any other part of the pitch background.
+    watermark_txt = ax.text(watermark_x, watermark_y, "@pkwestel", ha="center", va="center",
+                             color=PITCH_DARK, fontsize=20, fontweight="bold", alpha=1.0, zorder=1.5)
+    # A same-color stroke around each glyph, rather than relying on the fill
+    # alone - at this contrast level (PITCH_DARK vs PITCH_LIGHT is a fairly
+    # subtle 18-unit gray-on-gray difference) the anti-aliased edge pixels of
+    # thin lettering otherwise make it read as softer/more "see-through"
+    # than a true opaque cutout, even at alpha=1.0. Thickening the shape this
+    # way (still the exact same PITCH_DARK color, no new tone introduced)
+    # makes it read as solid.
+    watermark_txt.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground=PITCH_DARK)])
 
 
-def plot_pass_map(passes_df, player_name, home_name, away_name, stats):
+def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, title_suffix="Pass Map"):
+    """
+    Shared drawing code for both the outgoing Pass Map and the Passes
+    Received map - same pitch/logo/watermark, same per-category coloring
+    (passes_df just needs 'category', 'x', 'y', 'endX', 'endY' columns).
+    title_suffix distinguishes the two ("Pass Map" vs "Passes Received") in
+    the figure's title. stat_items is a caller-built list of (text, color)
+    tuples for the stat line below the pitch, since the two charts don't
+    track the same stats (e.g. "Completion %" doesn't apply to a received-
+    passes view, where everything shown is already complete by definition).
+    """
     length, width = wr.PITCH_LEN_M, wr.PITCH_WID_M
     pad = PITCH_PAD_M
     # Figure size matches the pitch's real aspect ratio exactly, so there's
@@ -268,8 +335,8 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stats):
     # margins (not a fraction of the whole figure) so there's no dead space
     # between the pitch and any of them.
     pitch_h = 10.0
-    top_pad_in = 1.15   # suptitle + subtitle + stat line, with room between each
-    bottom_pad_in = 0.45  # one row of legend text
+    top_pad_in = 0.8    # suptitle + subtitle only (no key, no stat line up here anymore)
+    bottom_pad_in = 0.5  # one row of stat-line text, below the pitch (no key anymore)
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
     fig = plt.figure(figsize=(fig_w, fig_h))
@@ -279,6 +346,24 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stats):
     axes_h_frac = pitch_h / fig_h
     ax = fig.add_axes([0.03, bottom_frac, 0.94, axes_h_frac])
     draw_pitch(ax)
+
+    # Small logo, top-left corner of the whole figure (fixed inches, not a
+    # fraction of the figure, so its size stays "small" regardless of the
+    # pitch's own aspect ratio).
+    logo_img = _load_logo()
+    if logo_img is not None:
+        logo_h_in = 0.65
+        margin_in = 0.12
+        aspect = logo_img.shape[1] / logo_img.shape[0]  # width / height, in pixels
+        logo_w_in = logo_h_in * aspect
+        logo_ax = fig.add_axes([
+            margin_in / fig_w,
+            1 - (margin_in + logo_h_in) / fig_h,
+            logo_w_in / fig_w,
+            logo_h_in / fig_h,
+        ])
+        logo_ax.imshow(logo_img)
+        logo_ax.axis("off")
 
     for category in PASS_CATEGORY_DRAW_ORDER:
         cat_passes = passes_df[passes_df["category"] == category]
@@ -295,35 +380,21 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stats):
             ax.scatter([x1], [y1], s=38, facecolors="white", edgecolors=color,
                        linewidths=1.3, alpha=alpha, zorder=3)
 
-    fig.suptitle(f"{player_name} - Pass Map", color=TITLE_COLOR, fontsize=17,
-                 fontweight="bold", y=1 - 0.22 / fig_h)
+    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=17,
+                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.22 / fig_h)
     subtitle_y = 1 - 0.65 / fig_h
     fig.text(0.5, subtitle_y, f"{home_name} vs {away_name}", color=TITLE_COLOR, fontsize=12,
-              ha="center")
+              fontname=PASS_MAP_FONT, ha="center")
 
-    # Stat line: Attempted/Completion % are neutral (white, not tied to any
-    # pass category), while Progressive/Key Passes are colored to match
-    # their legend swatches below, so the number ties visually back to the
-    # arrows it's counting.
-    stats_y = 1 - 1.0 / fig_h
-    stat_items = [
-        (f"{stats['attempted']} Attempted", TITLE_COLOR),
-        (f"{stats['completion_pct']:.0f}% Completion", TITLE_COLOR),
-        (f"{stats['progressive']} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
-        (f"{stats['key_passes']} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
-    ]
+    # Stat line: moved below the pitch (per request - the color key that
+    # used to live down here is gone entirely). Caller decides exactly which
+    # stats/colors go here (see docstring above).
+    stats_y = 0.22 / fig_h
     n = len(stat_items)
     for i, (text, color) in enumerate(stat_items):
         x = (i + 0.5) / n
         fig.text(x, stats_y, text, color=color, fontsize=11.5, fontweight="bold",
-                  ha="center", va="center")
-
-    legend_handles = [
-        Line2D([0], [0], color=color, lw=3, label=label)
-        for label, color in PASS_CATEGORY_COLORS.items()
-    ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=2, frameon=False,
-               labelcolor=TITLE_COLOR, fontsize=10.5, bbox_to_anchor=(0.5, 0.05 / fig_h))
+                  fontname=PASS_MAP_FONT, ha="center", va="center")
 
     return fig
 
@@ -356,9 +427,10 @@ if report:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabP = st.tabs(
+    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabP, tabPR = st.tabs(
         ["Totals", "Against", "Touches", "Passing", "Shot Creating Actions",
-         "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Shot Pairs", "Pass Map"]
+         "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Shot Pairs",
+         "Pass Map", "Passes Received"]
     )
     with tab0:
         st.dataframe(totals_out, use_container_width=True)
@@ -440,13 +512,14 @@ if report:
                 c3.metric("Progressive", progressive)
                 c4.metric("Key Passes (xA-adjacent)", key_passes)
 
-                stats = {
-                    "attempted": total,
-                    "completion_pct": completed / total * 100,
-                    "progressive": progressive,
-                    "key_passes": key_passes,
-                }
-                fig = plot_pass_map(player_passes, selected_player, home_name, away_name, stats)
+                stat_items = [
+                    (f"{total} Attempted", TITLE_COLOR),
+                    (f"{completed / total * 100:.0f}% Completion", TITLE_COLOR),
+                    (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                    (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+                ]
+                fig = plot_pass_map(player_passes, selected_player, home_name, away_name,
+                                     stat_items, title_suffix="Pass Map")
 
                 # Rendered as a fixed-width image (rather than st.pyplot's
                 # default full-column-width behavior) so the pitch shows up
@@ -457,16 +530,74 @@ if report:
                 png_buf.seek(0)
                 st.image(png_buf, width=420)
 
-                pdf_buf = io.BytesIO()
-                fig.savefig(pdf_buf, format="pdf", facecolor=fig.get_facecolor())
-                pdf_buf.seek(0)
+                # Higher-res than the on-page preview (dpi=150 above), since
+                # this copy is meant to be downloaded/kept/printed rather
+                # than just previewed inline.
+                download_png_buf = io.BytesIO()
+                fig.savefig(download_png_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+                download_png_buf.seek(0)
                 st.download_button(
-                    label="Download Pass Map (PDF)",
-                    data=pdf_buf,
-                    file_name=f"{wr.sanitize_filename(selected_player)}_pass_map.pdf",
-                    mime="application/pdf",
+                    label="Download Pass Map (PNG)",
+                    data=download_png_buf,
+                    file_name=f"{wr.sanitize_filename(selected_player)}_pass_map.png",
+                    mime="image/png",
                 )
                 plt.close(fig)
+        else:
+            st.info("No players found in this match's event data.")
+    with tabPR:
+        st.write(
+            "Every completed pass RECEIVED by one player, plotted on the pitch at the spot they "
+            "received it, colored by the same categories as the Pass Map - **completed**, "
+            "**progressive**, or **key pass (shot assist)**. Incomplete passes aren't shown here "
+            "since they were never actually received by anyone."
+        )
+        players_pr = (df[["team", "playerName"]].dropna()
+                      .drop_duplicates()
+                      .sort_values(["team", "playerName"]))
+        options_pr = [f"{row.team} — {row.playerName}" for row in players_pr.itertuples()]
+        label_to_player_pr = {f"{row.team} — {row.playerName}": row.playerName
+                               for row in players_pr.itertuples()}
+
+        if options_pr:
+            selected_label_pr = st.selectbox("Player", options_pr, key="passes_received_player")
+            selected_player_pr = label_to_player_pr[selected_label_pr]
+            passes_received = wr.get_player_passes_received(df, selected_player_pr)
+
+            if passes_received.empty:
+                st.info(f"{selected_player_pr} didn't receive any completed passes in this match.")
+            else:
+                total_pr = len(passes_received)
+                progressive_pr = int(passes_received["is_progressive"].sum())
+                key_passes_pr = int(passes_received["is_key_pass"].sum())
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Passes Received", total_pr)
+                c2.metric("Progressive", progressive_pr)
+                c3.metric("Key Passes (xA-adjacent)", key_passes_pr)
+
+                stat_items_pr = [
+                    (f"{total_pr} Received", TITLE_COLOR),
+                    (f"{progressive_pr} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                    (f"{key_passes_pr} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+                ]
+                fig_pr = plot_pass_map(passes_received, selected_player_pr, home_name, away_name,
+                                        stat_items_pr, title_suffix="Passes Received")
+
+                png_buf_pr = io.BytesIO()
+                fig_pr.savefig(png_buf_pr, format="png", dpi=150, facecolor=fig_pr.get_facecolor())
+                png_buf_pr.seek(0)
+                st.image(png_buf_pr, width=420)
+
+                download_png_buf_pr = io.BytesIO()
+                fig_pr.savefig(download_png_buf_pr, format="png", dpi=300, facecolor=fig_pr.get_facecolor())
+                download_png_buf_pr.seek(0)
+                st.download_button(
+                    label="Download Passes Received (PNG)",
+                    data=download_png_buf_pr,
+                    file_name=f"{wr.sanitize_filename(selected_player_pr)}_passes_received.png",
+                    mime="image/png",
+                )
+                plt.close(fig_pr)
         else:
             st.info("No players found in this match's event data.")
 

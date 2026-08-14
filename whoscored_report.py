@@ -505,6 +505,48 @@ def get_player_passes(df, player):
     return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
 
 
+def get_player_passes_received(df, player):
+    """
+    Every COMPLETED Pass received by one player - the mirror image of
+    get_player_passes() above, for the Passes Received map in
+    streamlit_app.py. Receiver is inferred the same way as everywhere else
+    in this module (_pass_receiver_map() - the next event's player, same
+    team), restricted up front to Successful passes only, since an
+    incomplete pass was never actually received by anyone on the attacking
+    team (there's no "receiver" to speak of) - so unlike get_player_passes(),
+    'category' here is never 'Incomplete'.
+
+    x/y are the PASSER's origin (where the ball came from); endX/endY are
+    where this player actually received it - so a map can still draw a line
+    from origin to reception point, same as the outgoing Pass Map, just
+    from the receiving player's perspective instead of the passer's.
+    is_progressive/is_key_pass/category use the exact same definitions as
+    get_player_passes() (a pass's progressive/key-pass status doesn't
+    depend on which end of it you're looking from).
+    """
+    out_cols = ['minute', 'second', 'team', 'passer', 'player', 'x', 'y', 'endX', 'endY',
+                'completed', 'is_progressive', 'is_key_pass', 'category']
+
+    receiver_map = _pass_receiver_map(df)
+    work = df[(df['type.displayName'] == 'Pass') & (df['outcomeType.displayName'] == 'Successful')].copy()
+    work['receiver'] = receiver_map.reindex(work.index)
+    work = work[work['receiver'] == player]
+    if work.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    prog_flags = _compute_progressive_flags(df)
+    prog_lookup = (prog_flags.set_index('orig_index')['is_progressive']
+                   if not prog_flags.empty else pd.Series(dtype=bool))
+
+    work['completed'] = True  # already restricted to Successful above
+    work['is_key_pass'] = work['qualifiers_parsed'].apply(lambda qs: 'ShotAssist' in qual_names(qs))
+    work['is_progressive'] = [bool(prog_lookup.get(i, False)) for i in work.index]
+    work['category'] = work.apply(classify_pass_category, axis=1)
+    work = work.rename(columns={'playerName': 'passer', 'receiver': 'player'})
+
+    return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
+
+
 # ============================================================
 # 3b. CARRIES
 # ============================================================
