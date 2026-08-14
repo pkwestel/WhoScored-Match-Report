@@ -68,24 +68,52 @@ class DB:
     query using '?' placeholders (sqlite3's style) - translated to '%s' for
     psycopg2 automatically. Not a query builder/ORM, just enough to avoid
     two copies of every SQL statement.
+
+    Auto-reconnects on a dead Postgres connection (see execute() below) -
+    dashboard_app.py caches one DB instance for the life of the whole
+    Streamlit server process (@st.cache_resource), but Neon's free tier
+    scales its compute down to zero after 5 minutes idle and closes the
+    underlying connection when it does. Without reconnect logic, the very
+    next query after any idle gap fails with psycopg2.OperationalError
+    ("server closed the connection unexpectedly" or similar) - which looks
+    like a real bug but is really just a stale connection to a database
+    that went to sleep.
     """
 
     def __init__(self, database_url: str):
         self.database_url = database_url
         self.backend = "postgres" if database_url.startswith(("postgres://", "postgresql://")) else "sqlite"
+        self._connect()
+
+    def _connect(self):
         if self.backend == "postgres":
             import psycopg2  # only required if you actually use a postgres:// URL
-            self._conn = psycopg2.connect(database_url)
+            self._conn = psycopg2.connect(self.database_url)
         else:
-            path = database_url.replace("sqlite:///", "", 1) if database_url.startswith("sqlite:///") else database_url
+            path = (self.database_url.replace("sqlite:///", "", 1)
+                    if self.database_url.startswith("sqlite:///") else self.database_url)
             self._conn = sqlite3.connect(path)
             self._conn.execute("PRAGMA foreign_keys = ON")
 
     def execute(self, sql: str, params: tuple = ()):
         sql = sql.replace("?", "%s") if self.backend == "postgres" else sql
-        cur = self._conn.cursor()
-        cur.execute(sql, params)
-        return cur
+        try:
+            cur = self._conn.cursor()
+            cur.execute(sql, params)
+            return cur
+        except Exception as e:
+            # Only Postgres connections go stale this way (Neon's scale-to-
+            # zero) - a SQLite error means something else is actually wrong
+            # (e.g. a genuine syntax error), so it's re-raised untouched.
+            if self.backend != "postgres":
+                raise
+            import psycopg2
+            if not isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+                raise
+            self._connect()
+            cur = self._conn.cursor()
+            cur.execute(sql, params)
+            return cur
 
     def commit(self):
         self._conn.commit()
