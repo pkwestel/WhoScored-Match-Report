@@ -17,13 +17,15 @@ Local use:
 
 Deploying to Streamlit Community Cloud:
     1. Push this file, history_db.py, pitch_viz.py, and
-       kwest_thoughts_logo_v2.png to the GitHub repo. NOTE: pitch_viz.py
-       does `import whoscored_report as wr` purely to read two constants
-       (PITCH_LEN_M/PITCH_WID_M) - and whoscored_report.py itself imports
-       selenium at the top of the file, even though nothing here ever
-       drives a browser. That means this "no scraping" dashboard still
-       needs whoscored_report.py and selenium listed in requirements.txt
-       to import cleanly. See requirements.txt's own comment on this.
+       kwest_thoughts_logo_v2.png to the GitHub repo - that's it, it does
+       NOT need whoscored_report.py, fotmob_report.py, selenium, or any of
+       the scraping dependencies. (pitch_viz.py used to import
+       whoscored_report.py just to read two float constants, which
+       transitively required the entire selenium/fake_useragent scraper
+       stack just to draw a pitch - that constant is now duplicated
+       directly inside pitch_viz.py instead, so this app's dependency list
+       stays genuinely minimal. See pitch_viz.py's own docstring for the
+       full story.)
     2. On share.streamlit.io, deploy pointed at this file.
     3. In the app's "Secrets" settings, set:
            DATABASE_URL = "postgresql://user:pass@host:port/dbname"

@@ -20,6 +20,22 @@ at the TOP of the image - the horizontal axis is pitch WIDTH (from
 normalized y), the vertical axis is pitch LENGTH (from normalized x, since
 higher x is always a team's own attacking direction per WhoScored/Opta
 convention already used elsewhere in whoscored_report.py).
+
+NOTE on NOT importing whoscored_report.py here: this module used to do
+`import whoscored_report as wr` purely to read its PITCH_LEN_M/PITCH_WID_M
+constants. That's a trap for dashboard_app.py specifically - it's the one
+app in this project deliberately built with NO scraping code, meant to
+deploy cleanly to Streamlit Community Cloud. But whoscored_report.py itself
+imports selenium (and, transitively, utils/driver.py's own dependencies
+like fake_useragent) at the top of the file, purely to support its scraper -
+none of that is ever actually used here. Importing whoscored_report.py from
+this module meant dashboard_app.py silently required the ENTIRE scraper
+dependency stack just to draw a pitch, which surfaced as a real
+ModuleNotFoundError in production (fake_useragent, found missing only after
+deploying - and the next transitive import after that would've been next).
+Duplicating these two float constants directly below removes that entire
+dependency chain for good, rather than playing whack-a-mole with
+requirements.txt one missing package at a time.
 """
 
 import os
@@ -30,7 +46,10 @@ import matplotlib.patheffects as path_effects
 from matplotlib.patches import Arc, Rectangle
 import streamlit as st
 
-import whoscored_report as wr
+# Duplicated from whoscored_report.py (see the module docstring above for
+# why) - keep these in sync if the real pitch dimensions ever change there.
+PITCH_LEN_M = 105.0
+PITCH_WID_M = 68.0
 
 PITCH_LIGHT = "#eeeeee"
 PITCH_DARK = "#dcdcdc"
@@ -103,16 +122,16 @@ def _load_logo():
 
 def _to_m_x(x):
     """Normalized (0-100) x -> metres along the pitch LENGTH (vertical axis)."""
-    return x / 100.0 * wr.PITCH_LEN_M
+    return x / 100.0 * PITCH_LEN_M
 
 
 def _to_m_y(y):
     """Normalized (0-100) y -> metres along the pitch WIDTH (horizontal axis)."""
-    return y / 100.0 * wr.PITCH_WID_M
+    return y / 100.0 * PITCH_WID_M
 
 
 def draw_pitch(ax):
-    length, width = wr.PITCH_LEN_M, wr.PITCH_WID_M
+    length, width = PITCH_LEN_M, PITCH_WID_M
     lc, lw = PITCH_LINE_COLOR, PITCH_LINE_WIDTH
     pad = PITCH_PAD_M
 
@@ -206,7 +225,7 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     track the same stats (e.g. "Completion %" doesn't apply to a received-
     passes view, where everything shown is already complete by definition).
     """
-    length, width = wr.PITCH_LEN_M, wr.PITCH_WID_M
+    length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
     # Figure size matches the pitch's real aspect ratio exactly, so there's
     # no leftover whitespace inside the axes from a mismatched box shape -
