@@ -137,7 +137,7 @@ from collections import deque
 
 import pandas as pd
 import numpy as np
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -198,71 +198,53 @@ OPEN_PLAY_EXCLUDE_QUALIFIERS = {'CornerTaken', 'FreekickTaken', 'IndirectFreekic
 # ============================================================
 # 0. FIXTURE DISCOVERY (batch runner support)
 # ============================================================
-def _search_for_dicts_with_keys(obj, required_keys, max_depth=25):
-    """
-    Recursively search a nested dict/list for every dict that contains ALL
-    of `required_keys` - the same general "search by key name, not by exact
-    path" resilience pattern fotmob_report.py's own _search_for_key() uses,
-    generalized here to find every matching dict (not just the first) since
-    get_fixture_urls() below needs the whole list of fixture rows, not one
-    value.
-    """
-    found = []
-    stack = [(obj, 0)]
-    while stack:
-        cur, depth = stack.pop()
-        if depth > max_depth:
-            continue
-        if isinstance(cur, dict):
-            if required_keys.issubset(cur.keys()):
-                found.append(cur)
-            for v in cur.values():
-                stack.append((v, depth + 1))
-        elif isinstance(cur, list):
-            for v in cur:
-                stack.append((v, depth + 1))
-    return found
-
-
-FIXTURE_FINISHED_STATUSES = {'fulltime', 'ft', 'finished', 'played', 'full time'}
+# Matches WhoScored's plain-text date headers on a fixtures/results page,
+# e.g. "Saturday, Aug 22 2026".
+_FIXTURE_DATE_HEADER_RE = re.compile(
+    r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2}\s+\d{4}$"
+)
+# A finished match's own link text on that page is a score like "2 - 1";
+# an unplayed one shows a placeholder like "--" instead.
+_FIXTURE_SCORE_RE = re.compile(r"^\d+\s*-\s*\d+$")
 
 
 def get_fixture_urls(fixtures_url, only_finished=True):
     """
-    Best-effort scraper for a WhoScored competition fixtures/results page
-    (e.g. the Premier League's own "Fixtures" tab) - returns a list of
-    {match_url, home_name, away_name, status} dicts, one per match found on
-    that page. Built to support a "run the whole weekend's matches" batch
-    workflow, so you don't have to copy/paste each match URL by hand.
+    Scraper for a WhoScored competition fixtures/results page (e.g. the
+    Premier League's own "Fixtures" tab, or the season "Summary" page's
+    inline week preview) - returns a list of {match_url, home_name,
+    away_name, status, date} dicts, one per match found on that page. Built
+    to support a "run the whole weekend's matches" batch workflow, so you
+    don't have to copy/paste each match URL by hand.
 
-    HONESTY NOTE - READ BEFORE RELYING ON THIS: unlike scrape_match() above
-    (built and debugged against real, saved matchCentreData JSON from actual
-    matches earlier in this project), this function has NOT been verified
-    against a live WhoScored fixtures page - there was no way to open a
-    browser and inspect the real page from the environment this was written
-    in. It reuses the same general technique that's already proven reliable
-    for match-centre pages (look for embedded JSON in a <script> tag, then
-    search that JSON structurally by key name rather than hard-coding one
-    exact path/variable name) - but the exact shape of a "fixture row"
-    object here (homeTeamName/awayTeamName/matchId/status field names) is an
-    educated guess based on WhoScored's own match-centre naming
-    conventions, not a confirmed one.
+    REAL PAGE STRUCTURE THIS IS BUILT AGAINST (confirmed by fetching the
+    actual Premier League fixtures/summary pages, not guessed): unlike the
+    match-centre page scrape_match() reads above, a fixtures page has NO
+    embedded JSON blob at all - fixtures are plain server-rendered HTML.
+    Each match is one <a href="/matches/<id>/show/<slug>"> link whose own
+    visible text is either a final score ("2 - 1", finished) or a
+    placeholder ("--", not yet played), immediately followed by two
+    <a href="/teams/<id>/show/<team-slug>"> links giving the home then away
+    team name as their visible text. Date headers appear as standalone text
+    ("Saturday, Aug 22 2026") preceding each day's block of matches. This
+    function walks the parsed HTML in document order, tracking the most
+    recent date header and pairing each match link with the two team links
+    that follow it.
 
-    If this raises RuntimeError, or silently returns an empty/wrong list on
-    a real run: that's expected first-try friction for an unverified
-    scraper, not a sign the rest of the project is broken. The fix is the
-    same as every other WhoScored/FotMob schema surprise handled elsewhere
-    in this project (see extract_player_windows()'s own history) - save the
-    page's HTML (or just the relevant <script> tag contents) and share it,
-    and this can be corrected against real data instead of more guessing.
-    In the meantime, the batch runner UI always offers pasting match URLs
-    in by hand as a fallback, so a broken auto-detect doesn't block you.
+    REMAINING UNCERTAINTY: fixture list links use the "/show/" (preview /
+    head-to-head) path, not the "/live/" (match centre) path scrape_match()
+    needs - so this function rewrites "/show/" to "/live/" when building
+    match_url, matching the URL convention scrape_match()'s own docstring
+    has always used successfully in production. That specific substitution
+    has NOT been confirmed against a live "/live/" page directly (an
+    attempted direct check timed out, and no finished match was available
+    to inspect at the time this was written) - if scrape_match() fails on a
+    URL this function produced, that rewrite is the first thing to
+    double-check. As always, the batch runner UI lets you paste match URLs
+    in by hand as a fallback.
 
-    only_finished: if True (default), keeps only matches whose guessed
-    status field looks like "finished" (see FIXTURE_FINISHED_STATUSES) -
-    if the status field can't be found at all for a match, it's INCLUDED
-    rather than silently dropped, so you can still see and manually decide
-    on anything this can't confidently classify.
+    only_finished: if True (default), keeps only matches whose own link
+    text looks like a final score rather than a "--" placeholder.
     """
     print(f"Opening {fixtures_url} ...")
     with get_driver() as driver:
@@ -274,68 +256,73 @@ def get_fixture_urls(fixtures_url, only_finished=True):
 
     soup = BeautifulSoup(page_source, "html.parser")
 
-    candidates = []
-    for script_tag in soup.find_all("script"):
-        text = script_tag.string or script_tag.text or ""
-        if not text.strip():
-            continue
-        for marker in ("= {", "= ["):
-            if marker not in text:
-                continue
-            _, _, after = text.partition(marker)
-            json_text = marker[-1] + after
-            json_text = json_text.split(";\n")[0].rstrip("; \n")
-            try:
-                data = json.loads(json_text)
-            except json.JSONDecodeError:
-                continue
-            candidates.extend(_search_for_dicts_with_keys(data, {"homeTeamName", "awayTeamName"}))
+    all_matches = []
+    seen_urls = set()
+    current_date = None
+    pending = None  # the match dict currently waiting on its two team-name links
 
-    if not candidates:
+    for el in soup.descendants:
+        if isinstance(el, NavigableString):
+            text = str(el).strip()
+            if text and _FIXTURE_DATE_HEADER_RE.match(text):
+                current_date = text
+            continue
+
+        if getattr(el, "name", None) != "a":
+            continue
+        href = el.get("href") or ""
+        text = el.get_text(strip=True)
+
+        match = re.match(r"^/matches/(\d+)/show/(.+)$", href)
+        if match:
+            match_id, slug = match.groups()
+            match_url = f"https://www.whoscored.com/matches/{match_id}/live/{slug}"
+            if match_url in seen_urls:
+                pending = None
+                continue
+            seen_urls.add(match_url)
+            pending = {
+                "match_url": match_url,
+                "score_text": text,
+                "date": current_date,
+                "home_name": None,
+                "away_name": None,
+            }
+            all_matches.append(pending)
+            continue
+
+        if pending is not None and re.match(r"^/teams/\d+/show/", href):
+            if pending["home_name"] is None:
+                pending["home_name"] = text
+            elif pending["away_name"] is None:
+                pending["away_name"] = text
+                pending = None  # both team names found, stop touching this match
+
+    if not all_matches:
         raise RuntimeError(
-            "Couldn't find any fixture data on this page - see get_fixture_urls()'s own "
-            "docstring (this scraper was never verified against a live page). WhoScored may "
-            "structure this page differently than assumed here, may require different "
-            "navigation (e.g. clicking to a specific date/gameweek) to reveal the fixture list "
-            "at all, or may have blocked the automated browser. Paste match URLs manually "
-            "instead of using auto-detect for now, and share the page's script tag contents so "
-            "this can be fixed against real data."
+            "Couldn't find any fixture links on this page (looked for "
+            "/matches/<id>/show/... anchors). WhoScored may have changed this "
+            "page's structure since get_fixture_urls() was last checked against "
+            "it, or this URL doesn't show a fixture list at all. Paste match "
+            "URLs manually instead of using auto-detect for now, and share the "
+            "page's HTML so this can be fixed against real data."
         )
 
     results = []
-    seen_ids = set()
-    for fixture in candidates:
-        home_name = fixture.get("homeTeamName")
-        away_name = fixture.get("awayTeamName")
-        match_id = fixture.get("matchId") or fixture.get("id")
-        if not (home_name and away_name and match_id) or match_id in seen_ids:
+    for m in all_matches:
+        if not (m["home_name"] and m["away_name"]):
+            # Couldn't confidently pair this match link with two team names -
+            # skip rather than guess at who played.
             continue
-        seen_ids.add(match_id)
-
-        # Prefer a direct URL/link field already embedded in the fixture
-        # object if WhoScored provides one - only fall back to constructing
-        # a URL by hand (a guess at WhoScored's slug format) if no such
-        # field exists, since a hand-built slug is the least certain part
-        # of this whole function.
-        match_url = (fixture.get("url") or fixture.get("matchUrl")
-                     or fixture.get("matchCentreUrl"))
-        if match_url and match_url.startswith("/"):
-            match_url = f"https://www.whoscored.com{match_url}"
-        if not match_url:
-            slug_home = re.sub(r"[^a-z0-9]+", "-", home_name.lower()).strip("-")
-            slug_away = re.sub(r"[^a-z0-9]+", "-", away_name.lower()).strip("-")
-            match_url = f"https://www.whoscored.com/matches/{match_id}/live/{slug_home}-{slug_away}"
-
-        status = str(fixture.get("statusName") or fixture.get("status") or "").strip()
-        is_finished = status.lower() in FIXTURE_FINISHED_STATUSES
-        if only_finished and status and not is_finished:
+        is_finished = bool(_FIXTURE_SCORE_RE.match(m["score_text"]))
+        if only_finished and not is_finished:
             continue
-
         results.append({
-            "match_url": match_url,
-            "home_name": home_name,
-            "away_name": away_name,
-            "status": status or "(unknown)",
+            "match_url": m["match_url"],
+            "home_name": m["home_name"],
+            "away_name": m["away_name"],
+            "status": "finished" if is_finished else (m["score_text"] or "(unknown)"),
+            "date": m["date"],
         })
 
     return results
