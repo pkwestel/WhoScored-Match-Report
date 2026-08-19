@@ -46,7 +46,7 @@ st.set_page_config(page_title="WhoScored Match Report", layout="wide")
 st.title("WhoScored Match Report Generator")
 st.write(
     "Paste a WhoScored match-centre URL below to generate Totals, Touches, "
-    "Passing, Shot Creating Actions, Progressive Passes tables, and a "
+    "Passing, Shot Creating Actions, Progressive Passes, On/Off tables, and a "
     "per-player Pass Map."
 )
 
@@ -98,11 +98,14 @@ if st.button("Generate Report", type="primary"):
                                                 chains_df, team_sequences, field_tilt, ppda,
                                                 defensive_stats, corners, home_name, away_name)
                 against_totals = wr.compute_against_totals(totals_out)
+            with st.spinner("Computing On/Off splits..."):
+                player_windows = wr.extract_player_windows(df)
+                on_off = wr.compute_on_off(df, player_windows)
 
             wb = wr.build_workbook(
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                 defensive_action_location, passing_pairs, home_name, away_name, against_totals,
-                shot_pairs,
+                shot_pairs, on_off,
             )
             buf = io.BytesIO()
             wb.save(buf)
@@ -129,6 +132,7 @@ if st.button("Generate Report", type="primary"):
                 "player_totals": player_totals,
                 "passing_pairs": passing_pairs,
                 "shot_pairs": shot_pairs,
+                "on_off": on_off,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_events": len(df),
@@ -160,6 +164,7 @@ if report:
     player_totals = report["player_totals"]
     passing_pairs = report["passing_pairs"]
     shot_pairs = report["shot_pairs"]
+    on_off = report["on_off"]
 
     st.success(f"Scraped {report['n_events']} events — {home_name} vs {away_name}")
 
@@ -170,10 +175,10 @@ if report:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabP, tabPR = st.tabs(
+    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabOO, tabP, tabPR = st.tabs(
         ["Totals", "Against", "Touches", "Passing", "Shot Creating Actions",
          "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Shot Pairs",
-         "Pass Map", "Passes Received"]
+         "On/Off", "Pass Map", "Passes Received"]
     )
     with tab0:
         st.dataframe(totals_out, use_container_width=True)
@@ -222,6 +227,23 @@ if report:
             st.subheader(t)
             st.dataframe(
                 shot_pairs[shot_pairs["team"] == t].drop(columns=["team"]).reset_index(drop=True),
+                use_container_width=True,
+            )
+    with tabOO:
+        st.write(
+            "For every player, team totals - Shots, Total Touches, thirds, and Attacking Box "
+            "touches - split into **For** (their own team) and **Against** (the opponent), counted "
+            "only for the minutes that player was actually on the pitch. A substituted player isn't "
+            "credited for the exact minute they left (that belongs to whoever replaced them). See "
+            "the workbook's Notes tab for the full definition, including a known limitation around "
+            "red/second-yellow cards."
+        )
+        on_off_teams = ([t for t in [home_name, away_name] if t is not None]
+                        or sorted(on_off["Team"].unique()))
+        for t in on_off_teams:
+            st.subheader(t)
+            st.dataframe(
+                on_off[on_off["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
                 use_container_width=True,
             )
     with tabP:

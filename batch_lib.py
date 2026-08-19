@@ -23,6 +23,59 @@ import combined_report as cr
 import history_db as hdb
 
 
+def find_existing_match(db_url, home_name, away_name, match_date_iso):
+    """
+    Anti-duplicate check for the batch runner: does a match already exist in
+    the history database for this exact (home team, away team, date)
+    combination? Used to default an already-saved match's "Run" checkbox to
+    UNCHECKED, so re-running the batch runner over a weekend you already
+    processed doesn't silently re-scrape (and re-hit WhoScored/FotMob for)
+    matches that are already saved - the whole point of a random delay
+    between matches is to avoid unnecessary bursty traffic, and re-scraping
+    something already in the database is the most avoidable traffic there
+    is.
+
+    Matches on (home, away, date) rather than home/away alone, since the
+    same two teams can legitimately meet twice in a season (the reverse
+    league fixture, or a cup tie) - date is what disambiguates those rather
+    than treating every past meeting between two teams as the same match.
+    Team names are compared via combined_report.canonical_team_name(), so a
+    spelling difference between what the fixtures page calls a team and
+    what's already stored ("Man Utd" vs "Manchester United") doesn't cause
+    a false "not found" and a needless re-scrape.
+
+    This intentionally does NOT block a deliberate re-run - it only affects
+    the checkbox's default state, never whether a row even appears. Rerun
+    something on purpose (e.g. to pick up a stat-calculation fix, like
+    Defensive Action Height's formula update earlier in this project) by
+    just checking the box yourself.
+
+    Returns False (never found) on any database error - a connection
+    hiccup here should never block you from running matches, just leave
+    the duplicate check inconclusive rather than crashing the batch runner
+    over it.
+    """
+    try:
+        db = hdb.get_db(db_url)
+        hdb.init_schema(db)
+        existing = hdb.fetch_matches(db)
+        db.close()
+    except Exception:
+        return False
+
+    if existing.empty:
+        return False
+
+    target_home = cr.canonical_team_name(home_name)
+    target_away = cr.canonical_team_name(away_name)
+    for _, row in existing.iterrows():
+        if (cr.canonical_team_name(row.get("home_team", "")) == target_home
+                and cr.canonical_team_name(row.get("away_team", "")) == target_away
+                and str(row.get("match_date", "")) == str(match_date_iso)):
+            return True
+    return False
+
+
 def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     """
     Runs the exact same scrape-and-compute sequence combined_streamlit_app.py's
@@ -54,7 +107,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
     passes_received = wr.compute_passes_received(df)
     passing_pairs = wr.compute_passing_pairs(df)
-    team_carries, player_carries = wr.compute_carries(df)
+    team_carries, player_carries, _carries_df = wr.compute_carries(df)
     sca_out = wr.compute_sca(df)
     shot_pairs = wr.compute_shot_pairs(sca_out)
     team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,

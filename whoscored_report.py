@@ -3,8 +3,8 @@ WhoScored match report generator.
 
 Scrapes a WhoScored match-centre page and produces a styled Excel workbook
 with tabs: Totals, Against, Touches, Passing, Shot Creating Actions,
-Defensive Actions, Defensive Action Location, Passing Pairs, and Shot Pairs
-(plus a Notes tab documenting every definition/assumption used).
+Defensive Actions, Defensive Action Location, Passing Pairs, Shot Pairs, and
+On-Off (plus a Notes tab documenting every definition/assumption used).
 
 SETUP (one-time):
     Drop this file into the root of your cloned football-data-webscraping
@@ -123,6 +123,15 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     / both teams' combined passes attempted. Close to a published benchmark.
   - Corners (Totals tab): count of Pass events with a 'CornerTaken'
     qualifier. Exact match against a published benchmark.
+  - On-Off tab (per player, by team): Shots/Total Touches/thirds/Attacking
+    Box/Carries into Final Third/Carries into Box/Passes into Final 1/3/
+    Passes into the Box/Crosses Attempted/Crosses Completed (open play
+    only), grouped as a block of all "For" (own team) columns followed by
+    a block of all "Against" (opponent) columns, counted only during each
+    player's own on-pitch window (kickoff or their SubstitutionOn time, to
+    the final whistle or their own SubstitutionOff time). A red/second-
+    yellow card isn't accounted for - a sent-off player's window still
+    runs to the final whistle.
 
 If WhoScored changes its page structure, the scrape step may need
 adjusting - see `scrape_match()` below.
@@ -203,48 +212,53 @@ OPEN_PLAY_EXCLUDE_QUALIFIERS = {'CornerTaken', 'FreekickTaken', 'IndirectFreekic
 _FIXTURE_DATE_HEADER_RE = re.compile(
     r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2}\s+\d{4}$"
 )
-# A finished match's own link text on that page is a score like "2 - 1";
-# an unplayed one shows a placeholder like "--" instead.
-_FIXTURE_SCORE_RE = re.compile(r"^\d+\s*-\s*\d+$")
+# Status tokens WhoScored shows next to a FINISHED match - confirmed by
+# fetching a real, already-played month of Premier League fixtures (every
+# match on that page showed "FT" as its own standalone token; matches that
+# went to extra time/penalties are expected to use "AET"/"Pens" the same
+# way, though that specific case hasn't been seen in real data yet). Any
+# other token next to a match (a kickoff time, "--", "LIVE", a live match
+# minute, ...) is treated as NOT finished - the safe default for a batch
+# runner that should only auto-run matches that have actually been played.
+_FIXTURE_FINISHED_STATUS_WORDS = {"FT", "AET", "PENS", "PEN"}
 
 
 def get_fixture_urls(fixtures_url, only_finished=True):
     """
     Scraper for a WhoScored competition fixtures/results page (e.g. the
-    Premier League's own "Fixtures" tab, or the season "Summary" page's
-    inline week preview) - returns a list of {match_url, home_name,
-    away_name, status, date} dicts, one per match found on that page. Built
-    to support a "run the whole weekend's matches" batch workflow, so you
-    don't have to copy/paste each match URL by hand.
+    Premier League's own "Fixtures" tab) - returns a list of {match_url,
+    home_name, away_name, status, date} dicts, one per match found on that
+    page. Built to support a "run the whole weekend's matches" batch
+    workflow, so you don't have to copy/paste each match URL by hand.
 
-    REAL PAGE STRUCTURE THIS IS BUILT AGAINST (confirmed by fetching the
-    actual Premier League fixtures/summary pages, not guessed): unlike the
-    match-centre page scrape_match() reads above, a fixtures page has NO
-    embedded JSON blob at all - fixtures are plain server-rendered HTML.
-    Each match is one <a href="/matches/<id>/show/<slug>"> link whose own
-    visible text is either a final score ("2 - 1", finished) or a
-    placeholder ("--", not yet played), immediately followed by two
+    REAL PAGE STRUCTURE THIS IS BUILT AGAINST: confirmed by fetching two
+    real pages - an upcoming/not-yet-played fixtures page, and (separately)
+    a real month of ALREADY-PLAYED Premier League results. Neither has any
+    embedded JSON like the match-centre page scrape_match() reads above -
+    fixtures are plain server-rendered HTML. Each match has a short status
+    token as standalone text immediately before it ("FT" for a finished
+    match - confirmed directly from the real results page; something else -
+    a kickoff time, "--", etc. - for a not-yet-played one), followed by a
+    link to the match itself and then two
     <a href="/teams/<id>/show/<team-slug>"> links giving the home then away
     team name as their visible text. Date headers appear as standalone text
-    ("Saturday, Aug 22 2026") preceding each day's block of matches. This
+    ("Saturday, May 02 2026") preceding each day's block of matches. This
     function walks the parsed HTML in document order, tracking the most
-    recent date header and pairing each match link with the two team links
-    that follow it.
+    recent date header and status token, and pairing each match link with
+    the two team links that follow it.
 
-    REMAINING UNCERTAINTY: fixture list links use the "/show/" (preview /
-    head-to-head) path, not the "/live/" (match centre) path scrape_match()
-    needs - so this function rewrites "/show/" to "/live/" when building
-    match_url, matching the URL convention scrape_match()'s own docstring
-    has always used successfully in production. That specific substitution
-    has NOT been confirmed against a live "/live/" page directly (an
-    attempted direct check timed out, and no finished match was available
-    to inspect at the time this was written) - if scrape_match() fails on a
-    URL this function produced, that rewrite is the first thing to
-    double-check. As always, the batch runner UI lets you paste match URLs
-    in by hand as a fallback.
+    On the real already-played results page, a finished match's own link
+    already points straight at the "/live/" match-centre URL
+    scrape_match() needs - this used to be an unconfirmed guess (the
+    fixture list was assumed to only expose a "/show/" preview-page link),
+    but real data now confirms it directly. A not-yet-played match's link
+    still uses "/show/", which this function rewrites to the equivalent
+    "/live/" URL for consistency - though with only_finished=True (the
+    default) that rewritten URL is normally filtered out before you'd ever
+    use it, since it points at a match that hasn't happened yet.
 
-    only_finished: if True (default), keeps only matches whose own link
-    text looks like a final score rather than a "--" placeholder.
+    only_finished: if True (default), keeps only matches whose status token
+    is a recognized "finished" marker (see _FIXTURE_FINISHED_STATUS_WORDS).
     """
     print(f"Opening {fixtures_url} ...")
     with get_driver() as driver:
@@ -259,53 +273,69 @@ def get_fixture_urls(fixtures_url, only_finished=True):
     all_matches = []
     seen_urls = set()
     current_date = None
+    pending_status = None  # most recent short status token seen, consumed by the next match link
     pending = None  # the match dict currently waiting on its two team-name links
 
     for el in soup.descendants:
         if isinstance(el, NavigableString):
             text = str(el).strip()
-            if text and _FIXTURE_DATE_HEADER_RE.match(text):
+            if not text:
+                continue
+            if _FIXTURE_DATE_HEADER_RE.match(text):
                 current_date = text
+                continue
+            # A short, single-token line (no spaces) is this match's status
+            # ("FT", a kickoff time, "--", ...) - but only capture it while
+            # we're between matches. In between a match's own two team links,
+            # WhoScored also shows the team's score as a bare digit
+            # ("Brentford" / "1" / "West Ham") - ignoring stray text while
+            # `pending` is set keeps a score digit like that from being
+            # mistaken for the NEXT match's status.
+            if pending is None and " " not in text and len(text) <= 12:
+                pending_status = text
             continue
 
         if getattr(el, "name", None) != "a":
             continue
-        href = el.get("href") or ""
-        text = el.get_text(strip=True)
+        href = (el.get("href") or "").split("#", 1)[0].rstrip("/")
 
-        match = re.match(r"^/matches/(\d+)/show/(.+)$", href)
-        if match:
-            match_id, slug = match.groups()
+        m = re.match(r"^/matches/(\d+)/(?:live|show)/([^/]+)$", href)
+        if m:
+            match_id, slug = m.groups()
             match_url = f"https://www.whoscored.com/matches/{match_id}/live/{slug}"
             if match_url in seen_urls:
-                pending = None
+                # A later "comments"/"stats" link back to a match already
+                # recorded (both the /show/ and /live/ variants normalize to
+                # the same match_url above) - not a new match.
                 continue
             seen_urls.add(match_url)
             pending = {
                 "match_url": match_url,
-                "score_text": text,
+                "status": pending_status,
                 "date": current_date,
                 "home_name": None,
                 "away_name": None,
             }
             all_matches.append(pending)
+            pending_status = None
             continue
 
         if pending is not None and re.match(r"^/teams/\d+/show/", href):
             if pending["home_name"] is None:
-                pending["home_name"] = text
+                pending["home_name"] = el.get_text(strip=True)
             elif pending["away_name"] is None:
-                pending["away_name"] = text
+                pending["away_name"] = el.get_text(strip=True)
                 pending = None  # both team names found, stop touching this match
 
     if not all_matches:
         raise RuntimeError(
             "Couldn't find any fixture links on this page (looked for "
-            "/matches/<id>/show/... anchors). WhoScored may have changed this "
-            "page's structure since get_fixture_urls() was last checked against "
-            "it, or this URL doesn't show a fixture list at all. Paste match "
-            "URLs manually instead of using auto-detect for now, and share the "
-            "page's HTML so this can be fixed against real data."
+            "/matches/<id>/live/... or /show/... anchors). WhoScored may have "
+            "changed this page's structure since get_fixture_urls() was last "
+            "checked against it, or this URL doesn't show a fixture list at "
+            "all. Paste match URLs manually instead of using auto-detect for "
+            "now, and share the page's HTML so this can be fixed against real "
+            "data."
         )
 
     results = []
@@ -314,14 +344,15 @@ def get_fixture_urls(fixtures_url, only_finished=True):
             # Couldn't confidently pair this match link with two team names -
             # skip rather than guess at who played.
             continue
-        is_finished = bool(_FIXTURE_SCORE_RE.match(m["score_text"]))
+        status_word = (m["status"] or "").upper()
+        is_finished = status_word in _FIXTURE_FINISHED_STATUS_WORDS
         if only_finished and not is_finished:
             continue
         results.append({
             "match_url": m["match_url"],
             "home_name": m["home_name"],
             "away_name": m["away_name"],
-            "status": "finished" if is_finished else (m["score_text"] or "(unknown)"),
+            "status": m["status"] or "(unknown)",
             "date": m["date"],
         })
 
@@ -762,6 +793,13 @@ def compute_carries(df):
     3 and 60 metres, and the elapsed time is between 1 and 10 seconds (to
     rule out carries that are too trivial, too implausibly long, or that
     silently bridge a stoppage).
+
+    Returns (team_carries, player_carries, carries_df): the first two are
+    whole-match totals (per team / per team+player); carries_df is the raw,
+    one-row-per-carry data behind them (team, player, cumulative_mins,
+    is_progressive, into_final_third, into_box) - kept around so
+    compute_on_off() can window carries down to a specific player's own
+    on-pitch time, which the two aggregate tables alone can't do.
     """
     d = _add_cumulative_mins(df)
     n = len(d)
@@ -827,13 +865,14 @@ def compute_carries(df):
 
         carry_records.append({
             'team': cur['team'], 'player': nxt['playerName'],
+            'cumulative_mins': cur['cumulative_mins'],
             'is_progressive': bool(is_progressive),
             'into_final_third': bool(end_third == 'Final third' and start_third != 'Final third'),
             'into_box': bool(ends_in_box and not starts_in_box),
         })
 
     carries_df = pd.DataFrame(carry_records) if carry_records else pd.DataFrame(
-        columns=['team', 'player', 'is_progressive', 'into_final_third', 'into_box'])
+        columns=['team', 'player', 'cumulative_mins', 'is_progressive', 'into_final_third', 'into_box'])
 
     team_carries = carries_df.groupby('team').agg(
         progressive_carries=('is_progressive', 'sum'),
@@ -849,7 +888,12 @@ def compute_carries(df):
     ).reset_index() if len(carries_df) else pd.DataFrame(
         columns=['team', 'player', 'progressive_carries', 'carries_into_final_third', 'carries_into_box'])
 
-    return team_carries, player_carries
+    # carries_df (the raw, one-row-per-carry data, with each carry's own
+    # cumulative_mins) is also returned so compute_on_off() can window
+    # carries by a specific player's on-pitch time - team_carries/
+    # player_carries above only have whole-match totals, which isn't enough
+    # for an on/off split.
+    return team_carries, player_carries, carries_df
 
 
 # ============================================================
@@ -1056,19 +1100,24 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
 # ============================================================
 # 5b. PASSING
 # ============================================================
-def compute_passing(df, player_totals, sca_out):
+def _classify_passes(df):
     """
-    Per-player passing totals, one table per team. 'Open play' crosses/entries
-    exclude corners and free kicks (direct or indirect) - see qualifier sets
-    above. Progressive Passes here is merged in from compute_progressive_passes
-    (same definition/logic used elsewhere in this workbook); Shot Assists is
-    read directly from WhoScored's own 'ShotAssist' qualifier on the pass
-    event, rather than re-derived from the SCA search. SCA is the combined
-    count of times a player appears as either the SCA1 or SCA2 contributing
-    action in the Shot Creating Actions tab (same underlying search/logic,
-    just totalled per player here).
+    Shared pass-event classification, used by both compute_passing() (per-
+    player pass totals) and compute_on_off() (windowed On/Off splits) - one
+    canonical definition of "open play cross" / "into final third" / "into
+    the box" for a pass, so those two tabs can never quietly disagree with
+    each other about what counts. 'Open play' excludes corners and free
+    kicks (direct or indirect) - see OPEN_PLAY_EXCLUDE_QUALIFIERS above.
+
+    Returns just the Pass rows from df (with cumulative_mins already
+    attached via _add_cumulative_mins, since compute_on_off needs each
+    pass's own match minute to know which player's on-pitch window it
+    falls in), plus these added columns: qn (qualifier name set),
+    completed, forward, headed, is_cross, is_open_play, open_play_cross,
+    open_play_cross_completed, into_final_third, into_box, shot_assist.
     """
-    passes = df[df['type.displayName'] == 'Pass'].copy()
+    d = _add_cumulative_mins(df)
+    passes = d[d['type.displayName'] == 'Pass'].copy()
     passes['qn'] = passes['qualifiers_parsed'].apply(qual_names)
     passes['completed'] = passes['outcomeType.displayName'] == 'Successful'
     passes['forward'] = passes['endX'] > passes['x']
@@ -1082,6 +1131,23 @@ def compute_passing(df, player_totals, sca_out):
     passes['into_box'] = (passes['completed'] & passes['is_open_play']
                            & (~in_box(passes['x'], passes['y'])) & in_box(passes['endX'], passes['endY']))
     passes['shot_assist'] = passes['qn'].apply(lambda s: 'ShotAssist' in s)
+    return passes
+
+
+def compute_passing(df, player_totals, sca_out):
+    """
+    Per-player passing totals, one table per team. 'Open play' crosses/entries
+    exclude corners and free kicks (direct or indirect) - see qualifier sets
+    above (see _classify_passes() for the shared classification logic).
+    Progressive Passes here is merged in from compute_progressive_passes
+    (same definition/logic used elsewhere in this workbook); Shot Assists is
+    read directly from WhoScored's own 'ShotAssist' qualifier on the pass
+    event, rather than re-derived from the SCA search. SCA is the combined
+    count of times a player appears as either the SCA1 or SCA2 contributing
+    action in the Shot Creating Actions tab (same underlying search/logic,
+    just totalled per player here).
+    """
+    passes = _classify_passes(df)
 
     grouped = passes.groupby(['team', 'playerName']).agg(
         passes_completed=('completed', 'sum'),
@@ -1634,6 +1700,216 @@ def compute_against_totals(totals_out):
 
 
 # ============================================================
+# 5f. ON/OFF (per-player on-pitch splits)
+# ============================================================
+def extract_player_windows(df):
+    """
+    Per-player on-pitch window for this match: Team, Player, start_minute,
+    end_minute, Minutes Played, subbed_off. Backs the On/Off tab (see
+    compute_on_off() below) - the WhoScored-side equivalent of
+    fotmob_report.extract_player_windows(), same underlying concept (a
+    player's own on-pitch window) but read directly from WhoScored's own
+    event stream instead of FotMob's lineup JSON. WhoScored's own
+    'SubstitutionOn'/'SubstitutionOff' events already carry the exact
+    minute (via cumulative match time, continuous across halves - see
+    _add_cumulative_mins()) each substitution happened, so unlike the
+    FotMob version, there's no need for a "Minutes Played" fallback
+    estimate - the real event log always has it.
+
+    start_minute is a player's own 'SubstitutionOn' time if they came on
+    as a substitute, else 0 (they started the match). end_minute is their
+    own 'SubstitutionOff' time if they were substituted off, else the
+    match's own last recorded event time (correctly includes stoppage
+    time in both halves, since it's read from the real event log rather
+    than assumed to be a flat 90/45).
+
+    subbed_off (bool) tells compute_on_off() how to treat the boundary at
+    end_minute, the same convention fotmob_report.compute_plus_minus()
+    uses: a substituted player doesn't get credit for the exact minute
+    they left (that belongs to whoever replaced them), while a player who
+    finished the match does get the exact final minute.
+
+    KNOWN LIMITATION: a sent-off player (red card / second yellow) isn't
+    detected here - their window still runs to the final whistle rather
+    than ending at the card. See compute_on_off()'s own docstring for what
+    that means for its "Against" numbers on a match with a red card in it.
+
+    Only players with at least one event of their own in this match's
+    event stream get a row - a bench player who never actually appeared
+    naturally has none. (In the very rare case of an outfield player who
+    touched the ball zero times all match - no pass, no tackle, nothing -
+    they'd be missing here too; every other per-player table in this
+    workbook has this same limitation, since they all key off
+    df['playerName'] the same way.)
+    """
+    columns = ['Team', 'Player', 'start_minute', 'end_minute', 'Minutes Played', 'subbed_off']
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    d = _add_cumulative_mins(df)
+    match_end = d['cumulative_mins'].max()
+
+    players = d[d['playerName'].notna()][['team', 'playerName']].drop_duplicates()
+
+    sub_off = d[d['type.displayName'] == 'SubstitutionOff']
+    off_lookup = {(r.team, r.playerName): r.cumulative_mins for r in sub_off.itertuples()}
+
+    sub_on = d[d['type.displayName'] == 'SubstitutionOn']
+    on_lookup = {(r.team, r.playerName): r.cumulative_mins for r in sub_on.itertuples()}
+
+    rows = []
+    for r in players.itertuples():
+        team, player = r.team, r.playerName
+        start = on_lookup.get((team, player), 0.0)
+        subbed_off = (team, player) in off_lookup
+        end = off_lookup[(team, player)] if subbed_off else match_end
+        rows.append({
+            'Team': team, 'Player': player,
+            'start_minute': start, 'end_minute': end,
+            'Minutes Played': round(end - start),
+            'subbed_off': subbed_off,
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def compute_on_off(df, player_windows, carries_df):
+    """
+    On/Off tab: for every player, team totals - Shots, Total Touches, Own/
+    Middle/Final Third Touches, Attacking Box Touches, Carries into Final
+    Third, Carries into Box, Passes into Final 1/3, Passes into the Box,
+    Crosses Attempted, and Crosses Completed - split into "For" (their own
+    team's total) and "Against" (the opponent's total), counted only for
+    the minutes that player was actually on the pitch (their own window
+    from extract_player_windows() above) - the same on-pitch-window
+    concept fotmob_report.py's Plus Minus tab uses for FotMob's shot/goal/
+    xG data, applied here to WhoScored's own event stats instead. All 10
+    metrics' "For" columns are grouped together, followed by all 10
+    "Against" columns, rather than interleaved pair by pair.
+
+    Own Third / Middle Third / Final Third / Attacking Box / Carries into
+    Final Third / Carries into Box use the exact same thirds boundaries and
+    box definition as the Touches tab (OWN_THIRD_MAX/MIDDLE_THIRD_MAX,
+    in_box()); Passes into Final 1/3 / Passes into the Box / Crosses
+    Attempted / Crosses Completed use the exact same open-play-only
+    definitions as the Passing tab (see _classify_passes()) - one shared
+    implementation for each, so this tab can never quietly disagree with
+    the Touches/Passing tabs about what counts. Like every other thirds/
+    box stat in this project, that's each event's OWN attacking direction
+    (WhoScored/Opta coordinates already run 0 at a team's own goal to 100
+    at the opponent's goal for every event, regardless of which actual
+    half of the pitch or which way that team is actually shooting) - so
+    e.g. "Final Third Against" means the OPPONENT was in THEIR OWN
+    attacking final third (i.e. deep in this player's own defensive
+    third), not literally the same physical strip of grass as "Final
+    Third For".
+
+    carries_df is compute_carries()'s own raw, one-row-per-carry data (see
+    that function's docstring) - needed here because carries aren't a
+    single WhoScored event row with their own minute the way touches/
+    shots/passes are; each carry's cumulative_mins (when it started) is
+    what's used to decide which player's on-pitch window it falls in.
+
+    A player who was subbed off doesn't get credit for the exact minute
+    they left (that belongs to whoever replaced them) - a player who
+    played to the final whistle does get credit for the exact final
+    minute. Same boundary convention as fotmob_report.compute_plus_minus().
+
+    KNOWN LIMITATION: a red/second-yellow card isn't accounted for - a
+    sent-off player's own window still runs to the final whistle rather
+    than ending at the card, and this project has no explicit per-minute
+    "how many players were on the pitch" tracking, only each individual
+    player's own window - so a match with a red card in it will somewhat
+    understate how much the shorthanded team was actually under the cosh
+    for those minutes. Not expected to come up often, but worth knowing
+    before drawing conclusions from a match that had a sending-off in it.
+
+    Returns one DataFrame, sorted by Team then descending Minutes Played -
+    split into two tables, one per team, when written to the
+    workbook/UI (see build_workbook()).
+    """
+    for_cols = ['Shots For', 'Total Touches For', 'Own Third For', 'Middle Third For',
+                'Final Third For', 'Attacking Box For', 'Carries into Final Third For',
+                'Carries into Box For', 'Passes into Final 1/3 For', 'Passes into the Box For',
+                'Crosses Attempted For', 'Crosses Completed For']
+    against_cols = [c.replace(' For', ' Against') for c in for_cols]
+    out_cols = ['Team', 'Player', 'Minutes Played'] + for_cols + against_cols
+    if df.empty or player_windows.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    d = _add_cumulative_mins(df)
+    d['pitch_third'] = d['x'].apply(third)
+    d['in_att_box'] = in_box(d['x'], d['y'])
+
+    passes = _classify_passes(df)
+
+    teams_all = sorted(player_windows['Team'].dropna().unique())
+    opponent = {teams_all[0]: teams_all[1], teams_all[1]: teams_all[0]} if len(teams_all) == 2 else {}
+
+    records = []
+    for _, prow in player_windows.iterrows():
+        team = prow['Team']
+        opp = opponent.get(team)
+        start, end, subbed_off = prow['start_minute'], prow['end_minute'], prow['subbed_off']
+
+        if subbed_off:
+            in_window = lambda mins: (mins >= start) & (mins < end)
+        else:
+            in_window = lambda mins: (mins >= start) & (mins <= end)
+
+        mask = in_window(d['cumulative_mins'])
+        own = d[(d['team'] == team) & mask]
+        opp_events = d[(d['team'] == opp) & mask] if opp else d.iloc[0:0]
+        own_touches = own[own['isTouch'] == True]
+        opp_touches = opp_events[opp_events['isTouch'] == True]
+
+        pass_mask = in_window(passes['cumulative_mins'])
+        own_passes = passes[(passes['team'] == team) & pass_mask]
+        opp_passes = passes[(passes['team'] == opp) & pass_mask] if opp else passes.iloc[0:0]
+
+        if carries_df.empty:
+            own_carries = opp_carries = carries_df
+        else:
+            carry_mask = in_window(carries_df['cumulative_mins'])
+            own_carries = carries_df[(carries_df['team'] == team) & carry_mask]
+            opp_carries = carries_df[(carries_df['team'] == opp) & carry_mask] if opp else carries_df.iloc[0:0]
+
+        records.append({
+            'Team': team,
+            'Player': prow['Player'],
+            'Minutes Played': prow['Minutes Played'],
+            'Shots For': int((own['isShot'] == True).sum()),
+            'Total Touches For': int(len(own_touches)),
+            'Own Third For': int((own_touches['pitch_third'] == 'Own third').sum()),
+            'Middle Third For': int((own_touches['pitch_third'] == 'Middle third').sum()),
+            'Final Third For': int((own_touches['pitch_third'] == 'Final third').sum()),
+            'Attacking Box For': int(own_touches['in_att_box'].sum()),
+            'Carries into Final Third For': int(own_carries['into_final_third'].sum()) if len(own_carries) else 0,
+            'Carries into Box For': int(own_carries['into_box'].sum()) if len(own_carries) else 0,
+            'Passes into Final 1/3 For': int(own_passes['into_final_third'].sum()),
+            'Passes into the Box For': int(own_passes['into_box'].sum()),
+            'Crosses Attempted For': int(own_passes['open_play_cross'].sum()),
+            'Crosses Completed For': int(own_passes['open_play_cross_completed'].sum()),
+            'Shots Against': int((opp_events['isShot'] == True).sum()),
+            'Total Touches Against': int(len(opp_touches)),
+            'Own Third Against': int((opp_touches['pitch_third'] == 'Own third').sum()),
+            'Middle Third Against': int((opp_touches['pitch_third'] == 'Middle third').sum()),
+            'Final Third Against': int((opp_touches['pitch_third'] == 'Final third').sum()),
+            'Attacking Box Against': int(opp_touches['in_att_box'].sum()),
+            'Carries into Final Third Against': int(opp_carries['into_final_third'].sum()) if len(opp_carries) else 0,
+            'Carries into Box Against': int(opp_carries['into_box'].sum()) if len(opp_carries) else 0,
+            'Passes into Final 1/3 Against': int(opp_passes['into_final_third'].sum()),
+            'Passes into the Box Against': int(opp_passes['into_box'].sum()),
+            'Crosses Attempted Against': int(opp_passes['open_play_cross'].sum()),
+            'Crosses Completed Against': int(opp_passes['open_play_cross_completed'].sum()),
+        })
+
+    out = pd.DataFrame(records, columns=out_cols)
+    out = out.sort_values(['Team', 'Minutes Played'], ascending=[True, False]).reset_index(drop=True)
+    return out
+
+
+# ============================================================
 # 6. WRITE WORKBOOK
 # ============================================================
 HEADER_FONT = Font(name='Arial', bold=True, color='FFFFFF')
@@ -1675,7 +1951,7 @@ def autosize(ws):
 
 def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                     defensive_action_location, passing_pairs, home_name, away_name, against_totals=None,
-                    shot_pairs=None):
+                    shot_pairs=None, on_off=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -1753,6 +2029,17 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         for t in teams_for_shot_pairs:
             t_shot_pairs = shot_pairs[shot_pairs['team'] == t].drop(columns=['team'])
             rSP = write_table(ws, t_shot_pairs, start_row=rSP, title=f'{t} - Shot Pairs') + 3
+        autosize(ws)
+        ws.freeze_panes = 'A3'
+
+    if on_off is not None:
+        ws = wb.create_sheet('On-Off')
+        teams_for_on_off = ([t for t in [home_name, away_name] if t is not None]
+                             or sorted(on_off['Team'].unique()))
+        rOO = 1
+        for t in teams_for_on_off:
+            t_on_off = on_off[on_off['Team'] == t].drop(columns=['Team'])
+            rOO = write_table(ws, t_on_off, start_row=rOO, title=f'{t} - On/Off') + 3
         autosize(ws)
         ws.freeze_panes = 'A3'
 
@@ -1930,6 +2217,22 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " preceding action was itself a pass (any type). Shots whose SCA1 was a take-on, a duel, a rebound"
         " off a blocked/saved shot, or a loose ball with no such preceding pass aren't a passer -> shooter"
         " pair and are excluded from this tab. Sorted by count, descending, within each team.",
+        "",
+        "On-Off tab: per-player totals, one table per team, for every player who appears anywhere in the"
+        " match - Shots, Total Touches, Own/Middle/Final Third Touches, Attacking Box Touches, Carries into"
+        " Final Third, Carries into Box, Passes into Final 1/3, Passes into the Box, Crosses Attempted, and"
+        " Crosses Completed - each counted only during the minutes that player was actually on the pitch,"
+        " split into a block of all 'For' columns (that player's own team) followed by a block of all"
+        " 'Against' columns (the opponent). A player's on-pitch window runs from kickoff (or their own"
+        " SubstitutionOn time, if they came on as a sub) to the final whistle (or their own SubstitutionOff"
+        " time, if they were subbed off) - a substituted player isn't credited for the exact minute they"
+        " left, since that minute belongs to whoever replaced them. Third/Attacking Box/Carries use the same"
+        " definitions as the Touches tab; Passes into Final 1/3 / Passes into the Box / Crosses Attempted /"
+        " Crosses Completed use the same OPEN PLAY ONLY definitions as the Passing tab (excludes corners and"
+        " free kicks) - all applied to each side's own attacking direction, so e.g. Final Third Against means"
+        " the OPPONENT was in THEIR OWN attacking final third (deep in this player's own defensive third),"
+        " not the same physical end of the pitch as Final Third For. A red/second-yellow card isn't accounted"
+        " for - a sent-off player's window still runs to the final whistle rather than ending at the card.",
     ]
     for i, line in enumerate(notes, start=1):
         c = ws.cell(row=i, column=1, value=line)
@@ -1967,7 +2270,7 @@ def main():
     passing_pairs = compute_passing_pairs(df)
 
     print("Computing carries...")
-    team_carries, player_carries = compute_carries(df)
+    team_carries, player_carries, carries_df = compute_carries(df)
 
     print("Computing shot-creating actions...")
     sca_out = compute_sca(df)
@@ -2004,10 +2307,14 @@ def main():
     print("Computing against totals...")
     against_totals = compute_against_totals(totals_out)
 
+    print("Computing On/Off splits...")
+    player_windows = extract_player_windows(df)
+    on_off = compute_on_off(df, player_windows, carries_df)
+
     print("Building workbook...")
     wb = build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                          defensive_action_location, passing_pairs, home_name, away_name, against_totals,
-                         shot_pairs)
+                         shot_pairs, on_off)
 
     filename = f"{sanitize_filename(home_name)}_vs_{sanitize_filename(away_name)}.xlsx"
     wb.save(filename)
