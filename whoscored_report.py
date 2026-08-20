@@ -1974,6 +1974,104 @@ def write_table(ws, df, start_row, start_col=1, title=None):
     return header_row + len(df)
 
 
+# GROUP_FILL/GROUP_FONT are used only for the merged 'For'/'Against' header
+# row - visually distinct from (but consistent with) the column header
+# row's own HEADER_FONT/HEADER_FILL.
+GROUP_FILL = PatternFill(start_color='9DC3E6', end_color='9DC3E6', fill_type='solid')
+GROUP_FONT = Font(name='Arial', bold=True, color='1F4E78')
+
+
+def write_on_off_table(ws, df, start_row, start_col=1, title=None):
+    """
+    Same job as write_table() above, but for the On-Off tab specifically:
+    instead of repeating "For"/"Against" in every single column name, this
+    writes one extra row above the usual column headers with two merged
+    cells - "For" spanning every "... For" column, "Against" spanning
+    every "... Against" column - and strips that suffix from the column
+    headers themselves underneath. Purely a display convention for this
+    one sheet; the DataFrame's own column names (still 'Shots For', 'Shots
+    Against', etc., as compute_on_off() produces them) are never touched -
+    only what gets WRITTEN to these cells changes.
+
+    Columns with no "Against" counterpart at all (Interceptions/Blocked
+    Passes/Blocked Shots) still fall inside the "For" merged span (they
+    physically sit among the other "... For" columns), just with nothing
+    to their right/left they need to be told apart from.
+    """
+    r = start_row
+    if title:
+        c = ws.cell(row=r, column=start_col, value=title)
+        c.font = SUBHEADER_FONT
+        r += 1
+
+    group_row = r
+    header_row = r + 1
+
+    for_start = for_end = against_start = against_end = None
+    for j, col in enumerate(df.columns):
+        col_idx = start_col + j
+        if col.endswith(' For'):
+            for_start = col_idx if for_start is None else for_start
+            for_end = col_idx
+        elif col.endswith(' Against'):
+            against_start = col_idx if against_start is None else against_start
+            against_end = col_idx
+
+    for label, lo, hi in [('For', for_start, for_end), ('Against', against_start, against_end)]:
+        if lo is None:
+            continue
+        if hi > lo:
+            ws.merge_cells(start_row=group_row, start_column=lo, end_row=group_row, end_column=hi)
+        cell = ws.cell(row=group_row, column=lo, value=label)
+        cell.font = GROUP_FONT
+        cell.alignment = Alignment(horizontal='center')
+        for col_idx in range(lo, hi + 1):
+            ws.cell(row=group_row, column=col_idx).fill = GROUP_FILL
+
+    for j, col in enumerate(df.columns):
+        if col.endswith(' For'):
+            bare = col[:-len(' For')]
+        elif col.endswith(' Against'):
+            bare = col[:-len(' Against')]
+        else:
+            bare = col
+        cell = ws.cell(row=header_row, column=start_col + j, value=bare)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal='center')
+
+    for i, row in enumerate(df.itertuples(index=False), start=1):
+        for j, val in enumerate(row):
+            if pd.isna(val):
+                val = None
+            cell = ws.cell(row=header_row + i, column=start_col + j, value=val)
+            cell.font = BODY_FONT
+
+    return header_row + len(df)
+
+
+def on_off_display_columns(df):
+    """
+    Cosmetic-only column rename for showing an On/Off table anywhere OTHER
+    than the Excel workbook's own On-Off sheet (which uses a merged "For"/
+    "Against" header row instead - see write_on_off_table()). Streamlit's
+    st.dataframe() has no merged-cell concept, so the closest equivalent
+    without one: drop the " For" suffix entirely (e.g. "Shots For" ->
+    "Shots"), and shorten " Against" to a trailing " A" (e.g. "Shots
+    Against" -> "Shots A"). Purely a display rename, meant to be applied
+    right before showing a table - compute_on_off()'s own column names are
+    never touched, so nothing downstream (tests, database saves, etc.)
+    needs to know this exists.
+    """
+    rename = {}
+    for c in df.columns:
+        if c.endswith(' Against'):
+            rename[c] = c[:-len(' Against')] + ' A'
+        elif c.endswith(' For'):
+            rename[c] = c[:-len(' For')]
+    return df.rename(columns=rename)
+
+
 def autosize(ws):
     widths = {}
     for row in ws.iter_rows():
@@ -2074,7 +2172,7 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         rOO = 1
         for t in teams_for_on_off:
             t_on_off = on_off[on_off['Team'] == t].drop(columns=['Team'])
-            rOO = write_table(ws, t_on_off, start_row=rOO, title=f'{t} - On/Off') + 3
+            rOO = write_on_off_table(ws, t_on_off, start_row=rOO, title=f'{t} - On/Off') + 3
         autosize(ws)
         ws.freeze_panes = 'A3'
 

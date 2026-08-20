@@ -218,6 +218,8 @@ def _copy_sheet(src_ws, dst_wb, new_title):
             dst_ws.column_dimensions[col_letter].width = dim.width
     if src_ws.freeze_panes:
         dst_ws.freeze_panes = src_ws.freeze_panes
+    for merged_range in src_ws.merged_cells.ranges:
+        dst_ws.merge_cells(str(merged_range))
     return dst_ws
 
 

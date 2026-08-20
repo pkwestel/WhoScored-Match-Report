@@ -94,7 +94,7 @@ if st.button("Generate Combined Report", type="primary"):
                 _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
                 passes_received = wr.compute_passes_received(df)
                 passing_pairs = wr.compute_passing_pairs(df)
-                team_carries, player_carries, _carries_df = wr.compute_carries(df)
+                team_carries, player_carries, carries_df = wr.compute_carries(df)
                 sca_out = wr.compute_sca(df)
                 shot_pairs = wr.compute_shot_pairs(sca_out)
                 team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
@@ -117,10 +117,12 @@ if st.button("Generate Combined Report", type="primary"):
                 # data for every player in one shot (see compute_all_passes()'s
                 # own docstring in whoscored_report.py).
                 all_passes = wr.compute_all_passes(df)
+                player_windows = wr.extract_player_windows(df)
+                on_off = wr.compute_on_off(df, player_windows, carries_df)
 
             wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
                                        defensive_actions, defensive_action_location, passing_pairs,
-                                       ws_home_name, ws_away_name, against_totals, shot_pairs)
+                                       ws_home_name, ws_away_name, against_totals, shot_pairs, on_off)
 
             fm_debug_buf = io.StringIO()
             with st.spinner("Opening the FotMob match page (a real Chrome window will pop up, ~10-25s)..."):
@@ -174,6 +176,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "defensive_action_location": defensive_action_location,
                 "passing_pairs": passing_pairs,
                 "shot_pairs": shot_pairs,
+                "on_off": on_off,
                 "combined_shots": combined_shots,
                 "fm_match_id": fm_match_id,
                 "fm_totals_df": fm_totals_df,
@@ -305,10 +308,10 @@ if report:
     ws_home_name, ws_away_name = report["ws_home_name"], report["ws_away_name"]
 
     (tabWSTotals, tabWSAgainst, tabWSTouches, tabWSPassing, tabSCA, tabWSDef, tabWSDefLoc,
-     tabWSPairs, tabWSShotPairs, tabFMTotals, tabFMBreakdown, tabFMPlusMinus) = st.tabs([
+     tabWSPairs, tabWSShotPairs, tabWSOnOff, tabFMTotals, tabFMBreakdown, tabFMPlusMinus) = st.tabs([
         "WS - Totals", "Against", "Touches", "Passing",
         "Shot Creating Actions", "Defensive Actions",
-        "Defensive Action Location", "Passing Pairs", "Shot Pairs",
+        "Defensive Action Location", "Passing Pairs", "Shot Pairs", "On/Off",
         "FM - Totals", "Shot Breakdown", "Plus Minus",
     ])
 
@@ -384,6 +387,23 @@ if report:
             st.subheader(t)
             st.dataframe(
                 shot_pairs[shot_pairs["team"] == t].drop(columns=["team"]).reset_index(drop=True),
+                use_container_width=True,
+            )
+    with tabWSOnOff:
+        st.write(
+            "For every player, team totals - Shots, Total Touches, thirds, Attacking Box, carries/"
+            "passes into the final third and box, and open-play crosses - split into **For** (their "
+            "own team) and **Against** (the opponent), counted only for the minutes that player was "
+            "actually on the pitch. Interceptions, Blocked Passes, and Blocked Shots are also shown, "
+            "For only. A substituted player isn't credited for the exact minute they left."
+        )
+        on_off = report["on_off"]
+        for t in [ws_home_name, ws_away_name]:
+            st.subheader(t)
+            st.dataframe(
+                wr.on_off_display_columns(
+                    on_off[on_off["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
+                ),
                 use_container_width=True,
             )
     with tabFMTotals:
