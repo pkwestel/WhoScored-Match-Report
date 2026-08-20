@@ -1783,9 +1783,25 @@ def compute_on_off(df, player_windows, carries_df):
     the minutes that player was actually on the pitch (their own window
     from extract_player_windows() above) - the same on-pitch-window
     concept fotmob_report.py's Plus Minus tab uses for FotMob's shot/goal/
-    xG data, applied here to WhoScored's own event stats instead. All 10
-    metrics' "For" columns are grouped together, followed by all 10
+    xG data, applied here to WhoScored's own event stats instead. All 12
+    metrics' "For" columns are grouped together, followed by all 12
     "Against" columns, rather than interleaved pair by pair.
+
+    Three more metrics - Interceptions, Blocked Passes, and Blocked Shots -
+    are also included, but "For" only (no "Against" pair): these are
+    already inherently one-sided defensive actions (my team intercepting/
+    blocking something the opponent did), so an "Against" version would be
+    a materially different stat (how often the OPPONENT blocked/
+    intercepted THIS team), which wasn't asked for here. Interceptions and
+    Blocked Passes are direct event-type counts (WhoScored's own
+    'Interception'/'BlockedPass' events, credited to the team that made
+    the play); Blocked Shots uses the exact same definition as the Totals
+    tab's own Blocked Shots column (compute_defensive_stats()) - the
+    OPPONENT's shot attempts carrying a 'Blocked' qualifier, credited to
+    this team as the side that did the blocking - rather than the more
+    involved Save-event-pairing compute_defensive_actions() needs to name
+    a specific blocking PLAYER, since a team total doesn't need to know
+    who exactly made the block.
 
     Own Third / Middle Third / Final Third / Attacking Box / Carries into
     Final Third / Carries into Box use the exact same thirds boundaries and
@@ -1833,7 +1849,8 @@ def compute_on_off(df, player_windows, carries_df):
                 'Carries into Box For', 'Passes into Final 1/3 For', 'Passes into the Box For',
                 'Crosses Attempted For', 'Crosses Completed For']
     against_cols = [c.replace(' For', ' Against') for c in for_cols]
-    out_cols = ['Team', 'Player', 'Minutes Played'] + for_cols + against_cols
+    for_only_cols = ['Interceptions For', 'Blocked Passes For', 'Blocked Shots For']
+    out_cols = ['Team', 'Player', 'Minutes Played'] + for_cols + for_only_cols + against_cols
     if df.empty or player_windows.empty:
         return pd.DataFrame(columns=out_cols)
 
@@ -1842,6 +1859,13 @@ def compute_on_off(df, player_windows, carries_df):
     d['in_att_box'] = in_box(d['x'], d['y'])
 
     passes = _classify_passes(df)
+
+    # Blocked Shots For: the OPPONENT's own shot attempts carrying a
+    # 'Blocked' qualifier - same definition as compute_defensive_stats()'s
+    # Totals-tab Blocked Shots column (see this function's own docstring).
+    blocked_shot_events = d[d['isShot'] == True].copy()
+    blocked_shot_events['qn'] = blocked_shot_events['qualifiers_parsed'].apply(qual_names)
+    blocked_shot_events = blocked_shot_events[blocked_shot_events['qn'].apply(lambda s: 'Blocked' in s)]
 
     teams_all = sorted(player_windows['Team'].dropna().unique())
     opponent = {teams_all[0]: teams_all[1], teams_all[1]: teams_all[0]} if len(teams_all) == 2 else {}
@@ -1862,6 +1886,14 @@ def compute_on_off(df, player_windows, carries_df):
         opp_events = d[(d['team'] == opp) & mask] if opp else d.iloc[0:0]
         own_touches = own[own['isTouch'] == True]
         opp_touches = opp_events[opp_events['isTouch'] == True]
+
+        interceptions_for = int((own['type.displayName'] == 'Interception').sum())
+        blocked_passes_for = int((own['type.displayName'] == 'BlockedPass').sum())
+        if opp and not blocked_shot_events.empty:
+            bs_mask = in_window(blocked_shot_events['cumulative_mins'])
+            blocked_shots_for = int(((blocked_shot_events['team'] == opp) & bs_mask).sum())
+        else:
+            blocked_shots_for = 0
 
         pass_mask = in_window(passes['cumulative_mins'])
         own_passes = passes[(passes['team'] == team) & pass_mask]
@@ -1890,6 +1922,9 @@ def compute_on_off(df, player_windows, carries_df):
             'Passes into the Box For': int(own_passes['into_box'].sum()),
             'Crosses Attempted For': int(own_passes['open_play_cross'].sum()),
             'Crosses Completed For': int(own_passes['open_play_cross_completed'].sum()),
+            'Interceptions For': interceptions_for,
+            'Blocked Passes For': blocked_passes_for,
+            'Blocked Shots For': blocked_shots_for,
             'Shots Against': int((opp_events['isShot'] == True).sum()),
             'Total Touches Against': int(len(opp_touches)),
             'Own Third Against': int((opp_touches['pitch_third'] == 'Own third').sum()),
@@ -2223,7 +2258,13 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " Final Third, Carries into Box, Passes into Final 1/3, Passes into the Box, Crosses Attempted, and"
         " Crosses Completed - each counted only during the minutes that player was actually on the pitch,"
         " split into a block of all 'For' columns (that player's own team) followed by a block of all"
-        " 'Against' columns (the opponent). A player's on-pitch window runs from kickoff (or their own"
+        " 'Against' columns (the opponent). Interceptions, Blocked Passes, and Blocked Shots are also"
+        " included but 'For' only (no 'Against' pair) - they're already inherently one-sided defensive"
+        " actions, so an 'Against' version would be a different stat (how often the OPPONENT blocked/"
+        " intercepted this team) rather than a natural counterpart. Interceptions/Blocked Passes are direct"
+        " event-type counts; Blocked Shots uses the same definition as the Totals tab's own Blocked Shots"
+        " column - the OPPONENT's shot attempts carrying a 'Blocked' qualifier, credited to this team as the"
+        " side that did the blocking. A player's on-pitch window runs from kickoff (or their own"
         " SubstitutionOn time, if they came on as a sub) to the final whistle (or their own SubstitutionOff"
         " time, if they were subbed off) - a substituted player isn't credited for the exact minute they"
         " left, since that minute belongs to whoever replaced them. Third/Attacking Box/Carries use the same"
