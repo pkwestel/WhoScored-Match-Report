@@ -72,7 +72,7 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing passing pairs..."):
                 passing_pairs = wr.compute_passing_pairs(df)
             with st.spinner("Computing carries..."):
-                team_carries, player_carries = wr.compute_carries(df)
+                team_carries, player_carries, carries_df = wr.compute_carries(df)
             with st.spinner("Computing shot-creating actions..."):
                 sca_out = wr.compute_sca(df)
             with st.spinner("Computing shot pairs..."):
@@ -100,7 +100,7 @@ if st.button("Generate Report", type="primary"):
                 against_totals = wr.compute_against_totals(totals_out)
             with st.spinner("Computing On/Off splits..."):
                 player_windows = wr.extract_player_windows(df)
-                on_off = wr.compute_on_off(df, player_windows)
+                on_off = wr.compute_on_off(df, player_windows, carries_df)
 
             wb = wr.build_workbook(
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
