@@ -25,7 +25,8 @@ Deploying to Streamlit Community Cloud:
        stack just to draw a pitch - that constant is now duplicated
        directly inside pitch_viz.py instead, so this app's dependency list
        stays genuinely minimal. See pitch_viz.py's own docstring for the
-       full story.)
+       full story.) pitch_viz.plot_heatmap() (the Season Heat Map tab) needs
+       scipy - make sure requirements.txt includes it.
     2. On share.streamlit.io, deploy pointed at this file.
     3. In the app's "Secrets" settings, set:
            DATABASE_URL = "postgresql://user:pass@host:port/dbname"
@@ -42,7 +43,7 @@ import pandas as pd
 import streamlit as st
 
 import history_db as hdb
-from pitch_viz import plot_pass_map, PASS_CATEGORY_COLORS, TITLE_COLOR
+from pitch_viz import plot_pass_map, plot_heatmap, PASS_CATEGORY_COLORS, TITLE_COLOR
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
 st.title("Match History Dashboard")
@@ -69,9 +70,11 @@ def get_db():
 
 db = get_db()
 
-tab_matches, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv = st.tabs(
-    ["Matches", "Team Trends", "Player Trends", "Shots", "Pass Map", "Passes Received"]
-)
+(tab_matches, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv,
+ tab_season_passmap, tab_season_passrecv, tab_season_heatmap) = st.tabs([
+    "Matches", "Team Trends", "Player Trends", "Shots", "Pass Map", "Passes Received",
+    "Season Pass Map", "Season Passes Received", "Season Heat Map",
+])
 
 with tab_matches:
     matches = hdb.fetch_matches(db)
@@ -108,12 +111,20 @@ with tab_player:
     if matches.empty:
         st.info("No matches published yet.")
     else:
-        player = st.text_input("Player name (exact match)", placeholder="e.g. Bryan Mbeumo")
-        if player:
+        # A dropdown of the players actually saved in the database, rather
+        # than a free-text "type the exact name" box - fetch_player_trends()
+        # does an exact, case-sensitive match with no fuzzy fallback, so a
+        # typed name that's off by a space or capitalization used to just
+        # silently return nothing. Picking from a list removes that failure
+        # mode entirely.
+        players = hdb.fetch_distinct_players(db)
+        if not players:
+            st.info("No player stats saved yet.")
+        else:
+            player = st.selectbox("Player", players)
             trends = hdb.fetch_player_trends(db, player)
             if trends.empty:
-                st.info(f"No stats saved yet for '{player}'. Double check the exact spelling used "
-                        "in the source reports.")
+                st.info(f"No stats saved yet for '{player}'.")
             else:
                 st.dataframe(trends, use_container_width=True)
                 numeric_cols = [c for c in trends.columns
@@ -288,3 +299,187 @@ with tab_passrecv:
         "received it. Incomplete passes aren't shown - they were never actually received by anyone."
     )
     _render_pass_map(db, hdb.fetch_matches(db), mode="receiver")
+
+
+def _team_filter_picker(df, team_col, key):
+    """
+    Shared 'All teams' + team dropdown for the season tabs below. A team
+    filter matters here specifically BECAUSE these tabs aggregate across
+    every published match - a player who's transferred mid-season would
+    otherwise have passes/touches from two different teams mixed into one
+    map with nothing to tell them apart.
+    """
+    teams = sorted(df[team_col].dropna().unique())
+    choice = st.selectbox("Team (optional filter)", ["All teams"] + teams, key=key)
+    return None if choice == "All teams" else choice
+
+
+def _render_season_pass_map(db, mode):
+    """
+    Same chart as _render_pass_map() above, but aggregated across EVERY
+    published match instead of one - every pass a player has ever attempted
+    (mode='passer') or received (mode='receiver') in the whole database,
+    plotted on one pitch, so the shape reflects a season's worth of games
+    rather than a single one. Reads from the exact same 'passes' table -
+    the only difference is fetch_passes() is called with match_id=None.
+    """
+    all_passes = hdb.fetch_passes(db)
+    if all_passes.empty:
+        st.info("No pass data saved yet - publish at least one match with 'Save to Database' first.")
+        return
+
+    player_col = "passer" if mode == "passer" else "receiver"
+    col1, col2 = st.columns(2)
+    with col1:
+        team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}")
+
+    scoped = all_passes if team_filter is None else all_passes[all_passes["team"] == team_filter]
+    players = sorted(scoped[player_col].dropna().unique())
+    if not players:
+        st.info("No players found for this filter.")
+        return
+    with col2:
+        player = st.selectbox("Player", players, key=f"season_passmap_player_{mode}")
+
+    if mode == "passer":
+        player_passes = hdb.fetch_passes(db, passer=player, team=team_filter)
+    else:
+        player_passes = hdb.fetch_passes(db, receiver=player, team=team_filter, completed_only=True)
+
+    if player_passes.empty:
+        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player}.")
+        return
+
+    player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+    n_matches = player_passes["match_id"].nunique()
+
+    total = len(player_passes)
+    progressive = int(player_passes["is_progressive"].sum())
+    key_passes = int(player_passes["is_key_pass"].sum())
+
+    if mode == "passer":
+        completed = int(player_passes["completed"].sum())
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Matches", n_matches)
+        c2.metric("Passes Attempted", total)
+        c3.metric("Completion %", f"{completed / total * 100:.0f}%")
+        c4.metric("Progressive", progressive)
+        c5.metric("Key Passes (xA-adjacent)", key_passes)
+        stat_items = [
+            (f"{total} Attempted", TITLE_COLOR),
+            (f"{completed / total * 100:.0f}% Completion", TITLE_COLOR),
+            (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+            (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+        ]
+        title_suffix = "Season Pass Map"
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Matches", n_matches)
+        c2.metric("Passes Received", total)
+        c3.metric("Progressive", progressive)
+        c4.metric("Key Passes (xA-adjacent)", key_passes)
+        stat_items = [
+            (f"{total} Received", TITLE_COLOR),
+            (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+            (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+        ]
+        title_suffix = "Season Passes Received"
+
+    fig = plot_pass_map(player_passes, player, None, None, stat_items, title_suffix=title_suffix,
+                         subtitle=f"Season - {n_matches} match(es)")
+
+    png_buf = io.BytesIO()
+    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    png_buf.seek(0)
+    st.image(png_buf, width=420)
+
+    download_buf = io.BytesIO()
+    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+    download_buf.seek(0)
+    st.download_button(
+        label=f"Download {title_suffix} (PNG)",
+        data=download_buf,
+        file_name=f"{player.replace(' ', '_')}_season_{title_suffix.lower().replace(' ', '_')}.png",
+        mime="image/png",
+        key=f"season_passmap_download_{mode}",
+    )
+    plt.close(fig)
+
+
+def _render_season_heatmap(db):
+    """
+    Touch heat map aggregated across every published match - every touch a
+    player's had, any event type (see whoscored_report.compute_all_touches()),
+    plotted as a smoothed density over one pitch. Only matches saved AFTER
+    the touches table existed have any rows here (see history_db.py's
+    schema docstring), so older published matches won't contribute.
+    """
+    all_touches = hdb.fetch_touches(db)
+    if all_touches.empty:
+        st.info(
+            "No touch data saved yet. This needs matches saved AFTER the touches table was added - "
+            "re-run 'Save to Database' on your matches in the combined report app to backfill it."
+        )
+        return
+
+    team_filter = _team_filter_picker(all_touches, "team", key="season_heatmap_team")
+    scoped = all_touches if team_filter is None else all_touches[all_touches["team"] == team_filter]
+    players = sorted(scoped["player"].dropna().unique())
+    if not players:
+        st.info("No players found for this filter.")
+        return
+    player = st.selectbox("Player", players, key="season_heatmap_player")
+
+    player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
+    if player_touches.empty:
+        st.info(f"No touches found for {player}.")
+        return
+
+    n_matches = player_touches["match_id"].nunique()
+    st.metric("Matches", n_matches)
+    stat_items = [(f"{len(player_touches)} Touches", TITLE_COLOR), (f"{n_matches} Matches", TITLE_COLOR)]
+
+    fig = plot_heatmap(player_touches, player, subtitle=f"Season - {n_matches} match(es)",
+                        stat_items=stat_items)
+
+    png_buf = io.BytesIO()
+    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    png_buf.seek(0)
+    st.image(png_buf, width=420)
+
+    download_buf = io.BytesIO()
+    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+    download_buf.seek(0)
+    st.download_button(
+        label="Download Season Heat Map (PNG)",
+        data=download_buf,
+        file_name=f"{player.replace(' ', '_')}_season_heatmap.png",
+        mime="image/png",
+        key="season_heatmap_download",
+    )
+    plt.close(fig)
+
+
+with tab_season_passmap:
+    st.write(
+        "Every pass a player has attempted across EVERY match saved to the database so far, "
+        "plotted on one pitch - the same coloring as the single-match Pass Map, aggregated into a "
+        "season-long shape. Grows automatically as you save more matches."
+    )
+    _render_season_pass_map(db, mode="passer")
+
+with tab_season_passrecv:
+    st.write(
+        "Every COMPLETED pass a player has received across every saved match, aggregated the same "
+        "way as the Season Pass Map."
+    )
+    _render_season_pass_map(db, mode="receiver")
+
+with tab_season_heatmap:
+    st.write(
+        "A smoothed density of every touch a player's had on the ball - any event, not just passes "
+        "- across every saved match, showing where on the pitch they're most involved over a "
+        "season. Only matches saved after this feature was added contribute (see the info message "
+        "below if it looks empty)."
+    )
+    _render_season_heatmap(db)

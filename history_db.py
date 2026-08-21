@@ -47,6 +47,13 @@ shots              - the one genuinely well-known, stable shape across every
                      gets real columns instead of a JSON blob - it's the
                      table most worth querying/aggregating directly (season
                      shot maps, etc).
+passes             - one row per pass (whoscored_report.compute_all_passes()),
+                     with pitch coordinates - backs both single-match and
+                     season-long Pass Map / Passes Received visuals.
+touches            - one row per touch, any event type (compute_all_
+                     touches()), with pitch coordinates - backs single-match
+                     and season-long touch heat maps. Only matches saved
+                     after this table existed will have rows here.
 
 Everything here is UPSERT (INSERT ... ON CONFLICT DO UPDATE), keyed on a
 natural key per table, so re-publishing the same match twice (e.g. you
@@ -291,6 +298,41 @@ def init_schema(db: DB):
             UNIQUE(match_id, team, passer, minute, second, x, y)
         )
     """)
+    # Every touch in the match (WhoScored's compute_all_touches()) - one row
+    # per touch, any event type, with pitch location. Backs a touch heat map
+    # (single-match or season-long, once enough matches are published) the
+    # same way the passes table backs the Pass Map - a per-third COUNT
+    # (what player_match_stats' extra_json already stores) can't reconstruct
+    # WHERE on the pitch those touches happened, only raw points can. Only
+    # matches saved AFTER this table was added will have rows here - there's
+    # no way to backfill touch locations for older matches without
+    # re-scraping them (WhoScored match pages don't stay up forever, so
+    # that's not always possible either).
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS touches (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id      TEXT NOT NULL REFERENCES matches(match_id),
+            team          TEXT,
+            player        TEXT,
+            minute        REAL,
+            second        REAL,
+            x             REAL,
+            y             REAL,
+            UNIQUE(match_id, team, player, minute, second, x, y)
+        )
+    """ if db.backend == "sqlite" else """
+        CREATE TABLE IF NOT EXISTS touches (
+            id            SERIAL PRIMARY KEY,
+            match_id      TEXT NOT NULL REFERENCES matches(match_id),
+            team          TEXT,
+            player        TEXT,
+            minute        REAL,
+            second        REAL,
+            x             REAL,
+            y             REAL,
+            UNIQUE(match_id, team, player, minute, second, x, y)
+        )
+    """)
     db.commit()
 
 
@@ -413,6 +455,26 @@ def upsert_passes(db: DB, match_id, passes_df: pd.DataFrame):
         ))
 
 
+def upsert_touches(db: DB, match_id, touches_df: pd.DataFrame):
+    """
+    Bulk-loads whoscored_report.compute_all_touches()'s output (one row per
+    touch, any event type, with pitch location) - see that function's
+    docstring for why this exists as its own raw table rather than only the
+    per-third counts already stored in player_match_stats.extra_json.
+    """
+    if touches_df is None or touches_df.empty:
+        return
+    for _, r in touches_df.iterrows():
+        db.execute("""
+            INSERT INTO touches (match_id, team, player, minute, second, x, y)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id, team, player, minute, second, x, y) DO NOTHING
+        """, (
+            str(match_id), r.get("team"), r.get("player"),
+            _num(r.get("minute")), _num(r.get("second")), _num(r.get("x")), _num(r.get("y")),
+        ))
+
+
 def _num(v):
     """NaN/None -> None (so it round-trips through the DB as NULL, not the string 'nan')."""
     return None if v is None or (isinstance(v, float) and pd.isna(v)) else float(v)
@@ -420,6 +482,7 @@ def _num(v):
 
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
+                    touches_df: pd.DataFrame = None,
                     competition=None, match_date=None, ws_events=None, fm_shots=None):
     """
     One-call orchestrator for a full match publish, wrapped in a single
@@ -430,6 +493,8 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
     shots_df:     combined/whoscored/fotmob shots dataframe, or None to skip.
     passes_df:    whoscored_report.compute_all_passes() output, or None to skip
                   (e.g. publishing a FotMob-only report with no event data).
+    touches_df:   whoscored_report.compute_all_touches() output, or None to
+                  skip (same reasoning as passes_df).
     """
     try:
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events, fm_shots)
@@ -441,6 +506,8 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
             upsert_shots(db, match_id, shots_df)
         if passes_df is not None:
             upsert_passes(db, match_id, passes_df)
+        if touches_df is not None:
+            upsert_touches(db, match_id, touches_df)
         db.commit()
     except Exception:
         db.rollback()
@@ -485,6 +552,20 @@ def fetch_team_trends(db: DB, team: str) -> pd.DataFrame:
     return df
 
 
+def fetch_distinct_players(db: DB) -> list:
+    """
+    Every distinct player name that's ever appeared in player_match_stats,
+    sorted alphabetically - lets dashboard_app.py offer a dropdown instead
+    of a free-text "type the exact name" box for Player Trends. A typed
+    name has to match fetch_player_trends()'s WHERE p.player = ? exactly,
+    including case and whitespace, with no fuzzy fallback - a dropdown
+    populated from the real saved names removes that whole class of typo/
+    capitalization bugs instead of just warning about it.
+    """
+    cur = db.execute("SELECT DISTINCT player FROM player_match_stats ORDER BY player")
+    return [r[0] for r in cur.fetchall()]
+
+
 def fetch_player_trends(db: DB, player: str) -> pd.DataFrame:
     cur = db.execute("""
         SELECT m.match_date, p.match_id, p.team, p.player, p.extra_json
@@ -514,17 +595,28 @@ def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=cols)
 
 
-def fetch_passes(db: DB, match_id, passer=None, receiver=None, completed_only=False) -> pd.DataFrame:
+def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_only=False,
+                  team=None) -> pd.DataFrame:
     """
-    Passes for one match, optionally filtered down to one passer (for a Pass
-    Map) or one receiver (for a Passes Received map). Column names come back
-    as end_x/end_y (the DB's column names) rather than endX/endY (whoscored_
-    report.py's own dataframe convention) - dashboard_app.py renames them
-    back before handing the result to pitch_viz.plot_pass_map(), which
-    expects the endX/endY spelling.
+    Passes for one match (pass a match_id), or across EVERY published match
+    (leave match_id=None) for a season-long Pass Map/Passes Received map -
+    optionally filtered down to one passer (Pass Map) or one receiver
+    (Passes Received map), and optionally to one team (mostly useful
+    alongside match_id=None, since a player who's transferred mid-season
+    would otherwise mix passes from two different teams into one map).
+    Column names come back as end_x/end_y (the DB's column names) rather
+    than endX/endY (whoscored_report.py's own dataframe convention) -
+    dashboard_app.py renames them back before handing the result to
+    pitch_viz.plot_pass_map(), which expects the endX/endY spelling.
     """
-    sql = "SELECT * FROM passes WHERE match_id = ?"
-    params = [str(match_id)]
+    sql = "SELECT * FROM passes WHERE 1=1"
+    params = []
+    if match_id is not None:
+        sql += " AND match_id = ?"
+        params.append(str(match_id))
+    if team is not None:
+        sql += " AND team = ?"
+        params.append(team)
     if passer is not None:
         sql += " AND passer = ?"
         params.append(passer)
@@ -541,3 +633,26 @@ def fetch_passes(db: DB, match_id, passer=None, receiver=None, completed_only=Fa
         df["is_progressive"] = df["is_progressive"].astype(bool)
         df["is_key_pass"] = df["is_key_pass"].astype(bool)
     return df
+
+
+def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame:
+    """
+    Touches for one match (pass a match_id), or across EVERY published match
+    (leave match_id=None) for a season-long touch heat map - optionally
+    filtered to one player and/or one team (same transfer-mid-season
+    reasoning as fetch_passes()'s team filter).
+    """
+    sql = "SELECT * FROM touches WHERE 1=1"
+    params = []
+    if match_id is not None:
+        sql += " AND match_id = ?"
+        params.append(str(match_id))
+    if team is not None:
+        sql += " AND team = ?"
+        params.append(team)
+    if player is not None:
+        sql += " AND player = ?"
+        params.append(player)
+    cur = db.execute(sql, tuple(params))
+    cols = [d[0] for d in cur.description]
+    return pd.DataFrame(cur.fetchall(), columns=cols)
