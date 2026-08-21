@@ -107,7 +107,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
     passes_received = wr.compute_passes_received(df)
     passing_pairs = wr.compute_passing_pairs(df)
-    team_carries, player_carries, _carries_df = wr.compute_carries(df)
+    team_carries, player_carries, carries_df = wr.compute_carries(df)
     sca_out = wr.compute_sca(df)
     shot_pairs = wr.compute_shot_pairs(sca_out)
     team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
@@ -125,10 +125,12 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
                                     defensive_stats, corners, ws_home_name, ws_away_name)
     against_totals = wr.compute_against_totals(totals_out)
     all_passes = wr.compute_all_passes(df)
+    player_windows = wr.extract_player_windows(df)
+    on_off = wr.compute_on_off(df, player_windows, carries_df)
 
     wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
                                defensive_actions, defensive_action_location, passing_pairs,
-                               ws_home_name, ws_away_name, against_totals, shot_pairs)
+                               ws_home_name, ws_away_name, against_totals, shot_pairs, on_off)
 
     _status("Opening the FotMob match page (a real Chrome window will pop up)...")
     fm_match_json, fm_match_id = fr.scrape_match(fm_url.strip(), out_dir=fm_out_dir)
