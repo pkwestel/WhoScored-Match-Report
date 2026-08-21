@@ -104,7 +104,7 @@ HEATMAP_POINT_COLOR = "#7b1fa2"  # fallback scatter color when there's too littl
 # (e.g. "Arsenal vs Chelsea") - per request, so the two team names read as
 # clearly distinct at a glance rather than one flat color.
 HOME_TEAM_COLOR = "#DC143C"  # Crimson
-AWAY_TEAM_COLOR = "#6495ED"  # Cornflower Blue - a lighter, more saturated tint of Royal Blue
+AWAY_TEAM_COLOR = "#1E90FF"  # Dodger Blue - more saturated/vivid than Cornflower Blue, still pops on white
 
 # Title/subtitle/legend font (per request - Arial specifically, not
 # matplotlib's default DejaVu Sans). Assumes Arial is actually installed on
@@ -147,8 +147,23 @@ def _to_m_x(x):
 
 
 def _to_m_y(y):
-    """Normalized (0-100) y -> metres along the pitch WIDTH (horizontal axis)."""
-    return y / 100.0 * PITCH_WID_M
+    """
+    Normalized (0-100) y -> metres along the pitch WIDTH (horizontal axis).
+
+    Flipped (100 - y) rather than used directly: WhoScored/Opta's x AND y
+    are both given from the team's OWN attacking perspective (a full
+    180-degree rotation per team/per half, not just an x-only mirror - see
+    this module's docstring on x), matching the standard "imagine you're
+    the coach, standing behind your own goal, facing the way your team is
+    attacking" analytics convention. Under that convention, a team's real
+    right side should render on the image's right when the chart is drawn
+    vertically with their attack going up - which requires this flip.
+    Confirmed against a real match where a player's well-known real-life
+    wing (right) was rendering on the wrong side (image-left) before this
+    fix - every Pass Map/Passes Received/Heat Map chart drawn before this
+    was mirrored left-right, for every player, on both teams.
+    """
+    return (100.0 - y) / 100.0 * PITCH_WID_M
 
 
 def draw_pitch(ax):
@@ -235,7 +250,7 @@ def draw_pitch(ax):
     watermark_txt.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground=PITCH_DARK)])
 
 
-def _draw_split_subtitle(fig, y, parts, fontsize=12):
+def _draw_split_subtitle(fig, y, parts, fontsize=14):
     """
     Draws one horizontally-centered line of text made of several colored
     pieces (e.g. the home team's name, then " vs ", then the away team's
@@ -295,7 +310,8 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     # margins (not a fraction of the whole figure) so there's no dead space
     # between the pitch and any of them.
     pitch_h = 10.0
-    top_pad_in = 0.8    # suptitle + subtitle only (no key, no stat line up here anymore)
+    top_pad_in = 0.95   # suptitle + subtitle only (no key, no stat line up here anymore) - bumped
+                        # up from 0.8 to give the now-larger title/subtitle text more headroom
     bottom_pad_in = 0.5  # one row of stat-line text, below the pitch (no key anymore)
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
@@ -340,9 +356,9 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
             ax.scatter([x1], [y1], s=38, facecolors="white", edgecolors=color,
                        linewidths=1.3, alpha=alpha, zorder=3)
 
-    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=17,
-                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.22 / fig_h)
-    subtitle_y = 1 - 0.65 / fig_h
+    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=20,
+                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.28 / fig_h)
+    subtitle_y = 1 - 0.78 / fig_h
     if subtitle is None and home_name and away_name:
         # Default case: color the home/away team names distinctly rather
         # than one flat-colored "{home} vs {away}" string.
@@ -352,7 +368,7 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     else:
         if subtitle is None:
             subtitle = f"{home_name} vs {away_name}"
-        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=12, fontweight="bold",
+        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=14, fontweight="bold",
                   fontname=PASS_MAP_FONT, ha="center")
 
     # Stat line: moved below the pitch (per request - the color key that
@@ -389,7 +405,7 @@ def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
     pitch_h = 10.0
-    top_pad_in = 0.8
+    top_pad_in = 0.95   # bumped up from 0.8 to give the now-larger title/subtitle text more headroom
     bottom_pad_in = 0.5
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
@@ -447,16 +463,16 @@ def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
         ax.scatter(xs, ys, s=70, color=HEATMAP_POINT_COLOR, alpha=0.55,
                    edgecolors="white", linewidths=0.8, zorder=2)
 
-    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=17,
-                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.22 / fig_h)
-    subtitle_y = 1 - 0.65 / fig_h
+    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=20,
+                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.28 / fig_h)
+    subtitle_y = 1 - 0.78 / fig_h
     if subtitle is None and home_name and away_name:
         _draw_split_subtitle(fig, subtitle_y, [
             (home_name, HOME_TEAM_COLOR), (" vs ", TITLE_COLOR), (away_name, AWAY_TEAM_COLOR),
         ])
     else:
         subtitle = subtitle if subtitle is not None else ""
-        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=12, fontweight="bold",
+        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=14, fontweight="bold",
                   fontname=PASS_MAP_FONT, ha="center")
 
     if stat_items is None:
