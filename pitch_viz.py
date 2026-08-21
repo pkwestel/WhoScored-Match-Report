@@ -40,9 +40,11 @@ requirements.txt one missing package at a time.
 
 import os
 
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import matplotlib.patheffects as path_effects
+import matplotlib.colors as mcolors
 from matplotlib.patches import Arc, Rectangle
 import streamlit as st
 
@@ -53,11 +55,11 @@ PITCH_WID_M = 68.0
 
 PITCH_LIGHT = "#eeeeee"
 PITCH_DARK = "#dcdcdc"
-# The area outside the pitch's own black touchlines - matches PITCH_DARK
-# exactly (rather than a separate near-white shade) so the striping reads as
-# fully contained inside the black lines, with one clean solid color outside
-# them, instead of a third tone that made the pitch boundary look blurry.
-MAIN_BG = PITCH_DARK
+# The area outside the pitch's own black touchlines, AND the whole figure's
+# background behind the title/subtitle/stat-line - plain white, per request.
+# The striping INSIDE the pitch boundary (the PITCH_LIGHT/PITCH_DARK bands
+# below) is untouched by this - only the surrounding page background changed.
+MAIN_BG = "#ffffff"
 N_PITCH_STRIPES = 12  # alternating bands, stacked along the pitch LENGTH (horizontal rows)
 PITCH_LINE_COLOR = "#1a1a1a"  # near-black
 PITCH_LINE_WIDTH = 2.4
@@ -84,6 +86,25 @@ PASS_CATEGORY_STYLE = {
 # important ones (Progressive, then Key Pass) stay visible even when a lot
 # of ordinary completed passes overlap them.
 PASS_CATEGORY_DRAW_ORDER = ["Incomplete", "Completed", "Progressive", "Key Pass"]
+
+# Heat map colormap - reuses colors already established elsewhere in this
+# palette (the Progressive blue and Incomplete orange from PASS_CATEGORY_
+# COLORS, plus the Key Pass purple as the "hottest" end) rather than
+# introducing an unrelated new hue just for this one chart. set_bad() makes
+# masked-out (low-density) cells fully transparent, so the heat map only
+# tints the pitch where touches are actually concentrated - see
+# plot_heatmap()'s masking below for why that matters.
+HEATMAP_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    "kwest_heat", ["#2f9bf0", "#d9754a", "#7b1fa2"]
+)
+HEATMAP_CMAP.set_bad(alpha=0)
+HEATMAP_POINT_COLOR = "#7b1fa2"  # fallback scatter color when there's too little data for a real KDE
+
+# Home/away team name colors for the subtitle line under the main title
+# (e.g. "Arsenal vs Chelsea") - per request, so the two team names read as
+# clearly distinct at a glance rather than one flat color.
+HOME_TEAM_COLOR = "#DC143C"  # Crimson
+AWAY_TEAM_COLOR = "#6495ED"  # Cornflower Blue - a lighter, more saturated tint of Royal Blue
 
 # Title/subtitle/legend font (per request - Arial specifically, not
 # matplotlib's default DejaVu Sans). Assumes Arial is actually installed on
@@ -214,7 +235,37 @@ def draw_pitch(ax):
     watermark_txt.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground=PITCH_DARK)])
 
 
-def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, title_suffix="Pass Map"):
+def _draw_split_subtitle(fig, y, parts, fontsize=12):
+    """
+    Draws one horizontally-centered line of text made of several colored
+    pieces (e.g. the home team's name, then " vs ", then the away team's
+    name, each in its own color) - matplotlib has no built-in way to color
+    parts of a single Text object differently, so each piece gets its own
+    fig.text() call, measured with the figure's renderer and then
+    repositioned side-by-side so the whole line still reads as one
+    centered unit rather than each piece being independently centered.
+    parts is a list of (text, color) tuples; every piece is drawn bold in
+    PASS_MAP_FONT at the given fontsize.
+    """
+    fig.canvas.draw()  # ensures a renderer exists, sized to this exact figure
+    renderer = fig.canvas.get_renderer()
+    texts, widths = [], []
+    for text, color in parts:
+        t = fig.text(0, y, text, color=color, fontsize=fontsize, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="left", va="center")
+        bbox = t.get_window_extent(renderer)
+        widths.append(bbox.width / fig.bbox.width)
+        texts.append(t)
+    total_width = sum(widths)
+    cur_x = 0.5 - total_width / 2
+    for t, w in zip(texts, widths):
+        t.set_x(cur_x)
+        cur_x += w
+    return texts
+
+
+def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, title_suffix="Pass Map",
+                   subtitle=None):
     """
     Shared drawing code for both the outgoing Pass Map and the Passes
     Received map - same pitch/logo/watermark, same per-category coloring
@@ -224,6 +275,16 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     tuples for the stat line below the pitch, since the two charts don't
     track the same stats (e.g. "Completion %" doesn't apply to a received-
     passes view, where everything shown is already complete by definition).
+
+    subtitle overrides the default "{home_name} vs {away_name}" subtitle -
+    pass home_name=None, away_name=None, subtitle="Season - N matches" for a
+    season-long map aggregated across several matches, where there's no one
+    fixture to name (see dashboard_app.py's season tabs). When the default
+    subtitle IS used (subtitle=None with both team names given), the home
+    team's name is drawn in HOME_TEAM_COLOR (Crimson) and the away team's in
+    AWAY_TEAM_COLOR (Powder Blue) rather than one flat color - an explicit
+    subtitle string is always drawn as plain bold text, since there's no
+    single home/away pair to color in a season-aggregated view.
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
@@ -282,12 +343,124 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=17,
                  fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.22 / fig_h)
     subtitle_y = 1 - 0.65 / fig_h
-    fig.text(0.5, subtitle_y, f"{home_name} vs {away_name}", color=TITLE_COLOR, fontsize=12,
-              fontname=PASS_MAP_FONT, ha="center")
+    if subtitle is None and home_name and away_name:
+        # Default case: color the home/away team names distinctly rather
+        # than one flat-colored "{home} vs {away}" string.
+        _draw_split_subtitle(fig, subtitle_y, [
+            (home_name, HOME_TEAM_COLOR), (" vs ", TITLE_COLOR), (away_name, AWAY_TEAM_COLOR),
+        ])
+    else:
+        if subtitle is None:
+            subtitle = f"{home_name} vs {away_name}"
+        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=12, fontweight="bold",
+                  fontname=PASS_MAP_FONT, ha="center")
 
     # Stat line: moved below the pitch (per request - the color key that
     # used to live down here is gone entirely). Caller decides exactly which
     # stats/colors go here (see docstring above).
+    stats_y = 0.22 / fig_h
+    n = len(stat_items)
+    for i, (text, color) in enumerate(stat_items):
+        x = (i + 0.5) / n
+        fig.text(x, stats_y, text, color=color, fontsize=11.5, fontweight="bold",
+                  fontname=PASS_MAP_FONT, ha="center", va="center")
+
+    return fig
+
+
+def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
+                  title_suffix="Heat Map", subtitle=None, stat_items=None):
+    """
+    Touch heat map: a smoothed density estimate (scipy's gaussian_kde,
+    evaluated on a grid and drawn with imshow - the standard way soccer
+    touch heat maps are rendered) over every (x, y) in touches_df, on the
+    same pitch/logo/watermark as plot_pass_map() for visual consistency.
+    touches_df needs 'x' and 'y' columns, normalized 0-100 (whoscored_
+    report.compute_all_touches()'s own output, or history_db.fetch_touches()'s -
+    single match or, with rows from several match_ids concatenated
+    together, a season-long map over the exact same pitch).
+
+    home_name/away_name build the default "{home} vs {away}" subtitle for
+    a single match; pass subtitle= directly instead for a season view
+    (e.g. "Season - 12 matches"), where there's no one fixture to name.
+    stat_items defaults to a single "N Touches" stat if not given - pass
+    your own list of (text, color) tuples for anything more specific.
+    """
+    length, width = PITCH_LEN_M, PITCH_WID_M
+    pad = PITCH_PAD_M
+    pitch_h = 10.0
+    top_pad_in = 0.8
+    bottom_pad_in = 0.5
+    fig_h = pitch_h + top_pad_in + bottom_pad_in
+    fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    fig.patch.set_facecolor(MAIN_BG)
+
+    bottom_frac = bottom_pad_in / fig_h
+    axes_h_frac = pitch_h / fig_h
+    ax = fig.add_axes([0.03, bottom_frac, 0.94, axes_h_frac])
+    draw_pitch(ax)
+
+    logo_img = _load_logo()
+    if logo_img is not None:
+        logo_h_in = 0.65
+        margin_in = 0.12
+        aspect = logo_img.shape[1] / logo_img.shape[0]
+        logo_w_in = logo_h_in * aspect
+        logo_ax = fig.add_axes([
+            margin_in / fig_w,
+            1 - (margin_in + logo_h_in) / fig_h,
+            logo_w_in / fig_w,
+            logo_h_in / fig_h,
+        ])
+        logo_ax.imshow(logo_img)
+        logo_ax.axis("off")
+
+    xs = _to_m_y(touches_df["y"].to_numpy(dtype=float))
+    ys = _to_m_x(touches_df["x"].to_numpy(dtype=float))
+
+    drew_kde = False
+    if len(xs) >= 5 and np.std(xs) > 1e-6 and np.std(ys) > 1e-6:
+        # A degenerate point cloud (near-zero spread, or a singular
+        # covariance matrix scipy can't invert) raises inside gaussian_kde
+        # rather than producing a meaningless density - caught below so a
+        # handful of touches all bunched at one spot falls back to the
+        # scatter plot instead of crashing the whole page.
+        try:
+            from scipy.stats import gaussian_kde
+            kde = gaussian_kde(np.vstack([xs, ys]))
+            grid_x, grid_y = np.mgrid[0:width:100j, 0:length:154j]
+            density = kde(np.vstack([grid_x.ravel(), grid_y.ravel()])).reshape(grid_x.shape)
+            # Mask out the low end of the density range so the heat map only
+            # tints the pitch where touches are actually concentrated - a
+            # Gaussian KDE's support is technically the whole plane, so
+            # without this the entire pitch would show a faint tint even far
+            # from any real touch.
+            threshold = density.max() * 0.12
+            density_masked = np.ma.masked_where(density < threshold, density)
+            ax.imshow(density_masked.T, origin="lower", extent=[0, width, 0, length],
+                      cmap=HEATMAP_CMAP, alpha=0.85, zorder=1.2, aspect="auto")
+            drew_kde = True
+        except Exception:
+            pass
+    if not drew_kde:
+        ax.scatter(xs, ys, s=70, color=HEATMAP_POINT_COLOR, alpha=0.55,
+                   edgecolors="white", linewidths=0.8, zorder=2)
+
+    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=17,
+                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.22 / fig_h)
+    subtitle_y = 1 - 0.65 / fig_h
+    if subtitle is None and home_name and away_name:
+        _draw_split_subtitle(fig, subtitle_y, [
+            (home_name, HOME_TEAM_COLOR), (" vs ", TITLE_COLOR), (away_name, AWAY_TEAM_COLOR),
+        ])
+    else:
+        subtitle = subtitle if subtitle is not None else ""
+        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=12, fontweight="bold",
+                  fontname=PASS_MAP_FONT, ha="center")
+
+    if stat_items is None:
+        stat_items = [(f"{len(touches_df)} Touches", TITLE_COLOR)]
     stats_y = 0.22 / fig_h
     n = len(stat_items)
     for i, (text, color) in enumerate(stat_items):
