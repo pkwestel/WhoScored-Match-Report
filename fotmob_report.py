@@ -587,33 +587,79 @@ def extract_team_names(match_json):
     return home_name, away_name
 
 
+def _search_for_key_ci(obj, target_keys_lower, max_depth=25):
+    """
+    Case-insensitive variant of _search_for_key() - needed specifically for
+    extract_referee() below. FotMob's content.matchFacts.infoBox is keyed by
+    human-readable display labels ('Referee', 'Match Date', 'Tournament',
+    'Stadium', 'Attendance' - confirmed against a real match_json dump),
+    capitalized like UI text, not the camelCase used for every other key in
+    this payload - a plain case-sensitive key search for 'referee' silently
+    never matches the real 'Referee' key. target_keys_lower must already be
+    all-lowercase; every key encountered is lowercased before comparing.
+    """
+    stack = [(obj, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if isinstance(k, str) and k.lower() in target_keys_lower:
+                    return v
+            for v in cur.values():
+                stack.append((v, depth + 1))
+        elif isinstance(cur, list):
+            for v in cur:
+                stack.append((v, depth + 1))
+    return None
+
+
 def extract_referee(match_json):
     """
-    Best-effort referee name lookup for the dashboard's Fixtures tab.
-    Checked spot first: general.referee, which other tools working with
-    this same FotMob feed have reported as either a plain string or a
-    {'name': ...}-shaped dict - falls back to a generic key-name search
-    anywhere in the payload if that's not there. UNVERIFIED against a real
-    live match_json in this project (same caveat as get_fixture_urls()/
-    find_fotmob_match_url() - see batch_run_app.py's module docstring): if
-    referees are consistently missing/wrong after a few real matches, this
-    is the function to fix, most likely by pointing it at wherever the real
-    key actually turned out to be. Returns None (never raises) if nothing
-    is found, rather than blocking the rest of the match from saving.
+    Referee name lookup for the dashboard's Fixtures tab. CONFIRMED against
+    a real live match_json dump (fotmob_raw_5795368.json) - the real shape
+    is content.matchFacts.infoBox.Referee -> {'text': 'Michael Oliver',
+    'imgUrl': ..., 'countryCode': ..., 'stats': [...]}. Note two things that
+    tripped up the first (unverified, guessed) version of this function:
+    infoBox's keys are capitalized display labels ('Referee', 'Match Date',
+    'Tournament', 'Stadium', 'Attendance'), not the camelCase used
+    everywhere else in this payload, so a case-sensitive search for
+    'referee' never matched the real 'Referee' key; and the name itself
+    lives under 'text', not 'name'/'refereeName' as guessed originally. That
+    real match_json had no 'general.referee' at all (general's own keys are
+    matchId/matchName/homeTeam/awayTeam/etc, no referee field) - kept below
+    as a first check anyway in case a different competition/match does
+    carry it there, since it's a cheap check and doesn't cost anything if
+    absent. Returns None (never raises) if nothing is found, rather than
+    blocking the rest of the match from saving.
     """
     general = match_json.get('general') if isinstance(match_json, dict) else None
     if isinstance(general, dict):
         referee = general.get('referee')
         if isinstance(referee, dict):
-            name = _get_first(referee, ['name', 'refereeName'])
+            name = _get_first(referee, ['text', 'name', 'refereeName'])
             if name:
                 return name
         elif isinstance(referee, str) and referee.strip():
             return referee.strip()
 
-    found = _search_for_key(match_json, {'referee', 'refereeName'})
+    # Confirmed real spot - see docstring above.
+    info_box = _search_for_key(match_json, {'infoBox'})
+    if isinstance(info_box, dict):
+        referee = info_box.get('Referee')
+        if isinstance(referee, dict):
+            name = _get_first(referee, ['text', 'name', 'refereeName'])
+            if name:
+                return name
+        elif isinstance(referee, str) and referee.strip():
+            return referee.strip()
+
+    # Case-insensitive fallback, in case a different match/competition nests
+    # this somewhere other than infoBox, or under different capitalization.
+    found = _search_for_key_ci(match_json, {'referee', 'refereename'})
     if isinstance(found, dict):
-        return _get_first(found, ['name', 'refereeName'])
+        return _get_first(found, ['text', 'name', 'refereeName'])
     if isinstance(found, str) and found.strip():
         return found.strip()
     return None
