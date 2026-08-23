@@ -821,3 +821,267 @@ def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame
     cur = db.execute(sql, tuple(params))
     cols = [d[0] for d in cur.description]
     return pd.DataFrame(cur.fetchall(), columns=cols)
+
+
+# ============================================================
+# Season-cumulative TEAM totals (dashboard_app.py's default "Team Totals" tab)
+# ============================================================
+def fetch_league_table(db: DB) -> pd.DataFrame:
+    """
+    Season standings: one row per team, with the standard league table
+    columns (Played, W, D, L, GF, GA, GD, Points) plus this project's own
+    xG/xGA/xGD, all built from team_match_stats' 'fm_totals' (Goals, Total
+    xG) - the same source fetch_fixtures() already reads Score/xG from, so
+    it inherits that function's team-name reconciliation (see
+    build_db_stats()'s docstring in batch_lib.py) automatically, since
+    matches.home_team/away_team and team_match_stats' team keys are already
+    one consistent (WhoScored's) name per team.
+
+    A match missing fm_totals.Goals for EITHER side (not yet saved with
+    FotMob data, or a genuinely unresolved team-name mismatch) is skipped
+    entirely rather than counted as a 0-0 draw or a partial result - an
+    incomplete match should reduce both teams' Played count implicitly (by
+    not counting it), not silently corrupt their record.
+
+    Sorted by Points, then Goal Difference, then Goals For, all descending -
+    the standard football league table tiebreaker order.
+    """
+    cols = ["Team", "Played", "W", "D", "L", "GF", "GA", "GD", "Points", "xG", "xGA", "xGD"]
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=cols)
+
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    fm_totals_by_match = {}
+    for match_id, team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        fm_totals_by_match.setdefault(match_id, {})[team] = extra.get("fm_totals") or {}
+
+    stats = {}
+
+    def _team_row(team):
+        return stats.setdefault(team, {"Played": 0, "W": 0, "D": 0, "L": 0,
+                                        "GF": 0, "GA": 0, "xG": 0.0, "xGA": 0.0})
+
+    for _, m in matches.iterrows():
+        team_totals = fm_totals_by_match.get(m["match_id"], {})
+        home_totals = team_totals.get(m["home_team"], {})
+        away_totals = team_totals.get(m["away_team"], {})
+        home_goals, away_goals = home_totals.get("Goals"), away_totals.get("Goals")
+        if home_goals is None or away_goals is None:
+            continue  # incomplete data for this match - don't guess, just skip it
+
+        home_row = _team_row(m["home_team"])
+        away_row = _team_row(m["away_team"])
+        home_row["Played"] += 1
+        away_row["Played"] += 1
+        home_row["GF"] += home_goals
+        home_row["GA"] += away_goals
+        away_row["GF"] += away_goals
+        away_row["GA"] += home_goals
+        home_row["xG"] += home_totals.get("Total xG") or 0.0
+        home_row["xGA"] += away_totals.get("Total xG") or 0.0
+        away_row["xG"] += away_totals.get("Total xG") or 0.0
+        away_row["xGA"] += home_totals.get("Total xG") or 0.0
+
+        if home_goals > away_goals:
+            home_row["W"] += 1
+            away_row["L"] += 1
+        elif home_goals < away_goals:
+            away_row["W"] += 1
+            home_row["L"] += 1
+        else:
+            home_row["D"] += 1
+            away_row["D"] += 1
+
+    records = []
+    for team, s in stats.items():
+        gd = s["GF"] - s["GA"]
+        points = s["W"] * 3 + s["D"]
+        records.append({
+            "Team": team, "Played": s["Played"], "W": s["W"], "D": s["D"], "L": s["L"],
+            "GF": s["GF"], "GA": s["GA"], "GD": gd, "Points": points,
+            "xG": round(s["xG"], 2), "xGA": round(s["xGA"], 2),
+            "xGD": round(s["xG"] - s["xGA"], 2),
+        })
+    df = pd.DataFrame(records, columns=cols)
+    return df.sort_values(["Points", "GD", "GF"], ascending=False).reset_index(drop=True)
+
+
+def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
+    """
+    Season-cumulative passing totals per team, summed across every player
+    and match - the team-level rollup of the WhoScored Passing tab
+    (compute_passing()'s per-player stats, saved per player_match_stats row
+    under the 'ws_passing' key). Every underlying column there is a plain
+    count (confirmed: no rate/percentage column exists in compute_passing()
+    itself), so summing across players and matches is exact - Pass
+    Completion % and Cross Completion % are recomputed here from the
+    SUMMED raw counts (SUM(Completed)/SUM(Attempted)*100) rather than
+    averaging each match's own percentage, since a flat average would
+    wrongly weight a 10-attempt match the same as a 500-attempt match.
+    """
+    cols = ["Team", "Passes Completed", "Passes Attempted", "Pass Completion %",
+            "Passes Forward", "Headed", "Crosses Attempted", "Crosses Completed",
+            "Cross Completion %", "Passes into Final 1/3", "Passes into the Box",
+            "Progressive Passes", "Shot Assists", "SCA"]
+    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    sums = {}
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        passing = extra.get("ws_passing")
+        if not passing:
+            continue
+        agg = sums.setdefault(team, {})
+        for k, v in passing.items():
+            if isinstance(v, (int, float)):
+                agg[k] = agg.get(k, 0) + v
+
+    if not sums:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for team, agg in sums.items():
+        completed = agg.get("Passes Completed", 0)
+        attempted = agg.get("Passes Attempted", 0)
+        crosses_c = agg.get("Crosses Completed", 0)
+        crosses_a = agg.get("Crosses Attempted", 0)
+        records.append({
+            "Team": team,
+            "Passes Completed": completed,
+            "Passes Attempted": attempted,
+            "Pass Completion %": round(completed / attempted * 100, 1) if attempted else 0.0,
+            "Passes Forward": agg.get("Passes Forward", 0),
+            "Headed": agg.get("Headed", 0),
+            "Crosses Attempted": crosses_a,
+            "Crosses Completed": crosses_c,
+            "Cross Completion %": round(crosses_c / crosses_a * 100, 1) if crosses_a else 0.0,
+            "Passes into Final 1/3": agg.get("Passes into Final 1/3", 0),
+            "Passes into the Box": agg.get("Passes into the Box", 0),
+            "Progressive Passes": agg.get("Progressive Passes", 0),
+            "Shot Assists": agg.get("Shot Assists", 0),
+            "SCA": agg.get("SCA", 0),
+        })
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Passes Attempted", ascending=False).reset_index(drop=True)
+
+
+def fetch_season_defensive_totals(db: DB) -> pd.DataFrame:
+    """
+    Season-cumulative defensive totals per team, summed across every player
+    and match - the team-level rollup of the WhoScored Defensive Actions
+    tab (compute_defensive_actions()'s per-player stats, saved under the
+    'ws_defensive' key). All four columns there are plain counts (no
+    rates), so summing is exact.
+    """
+    cols = ["Team", "Tackles", "Interceptions", "Passes Blocked", "Shots Blocked"]
+    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    sums = {}
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        defensive = extra.get("ws_defensive")
+        if not defensive:
+            continue
+        agg = sums.setdefault(team, {})
+        for k, v in defensive.items():
+            if isinstance(v, (int, float)):
+                agg[k] = agg.get(k, 0) + v
+
+    if not sums:
+        return pd.DataFrame(columns=cols)
+
+    records = [{
+        "Team": team,
+        "Tackles": agg.get("Tackles", 0),
+        "Interceptions": agg.get("Interceptions", 0),
+        "Passes Blocked": agg.get("Passes Blocked", 0),
+        "Shots Blocked": agg.get("Shots Blocked", 0),
+    } for team, agg in sums.items()]
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Tackles", ascending=False).reset_index(drop=True)
+
+
+# Duplicated from whoscored_report.py's own third()/in_box() pitch-zone
+# logic (same reasoning as pitch_viz.py duplicating PITCH_LEN_M/PITCH_WID_M
+# rather than importing whoscored_report.py - see that file's own
+# docstring: importing it here would pull in its top-level selenium/
+# utils.driver dependencies, which this module has no other reason to
+# need). Used by fetch_season_touches_totals() below to bucket the raw
+# touches table's (x, y) coordinates into thirds/attacking-box the exact
+# same way the WhoScored Touches tab does, so a season total here means the
+# same thing it would mean on a single match's own Touches tab.
+_PITCH_LEN_M = 105.0
+_PITCH_WID_M = 68.0
+_M_TO_YD = 1.09361
+_OWN_THIRD_MAX = 33.3
+_MIDDLE_THIRD_MAX = 66.6
+_BOX_DEPTH_YD = 18
+_BOX_WIDTH_YD = 44
+_GOAL_X_YD = 100 / 100.0 * _PITCH_LEN_M * _M_TO_YD
+_GOAL_Y_YD = 50 / 100.0 * _PITCH_WID_M * _M_TO_YD
+_BOX_X_MIN = _GOAL_X_YD - _BOX_DEPTH_YD
+_BOX_Y_MIN = _GOAL_Y_YD - _BOX_WIDTH_YD / 2
+_BOX_Y_MAX = _GOAL_Y_YD + _BOX_WIDTH_YD / 2
+
+
+def _pitch_third(x):
+    if x < _OWN_THIRD_MAX:
+        return "Own third"
+    elif x < _MIDDLE_THIRD_MAX:
+        return "Middle third"
+    return "Final third"
+
+
+def _in_attacking_box(x, y):
+    x_yd = x / 100.0 * _PITCH_LEN_M * _M_TO_YD
+    y_yd = y / 100.0 * _PITCH_WID_M * _M_TO_YD
+    return _BOX_X_MIN <= x_yd and _BOX_Y_MIN <= y_yd <= _BOX_Y_MAX
+
+
+def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
+    """
+    Season-cumulative touch totals per team, bucketed into pitch thirds and
+    the attacking box - the team-level slice of the WhoScored Touches tab
+    (compute_touches()'s own team_summary table). Rebuilt here from the raw
+    `touches` table's (x, y) coordinates using the exact same thresholds
+    WhoScored's own Touches tab uses (see _pitch_third()/_in_attacking_box()
+    above), since team_summary itself was never persisted to the database -
+    only raw touch events are (see the touches table's own note in this
+    module's top docstring).
+
+    NOT included here, and NOT reconstructable from raw touch coordinates
+    alone: Progressive Carries, Carries into Final Third, Carries into Box,
+    Passes Received, Progressive Passes Received - compute_touches() derives
+    those from separate carry-detection/pass-event data (consecutive-event
+    deltas, pass qualifiers) that the touches table's plain (team, player,
+    minute, second, x, y) rows don't capture. Adding those to a season total
+    would need their own persistence added to build_db_stats() going
+    forward - ask if that's worth doing.
+    """
+    cols = ["Team", "Total Touches", "Own Third", "Middle Third", "Final Third", "Attacking Box",
+            "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %"]
+    touches = fetch_touches(db)
+    if touches.empty:
+        return pd.DataFrame(columns=cols)
+
+    touches = touches.copy()
+    touches["_third"] = touches["x"].apply(_pitch_third)
+    touches["_in_box"] = touches.apply(lambda r: _in_attacking_box(r["x"], r["y"]), axis=1)
+
+    records = []
+    for team, g in touches.groupby("team"):
+        total = len(g)
+        own = int((g["_third"] == "Own third").sum())
+        mid = int((g["_third"] == "Middle third").sum())
+        final = int((g["_third"] == "Final third").sum())
+        box = int(g["_in_box"].sum())
+        records.append({
+            "Team": team, "Total Touches": total,
+            "Own Third": own, "Middle Third": mid, "Final Third": final, "Attacking Box": box,
+            "Own Third %": round(own / total * 100, 1) if total else 0.0,
+            "Middle Third %": round(mid / total * 100, 1) if total else 0.0,
+            "Final Third %": round(final / total * 100, 1) if total else 0.0,
+            "Attacking Box %": round(box / total * 100, 1) if total else 0.0,
+        })
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Total Touches", ascending=False).reset_index(drop=True)

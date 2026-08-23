@@ -526,11 +526,84 @@ if _match_id_param:
 else:
     st.title("Match History Dashboard")
 
-    (tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv,
+    (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv,
      tab_season_passmap, tab_season_passrecv, tab_season_heatmap) = st.tabs([
-        "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map", "Passes Received",
-        "Season Pass Map", "Season Passes Received", "Season Heat Map",
+        "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
+        "Passes Received", "Season Pass Map", "Season Passes Received", "Season Heat Map",
     ])
+
+    with tab_team_totals:
+        st.write(
+            "Season-cumulative team totals across every match saved to the database - this is the "
+            "tab the dashboard opens to by default."
+        )
+        league_table = hdb.fetch_league_table(db)
+        if league_table.empty:
+            st.info(
+                "No completed match results saved yet - publish at least one match with 'Save to "
+                "Database' first."
+            )
+        else:
+            st.subheader("League Table")
+            st.dataframe(league_table, use_container_width=True, hide_index=True)
+
+        st.subheader("Team Stats")
+        totals_category = st.selectbox(
+            "Category", ["Shots", "Passing", "Touches", "Defensive Actions"], key="team_totals_category"
+        )
+        if totals_category == "Shots":
+            shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(db)
+            if shot_for_df.empty and shot_against_df.empty:
+                st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
+            else:
+                def _shot_side_totals(df, suffix):
+                    out_cols = ["Team", f"Shots {suffix}", f"Goals {suffix}", f"xG {suffix}"]
+                    if df.empty:
+                        return pd.DataFrame(columns=out_cols)
+                    agg = df.groupby("Team")[["Shots", "Goals", "Total xG"]].sum().reset_index()
+                    agg = agg.rename(columns={"Shots": f"Shots {suffix}", "Goals": f"Goals {suffix}",
+                                               "Total xG": f"xG {suffix}"})
+                    agg[f"xG {suffix}"] = agg[f"xG {suffix}"].round(2)
+                    return agg
+
+                shot_totals = _shot_side_totals(shot_for_df, "For").merge(
+                    _shot_side_totals(shot_against_df, "Against"), on="Team", how="outer"
+                ).fillna(0)
+                for c in shot_totals.columns:
+                    if c != "Team":
+                        shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
+                shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
+                st.dataframe(shot_totals, use_container_width=True, hide_index=True)
+        elif totals_category == "Passing":
+            passing_totals = hdb.fetch_season_passing_totals(db)
+            if passing_totals.empty:
+                st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
+            else:
+                st.dataframe(passing_totals, use_container_width=True, hide_index=True)
+        elif totals_category == "Touches":
+            touches_totals = hdb.fetch_season_touches_totals(db)
+            if touches_totals.empty:
+                st.info(
+                    "No touch data saved yet. This needs matches saved AFTER the touches table was "
+                    "added - re-run 'Save to Database' on your matches in the combined report app to "
+                    "backfill it."
+                )
+            else:
+                st.dataframe(touches_totals, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Progressive Carries, Carries into Final Third/Box, and Passes Received aren't "
+                    "included here - they need data that isn't currently saved to the database (only "
+                    "raw touch locations are). Ask if you'd like these added going forward."
+                )
+        elif totals_category == "Defensive Actions":
+            defensive_totals = hdb.fetch_season_defensive_totals(db)
+            if defensive_totals.empty:
+                st.info(
+                    "No defensive stats saved yet - publish at least one match with 'Save to Database' "
+                    "first."
+                )
+            else:
+                st.dataframe(defensive_totals, use_container_width=True, hide_index=True)
 
     with tab_fixtures:
         fixtures = hdb.fetch_fixtures(db)
