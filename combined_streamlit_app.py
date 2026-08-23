@@ -117,6 +117,10 @@ if st.button("Generate Combined Report", type="primary"):
                 # data for every player in one shot (see compute_all_passes()'s
                 # own docstring in whoscored_report.py).
                 all_passes = wr.compute_all_passes(df)
+                # Same reasoning as all_passes above, but for every touch on
+                # the ball rather than just passes - backs the dashboard's
+                # (single-match and season-long) touch heat map.
+                all_touches = wr.compute_all_touches(df)
                 player_windows = wr.extract_player_windows(df)
                 on_off = wr.compute_on_off(df, player_windows, carries_df)
 
@@ -185,6 +189,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "plus_minus": plus_minus,
                 "plus_minus_warning": plus_minus_warning,
                 "all_passes": all_passes,
+                "all_touches": all_touches,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_ws_events": len(df),
@@ -292,14 +297,15 @@ if report:
                     team_stats=team_stats, player_stats=player_stats,
                     shots_df=report["combined_shots"],
                     passes_df=report["all_passes"],
+                    touches_df=report["all_touches"],
                     competition=competition, match_date=match_date.isoformat(),
                     ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
                 )
                 db.close()
                 st.success(
                     f"Saved match {match_id} to the database, including "
-                    f"{len(report['all_passes'])} passes for the dashboard's Pass Map/Passes "
-                    "Received tabs."
+                    f"{len(report['all_passes'])} passes and {len(report['all_touches'])} touches "
+                    "for the dashboard's Pass Map/Passes Received/Heat Map tabs."
                 )
             except Exception as e:
                 st.error(f"Couldn't save to the database: {e}")
