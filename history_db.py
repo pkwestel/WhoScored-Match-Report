@@ -691,6 +691,75 @@ def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=cols)
 
 
+def fetch_season_shot_totals(db: DB):
+    """
+    Season-cumulative Shots/Goals/Total xG per team, broken down by shot
+    'situation' (FotMob's own vocabulary - Open Play, Set Piece, Corner,
+    ... - see fotmob_report.SITUATION_DISPLAY_MAP for the raw-to-display
+    name mapping used by the dashboard's Shots tab), split into 'for'
+    (that team's own shots) and 'against' (shots faced FROM whichever team
+    they played in each match). Powers dashboard_app.py's season-wide Shots
+    tab, which shows two small leaderboard tables (For/Against) rather than
+    a per-match shot log.
+
+    'against' isn't a real column anywhere - a row in the shots table only
+    knows which team took the shot, not who it was against - so this is
+    derived here by joining each shot's match_id to that match's
+    home_team/away_team and attributing the shot to whichever side ISN'T
+    the shooting team. A shot whose own team doesn't match either the
+    match's home_team or away_team (a genuine, unresolved team-name
+    mismatch - see build_db_stats()'s docstring in batch_lib.py for the
+    usual cause of this) can't be safely attributed to an opponent, so it's
+    just dropped from the 'against' table only (still counted normally in
+    'for').
+
+    Returns (for_df, against_df), each with columns Team, Situation, Shots,
+    Goals, Total xG - one row per (team, situation) combination that
+    actually has at least one shot; a combination with zero shots simply
+    has no row (callers should treat a missing combination as zero, not
+    error). Situation is the RAW FotMob value (e.g. 'RegularPlay') -
+    dashboard_app.py handles converting that to a friendly display label.
+    """
+    cols = ["Team", "Situation", "Shots", "Goals", "Total xG"]
+    shots = fetch_shots(db)
+    if shots.empty:
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
+
+    shots = shots.copy()
+    shots["situation"] = shots["situation"].fillna("Unknown")
+
+    matches = fetch_matches(db)[["match_id", "home_team", "away_team"]]
+    merged = shots.merge(matches, on="match_id", how="left")
+
+    def _agg(df, team_col):
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+        out = (df.groupby([team_col, "situation"])
+                 .agg(Shots=("id", "size"),
+                      Goals=("outcome", lambda s: int((s == "Goal").sum())),
+                      **{"Total xG": ("xg", "sum")})
+                 .reset_index()
+                 .rename(columns={team_col: "Team", "situation": "Situation"}))
+        out["Total xG"] = out["Total xG"].round(2)
+        return out[cols]
+
+    for_df = _agg(merged, "team")
+
+    def _opponent(r):
+        if r["team"] == r["home_team"]:
+            return r["away_team"]
+        if r["team"] == r["away_team"]:
+            return r["home_team"]
+        return None  # unresolved team-name mismatch - can't attribute safely
+
+    against_raw = merged.copy()
+    against_raw["opponent"] = against_raw.apply(_opponent, axis=1)
+    against_raw = against_raw.dropna(subset=["opponent"])
+    against_df = _agg(against_raw, "opponent")
+
+    return for_df, against_df
+
+
 def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_only=False,
                   team=None) -> pd.DataFrame:
     """

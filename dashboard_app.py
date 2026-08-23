@@ -48,6 +48,7 @@ where both are visible at once.
 
 import io
 import os
+import re
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -86,6 +87,37 @@ db = get_db()
 # single-match detail view, so they're all defined up front before either
 # one runs)
 # ============================================================
+# FotMob shot "situation" -> a friendlier display label, for the season
+# Shots tab's dropdown/tables. Confirmed against a real shot map
+# (fotmob_raw_5795368.json): RegularPlay, SetPiece, FromCorner, Penalty,
+# FreeKick, FastBreak, and ThrowInSetPiece all actually occur. Duplicated
+# here (rather than imported from fotmob_report.py) for the same reason
+# pitch_viz.py duplicates PITCH_LEN_M/PITCH_WID_M instead of importing
+# whoscored_report.py for them - see this module's own docstring: importing
+# fotmob_report.py would pull in its top-level selenium/utils.driver
+# imports, which broke a real Streamlit Cloud deploy once already.
+_SITUATION_DISPLAY_MAP = {
+    "RegularPlay": "Open Play",
+    "SetPiece": "Set Piece",
+    "FromCorner": "Corner",
+    "Penalty": "Penalty",
+    "FreeKick": "Free Kick",
+    "FastBreak": "Fast Break",
+    "ThrowInSetPiece": "Throw-In Set Piece",
+    "Unknown": "Unknown",
+}
+
+
+def _situation_display_name(raw):
+    """Friendly label for a raw FotMob shot 'situation' value - see
+    _SITUATION_DISPLAY_MAP above. Falls back to spacing out an unrecognized
+    CamelCase value ('SomeNewType' -> 'Some New Type') rather than showing
+    it raw, in case FotMob adds a new situation type later."""
+    if raw in _SITUATION_DISPLAY_MAP:
+        return _SITUATION_DISPLAY_MAP[raw]
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", raw) if isinstance(raw, str) else str(raw)
+
+
 def _match_picker(matches, key):
     """Shared match dropdown for the Pass Map/Passes Received tabs below."""
     options = {
@@ -579,34 +611,42 @@ else:
                             st.line_chart(chart_df)
 
     with tab_shots:
-        matches = hdb.fetch_matches(db)
-        if matches.empty:
-            st.info("No matches published yet.")
+        st.write(
+            "Season-cumulative shot totals by situation type, summed across every match saved to the "
+            "database - **For** is a team's own shots, **Against** is shots faced from whichever team "
+            "they played in the same matches."
+        )
+        for_df, against_df = hdb.fetch_season_shot_totals(db)
+        if for_df.empty and against_df.empty:
+            st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
         else:
+            situations_present = sorted(set(for_df["Situation"]) | set(against_df["Situation"]))
+            situation_options = ["All situations"] + situations_present
+            chosen = st.selectbox(
+                "Situation",
+                situation_options,
+                format_func=lambda s: s if s == "All situations" else _situation_display_name(s),
+            )
+
+            def _team_totals_for(df):
+                scoped = df if chosen == "All situations" else df[df["Situation"] == chosen]
+                if scoped.empty:
+                    return pd.DataFrame(columns=["Team", "Shots", "Goals", "Total xG"])
+                out = (scoped.groupby("Team")[["Shots", "Goals", "Total xG"]]
+                       .sum()
+                       .reset_index()
+                       .sort_values("Total xG", ascending=False)
+                       .reset_index(drop=True))
+                out["Total xG"] = out["Total xG"].round(2)
+                return out
+
             col1, col2 = st.columns(2)
             with col1:
-                match_options = {"All matches": None}
-                match_options.update({
-                    f"{r.home_team} vs {r.away_team} ({r.match_date})": r.match_id
-                    for r in matches.itertuples()
-                })
-                match_label = st.selectbox("Match", list(match_options.keys()))
-                match_filter = match_options[match_label]
+                st.subheader("For")
+                st.dataframe(_team_totals_for(for_df), use_container_width=True, hide_index=True)
             with col2:
-                player_filter = st.text_input("Filter by player (optional)", key="shots_player_filter")
-
-            shots = hdb.fetch_shots(db, match_id=match_filter, player=player_filter or None)
-            if shots.empty:
-                st.info("No shots match this filter.")
-            else:
-                st.dataframe(shots.drop(columns=["extra_json"], errors="ignore"),
-                             use_container_width=True, hide_index=True)
-                if "xg" in shots.columns:
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Shots", len(shots))
-                    c2.metric("Total xG", f"{shots['xg'].fillna(0).sum():.2f}")
-                    goals = (shots["outcome"] == "Goal").sum() if "outcome" in shots.columns else 0
-                    c3.metric("Goals", int(goals))
+                st.subheader("Against")
+                st.dataframe(_team_totals_for(against_df), use_container_width=True, hide_index=True)
 
     with tab_passmap:
         st.write(
