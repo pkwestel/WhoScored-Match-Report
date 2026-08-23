@@ -587,6 +587,38 @@ def extract_team_names(match_json):
     return home_name, away_name
 
 
+def extract_referee(match_json):
+    """
+    Best-effort referee name lookup for the dashboard's Fixtures tab.
+    Checked spot first: general.referee, which other tools working with
+    this same FotMob feed have reported as either a plain string or a
+    {'name': ...}-shaped dict - falls back to a generic key-name search
+    anywhere in the payload if that's not there. UNVERIFIED against a real
+    live match_json in this project (same caveat as get_fixture_urls()/
+    find_fotmob_match_url() - see batch_run_app.py's module docstring): if
+    referees are consistently missing/wrong after a few real matches, this
+    is the function to fix, most likely by pointing it at wherever the real
+    key actually turned out to be. Returns None (never raises) if nothing
+    is found, rather than blocking the rest of the match from saving.
+    """
+    general = match_json.get('general') if isinstance(match_json, dict) else None
+    if isinstance(general, dict):
+        referee = general.get('referee')
+        if isinstance(referee, dict):
+            name = _get_first(referee, ['name', 'refereeName'])
+            if name:
+                return name
+        elif isinstance(referee, str) and referee.strip():
+            return referee.strip()
+
+    found = _search_for_key(match_json, {'referee', 'refereeName'})
+    if isinstance(found, dict):
+        return _get_first(found, ['name', 'refereeName'])
+    if isinstance(found, str) and found.strip():
+        return found.strip()
+    return None
+
+
 def extract_team_id_map(match_json):
     """Map FotMob teamId -> team name, since shots are keyed by teamId, not name."""
     mapping = {}

@@ -22,7 +22,11 @@ SCHEMA DESIGN
 matches            - one row per match (match_id is FotMob's own numeric
                      matchId, since that's a stable global identifier both
                      the standalone FotMob app and the combined app already
-                     have on hand).
+                     have on hand). 'referee' is best-effort (see fotmob_
+                     report.extract_referee()) - None for matches saved
+                     before that field existed. Score/xG for the Fixtures
+                     tab are NOT columns here - see fetch_fixtures(), which
+                     pulls them from team_match_stats' 'fm_totals' instead.
 team_match_stats   - one row per (match, team). Rather than hard-coding
                      every column name from every report variant (WhoScored's
                      Totals tab and FotMob's Totals tab don't share a column
@@ -160,9 +164,22 @@ def init_schema(db: DB):
             away_team     TEXT,
             ws_events     INTEGER,
             fm_shots      INTEGER,
+            referee       TEXT,
             scraped_at    TEXT
         )
     """)
+    # Migration for databases that already had a 'matches' table BEFORE the
+    # referee column was added above - CREATE TABLE IF NOT EXISTS only
+    # applies to brand new tables, so an existing one needs its own ALTER
+    # TABLE. Wrapped in try/except because there's no portable
+    # "ADD COLUMN IF NOT EXISTS" across SQLite and Postgres both - re-running
+    # this against a database that already has the column just raises
+    # "duplicate column"/"already exists", which is fine to ignore.
+    try:
+        db.execute("ALTER TABLE matches ADD COLUMN referee TEXT")
+        db.commit()
+    except Exception:
+        db.rollback()
     db.execute("""
         CREATE TABLE IF NOT EXISTS team_match_stats (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,11 +357,11 @@ def init_schema(db: DB):
 # Publish (upsert) helpers
 # ============================================================
 def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match_date=None,
-                  ws_events=None, fm_shots=None):
+                  ws_events=None, fm_shots=None, referee=None):
     db.execute("""
         INSERT INTO matches (match_id, competition, match_date, home_team, away_team,
-                              ws_events, fm_shots, scraped_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                              ws_events, fm_shots, referee, scraped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(match_id) DO UPDATE SET
             competition = excluded.competition,
             match_date  = excluded.match_date,
@@ -352,9 +369,10 @@ def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match
             away_team   = excluded.away_team,
             ws_events   = excluded.ws_events,
             fm_shots    = excluded.fm_shots,
+            referee     = excluded.referee,
             scraped_at  = excluded.scraped_at
     """, (str(match_id), competition, match_date, home_team, away_team,
-          ws_events, fm_shots, datetime.now(timezone.utc).isoformat()))
+          ws_events, fm_shots, referee, datetime.now(timezone.utc).isoformat()))
 
 
 def upsert_team_stats(db: DB, match_id, team, extra: dict, is_home=None):
@@ -483,7 +501,7 @@ def _num(v):
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
                     touches_df: pd.DataFrame = None,
-                    competition=None, match_date=None, ws_events=None, fm_shots=None):
+                    competition=None, match_date=None, ws_events=None, fm_shots=None, referee=None):
     """
     One-call orchestrator for a full match publish, wrapped in a single
     transaction (all-or-nothing - if any part fails, nothing is written).
@@ -495,9 +513,11 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
                   (e.g. publishing a FotMob-only report with no event data).
     touches_df:   whoscored_report.compute_all_touches() output, or None to
                   skip (same reasoning as passes_df).
+    referee:      fotmob_report.extract_referee() output, or None if unknown.
     """
     try:
-        upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events, fm_shots)
+        upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
+                     fm_shots, referee)
         for team, extra in team_stats.items():
             upsert_team_stats(db, match_id, team, extra, is_home=(team == home_team))
         for (team, player), extra in player_stats.items():
@@ -521,6 +541,56 @@ def fetch_matches(db: DB) -> pd.DataFrame:
     cur = db.execute("SELECT * FROM matches ORDER BY match_date DESC, scraped_at DESC")
     cols = [d[0] for d in cur.description]
     return pd.DataFrame(cur.fetchall(), columns=cols)
+
+
+def fetch_fixtures(db: DB) -> pd.DataFrame:
+    """
+    One row per match, shaped for dashboard_app.py's Fixtures tab: match_id
+    (kept for the clickable link to the match detail view, not meant to be
+    shown as its own column), Date, Competition, Home Team, Home xG, Score,
+    Away xG, Away Team, Referee.
+
+    Score and xG aren't their own columns on the 'matches' table - they're
+    pulled from each team's own 'fm_totals' entry inside team_match_stats.
+    extra_json (Goals / 'Total xG'), which every match saved via
+    combined_streamlit_app.py or batch_lib.py already carries. That means
+    this works retroactively for every match already in the database - no
+    re-scraping or backfill needed, unlike Referee (a genuinely new field -
+    see fotmob_report.extract_referee()), which is None for anything saved
+    before that existed.
+    """
+    matches = fetch_matches(db)
+    cols = ["match_id", "Date", "Competition", "Home Team", "Home xG",
+            "Score", "Away xG", "Away Team", "Referee"]
+    if matches.empty:
+        return pd.DataFrame(columns=cols)
+
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    fm_totals_by_match = {}
+    for match_id, team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        fm_totals_by_match.setdefault(match_id, {})[team] = extra.get("fm_totals") or {}
+
+    records = []
+    for _, m in matches.iterrows():
+        team_totals = fm_totals_by_match.get(m["match_id"], {})
+        home_totals = team_totals.get(m["home_team"], {})
+        away_totals = team_totals.get(m["away_team"], {})
+        home_goals, away_goals = home_totals.get("Goals"), away_totals.get("Goals")
+        score = (f"{int(home_goals)} - {int(away_goals)}"
+                 if home_goals is not None and away_goals is not None else None)
+        records.append({
+            "match_id": m["match_id"],
+            "Date": m["match_date"],
+            "Competition": m["competition"],
+            "Home Team": m["home_team"],
+            "Home xG": home_totals.get("Total xG"),
+            "Score": score,
+            "Away xG": away_totals.get("Total xG"),
+            "Away Team": m["away_team"],
+            "Referee": m.get("referee"),
+        })
+    return pd.DataFrame(records, columns=cols)
 
 
 def _flatten_extra(rows, id_cols):
@@ -550,6 +620,32 @@ def fetch_team_trends(db: DB, team: str) -> pd.DataFrame:
     rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
     df = _flatten_extra(rows, ["match_date", "match_id", "team", "is_home"])
     return df
+
+
+def fetch_team_stats_for_match(db: DB, match_id) -> pd.DataFrame:
+    """
+    Both teams' stats (flattened from extra_json) for ONE match - the
+    match detail view's equivalent of fetch_team_trends(), scoped to a
+    single match instead of a single team across the whole season.
+    """
+    cur = db.execute("""
+        SELECT team, is_home, extra_json
+        FROM team_match_stats
+        WHERE match_id = ?
+    """, (str(match_id),))
+    rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+    return _flatten_extra(rows, ["team", "is_home"])
+
+
+def fetch_player_stats_for_match(db: DB, match_id) -> pd.DataFrame:
+    """Every player's stats (flattened from extra_json) for ONE match."""
+    cur = db.execute("""
+        SELECT team, player, extra_json
+        FROM player_match_stats
+        WHERE match_id = ?
+    """, (str(match_id),))
+    rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+    return _flatten_extra(rows, ["team", "player"])
 
 
 def fetch_distinct_players(db: DB) -> list:

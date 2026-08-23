@@ -136,6 +136,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     _status("Opening the FotMob match page (a real Chrome window will pop up)...")
     fm_match_json, fm_match_id = fr.scrape_match(fm_url.strip(), out_dir=fm_out_dir)
     fm_home_name, fm_away_name = fr.extract_team_names(fm_match_json)
+    referee = fr.extract_referee(fm_match_json)
 
     _status("Computing FotMob tables...")
     shots_df = fr.compute_shots(fm_match_json)
@@ -176,6 +177,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "ws_away_name": ws_away_name,
         "fm_home_name": fm_home_name,
         "fm_away_name": fm_away_name,
+        "referee": referee,
         "team_name_mismatch": team_name_mismatch,
         "totals_out": totals_out,
         "against_totals": against_totals,
@@ -259,6 +261,7 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
             touches_df=report["all_touches"],
             competition=competition, match_date=match_date_iso,
             ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
+            referee=report.get("referee"),
         )
     finally:
         db.close()
