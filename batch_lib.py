@@ -207,17 +207,56 @@ def build_db_stats(report):
     """
     Extracts the team_stats/player_stats dicts publish_report() expects out
     of a report dict built by run_combined_report() (or the equivalent
-    inline code in combined_streamlit_app.py's single-match flow - both
-    produce the same shape). Factored out so both the single-match "Save to
+    single-match flow in combined_streamlit_app.py, which now calls this
+    same function rather than duplicating it - see that file's "Save to
+    Database" handler). Factored out so both the single-match "Save to
     Database" button and the batch runner's "Save all" button build these
     the exact same way.
+
+    TEAM NAME RECONCILIATION (important): FotMob and WhoScored often use a
+    different display name for the same club - Ipswich vs Ipswich Town, Man
+    Utd vs Manchester United, Spurs vs Tottenham Hotspur, Hull vs Hull City,
+    Leeds vs Leeds United, Coventry vs Coventry City, and more (see
+    combined_report.TEAM_NAME_ALIASES for the full list). totals_out/
+    passing_out/defensive_actions all use WhoScored's own team name (they're
+    built from ws_home_name/ws_away_name), but fm_totals_df/plus_minus use
+    FotMob's own team name - if that FotMob name is saved as-is, a team's
+    FotMob-sourced stats (fm_totals, fm_plus_minus) land under a DIFFERENT
+    team_match_stats/player_match_stats row than that same team's
+    WhoScored-sourced stats, keyed by whichever name that source happened to
+    use. That's not just cosmetic: matches.home_team/away_team (see
+    upsert_match()) are always WhoScored's own name, and fetch_fixtures()
+    looks up each team's Score/xG in team_match_stats by that exact name -
+    so a mismatched name means fm_totals is saved under a row
+    fetch_fixtures() never looks at, and the Fixtures tab shows blank Score/
+    xG for that match. _to_ws_name() below fixes this at the source: every
+    FotMob team name is remapped to whichever of this match's two
+    WhoScored team names it canonically matches (via combined_report.
+    canonical_team_name() - the exact same alias table already used for the
+    Shot Creating Actions merge), so every stat for a team ends up keyed by
+    ONE consistent (WhoScored's) name regardless of which source it came
+    from. A FotMob name that doesn't canonically match either WhoScored
+    name (a genuine, not-yet-aliased mismatch) is kept as its own row rather
+    than dropped - better to have it show up on its own than silently lose
+    it, and it's an easy fix (add the alias to TEAM_NAME_ALIASES) once
+    spotted.
     """
+    ws_names = [report.get("ws_home_name"), report.get("ws_away_name")]
+
+    def _to_ws_name(fm_name):
+        if not fm_name:
+            return fm_name
+        for w in ws_names:
+            if w and cr.canonical_team_name(w) == cr.canonical_team_name(fm_name):
+                return w
+        return fm_name
+
     team_stats = {}
     for _, row in report["totals_out"].iterrows():
         t = row["team"]
         team_stats.setdefault(t, {})["ws_totals"] = row.drop("team").to_dict()
     for _, row in report["fm_totals_df"].iterrows():
-        t = row["team"]
+        t = _to_ws_name(row["team"])
         team_stats.setdefault(t, {})["fm_totals"] = row.drop("team").to_dict()
 
     player_stats = {}
@@ -229,7 +268,8 @@ def build_db_stats(report):
         player_stats.setdefault(key, {})["ws_defensive"] = row.drop(["team", "player"]).to_dict()
     if not report["plus_minus"].empty:
         for _, row in report["plus_minus"].iterrows():
-            key = (row["Team"], row["Player"])
+            team = _to_ws_name(row["Team"])
+            key = (team, row["Player"])
             player_stats.setdefault(key, {})["fm_plus_minus"] = row.drop(["Team", "Player"]).to_dict()
 
     return team_stats, player_stats

@@ -57,6 +57,7 @@ import whoscored_report as wr
 import fotmob_report as fr
 import combined_report as cr
 import history_db as hdb
+import batch_lib as bl
 
 st.set_page_config(page_title="Combined Match Report", layout="wide")
 st.title("Combined WhoScored + FotMob Match Report Generator")
@@ -265,31 +266,17 @@ if report:
                 # Team stats: WhoScored's Totals + FotMob's Totals, namespaced
                 # separately per team rather than merged, since the two
                 # sources don't share a column schema (see history_db.py's
-                # own docstring on this).
-                team_stats = {}
-                for _, row in report["totals_out"].iterrows():
-                    t = row["team"]
-                    team_stats.setdefault(t, {})["ws_totals"] = row.drop("team").to_dict()
-                for _, row in report["fm_totals_df"].iterrows():
-                    t = row["team"]
-                    team_stats.setdefault(t, {})["fm_totals"] = row.drop("team").to_dict()
-
-                # Player stats: WhoScored Passing + Defensive Actions, and
-                # FotMob Plus Minus, each nested under their own key.
-                player_stats = {}
-                for _, row in report["passing_out"].iterrows():
-                    key = (row["team"], row["player"])
-                    player_stats.setdefault(key, {})["ws_passing"] = (
-                        row.drop(["team", "player"]).to_dict())
-                for _, row in report["defensive_actions"].iterrows():
-                    key = (row["team"], row["player"])
-                    player_stats.setdefault(key, {})["ws_defensive"] = (
-                        row.drop(["team", "player"]).to_dict())
-                if not report["plus_minus"].empty:
-                    for _, row in report["plus_minus"].iterrows():
-                        key = (row["Team"], row["Player"])
-                        player_stats.setdefault(key, {})["fm_plus_minus"] = (
-                            row.drop(["Team", "Player"]).to_dict())
+                # own docstring on this). Player stats: WhoScored Passing +
+                # Defensive Actions, and FotMob Plus Minus, each nested under
+                # their own key. Built via batch_lib.build_db_stats() (rather
+                # than duplicating this logic here, which is what used to
+                # happen - batch_lib.py's own docstring specifically warns
+                # about the two copies drifting apart) so this single-match
+                # flow and the batch runner's "Save all" button always
+                # reconcile FotMob's vs WhoScored's team names for the same
+                # club (Ipswich/Ipswich Town, Man Utd/Manchester United, etc.
+                # - see build_db_stats()'s docstring) the exact same way.
+                team_stats, player_stats = bl.build_db_stats(report)
 
                 db = hdb.get_db(db_url)
                 hdb.init_schema(db)
