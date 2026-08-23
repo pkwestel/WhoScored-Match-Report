@@ -56,7 +56,6 @@ import streamlit as st
 import whoscored_report as wr
 import fotmob_report as fr
 import combined_report as cr
-import history_db as hdb
 import batch_lib as bl
 
 st.set_page_config(page_title="Combined Match Report", layout="wide")
@@ -137,6 +136,10 @@ if st.button("Generate Combined Report", type="primary"):
 
             fm_home_name, fm_away_name = fr.extract_team_names(fm_match_json)
             referee = fr.extract_referee(fm_match_json)
+            # Real kickoff date+time (UK local) - see the "Save to Database"
+            # section below for why this is preferred over the manually-picked
+            # match date.
+            kickoff = fr.extract_kickoff_local_str(fm_match_json)
 
             with st.spinner("Computing FotMob tables..."):
                 shots_df = fr.compute_shots(fm_match_json)
@@ -175,6 +178,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "fm_home_name": fm_home_name,
                 "fm_away_name": fm_away_name,
                 "referee": referee,
+                "kickoff": kickoff,
                 "totals_out": totals_out,
                 "against_totals": against_totals,
                 "player_third": player_third,
@@ -257,41 +261,34 @@ if report:
                  "for your hosted database. Defaults to the DATABASE_URL environment variable if set.",
         )
         competition = st.text_input("Competition", value="Premier League")
-        match_date = st.date_input("Match date", value=datetime.date.today())
+        match_date = st.date_input(
+            "Match date (fallback only)",
+            value=datetime.date.today(),
+            help="Only used if FotMob's own kickoff time couldn't be read for this match (see below) - "
+                 "when it's available, it's used instead, since it carries the real kickoff TIME as well "
+                 "as the date, which this date-only picker never can.",
+        )
+        if report.get("kickoff"):
+            st.caption(f"Detected kickoff (UK time): **{report['kickoff']}** - this will be used instead "
+                       "of the date above.")
+        else:
+            st.caption(
+                "Couldn't detect a kickoff time from FotMob for this match - the date picked above will "
+                "be saved instead (date only, no time)."
+            )
 
         if st.button("Save this match to the database"):
             try:
-                match_id = report["fm_match_id"]
-
-                # Team stats: WhoScored's Totals + FotMob's Totals, namespaced
-                # separately per team rather than merged, since the two
-                # sources don't share a column schema (see history_db.py's
-                # own docstring on this). Player stats: WhoScored Passing +
-                # Defensive Actions, and FotMob Plus Minus, each nested under
-                # their own key. Built via batch_lib.build_db_stats() (rather
-                # than duplicating this logic here, which is what used to
-                # happen - batch_lib.py's own docstring specifically warns
-                # about the two copies drifting apart) so this single-match
-                # flow and the batch runner's "Save all" button always
-                # reconcile FotMob's vs WhoScored's team names for the same
-                # club (Ipswich/Ipswich Town, Man Utd/Manchester United, etc.
-                # - see build_db_stats()'s docstring) the exact same way.
-                team_stats, player_stats = bl.build_db_stats(report)
-
-                db = hdb.get_db(db_url)
-                hdb.init_schema(db)
-                hdb.publish_report(
-                    db, match_id=match_id,
-                    home_team=report["ws_home_name"], away_team=report["ws_away_name"],
-                    team_stats=team_stats, player_stats=player_stats,
-                    shots_df=report["combined_shots"],
-                    passes_df=report["all_passes"],
-                    touches_df=report["all_touches"],
-                    competition=competition, match_date=match_date.isoformat(),
-                    ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
-                    referee=report.get("referee"),
-                )
-                db.close()
+                # Team/player stats, team-name reconciliation, and the actual
+                # publish_report() call all live in batch_lib.save_report_to_db()
+                # (rather than duplicating that logic here, which is what used
+                # to happen - batch_lib.py's own docstring specifically warns
+                # about the two copies drifting apart), so this single-match
+                # flow and the batch runner's "Save all" button always behave
+                # identically - including preferring FotMob's own kickoff time
+                # (report["kickoff"]) over the date picker above when it's
+                # available. See save_report_to_db()'s own docstring.
+                match_id = bl.save_report_to_db(db_url, report, competition, match_date.isoformat())
                 st.success(
                     f"Saved match {match_id} to the database, including "
                     f"{len(report['all_passes'])} passes and {len(report['all_touches'])} touches "

@@ -140,6 +140,7 @@ import json
 import time
 import base64
 import argparse
+from datetime import datetime, timezone
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -663,6 +664,72 @@ def extract_referee(match_json):
     if isinstance(found, str) and found.strip():
         return found.strip()
     return None
+
+
+def _extract_kickoff_utc(match_json):
+    """
+    Kickoff date/time as a timezone-aware UTC datetime, or None. Read from
+    general.matchTimeUTCDate - confirmed real shape (from the same live
+    match_json sample that fixed extract_referee() above): an ISO 8601
+    string with milliseconds, e.g. '2026-08-22T16:30:00.000Z'. Falls back
+    to parsing general.matchTimeUTC's human-readable form ('Sat, Aug 22,
+    2026, 16:30 UTC') if the ISO field isn't present for some reason.
+    """
+    general = match_json.get('general') if isinstance(match_json, dict) else None
+    if not isinstance(general, dict):
+        return None
+
+    iso_str = general.get('matchTimeUTCDate')
+    if isinstance(iso_str, str) and iso_str.strip():
+        try:
+            # datetime.fromisoformat() doesn't accept a trailing 'Z' before
+            # Python 3.11 - normalize to an explicit +00:00 offset first.
+            return datetime.fromisoformat(iso_str.strip().replace('Z', '+00:00'))
+        except ValueError:
+            pass
+
+    human_str = general.get('matchTimeUTC')
+    if isinstance(human_str, str) and human_str.strip():
+        try:
+            dt = datetime.strptime(human_str.strip(), '%a, %b %d, %Y, %H:%M UTC')
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    return None
+
+
+def extract_kickoff_local_str(match_json, tz_name='Europe/London'):
+    """
+    Kickoff date AND time for the dashboard's Fixtures tab, as one
+    'YYYY-MM-DD HH:MM' string (fixed-width, zero-padded - sorts correctly
+    as plain text in the exact same order as real kickoff time, which is
+    the whole point: several matches saved with the same calendar date but
+    no time at all can't be told apart when sorting the Fixtures tab by
+    Date, whereas this can). Converted from FotMob's UTC timestamp to
+    `tz_name` (Europe/London by default, since this project is UK-focused)
+    using the stdlib zoneinfo database, which correctly handles the GMT/BST
+    switch - a fan reading '16:30' expects that to mean UK local kickoff
+    time, not a UTC time that's wrong by an hour for half the season.
+
+    Falls back to the raw UTC time (still correctly ordered, just
+    potentially off by the UK's current DST offset) if the zoneinfo
+    database isn't available on this machine - most likely on Windows,
+    which has no built-in IANA timezone database; installing the `tzdata`
+    pip package fixes that if it comes up. Returns None (never raises) if
+    there's no kickoff time to work with at all - callers should fall back
+    to whatever date they already have (e.g. a manually-picked date) in
+    that case, same pattern as extract_referee().
+    """
+    dt_utc = _extract_kickoff_utc(match_json)
+    if dt_utc is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        dt_local = dt_utc.astimezone(ZoneInfo(tz_name))
+        return dt_local.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return dt_utc.strftime('%Y-%m-%d %H:%M') + ' UTC'
 
 
 def extract_team_id_map(match_json):

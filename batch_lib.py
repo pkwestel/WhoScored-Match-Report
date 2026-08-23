@@ -137,6 +137,9 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     fm_match_json, fm_match_id = fr.scrape_match(fm_url.strip(), out_dir=fm_out_dir)
     fm_home_name, fm_away_name = fr.extract_team_names(fm_match_json)
     referee = fr.extract_referee(fm_match_json)
+    # Real kickoff date+time (UK local), not just a date - see save_report_to_db()
+    # for why this matters (same-day matches sorting correctly on the Fixtures tab).
+    kickoff = fr.extract_kickoff_local_str(fm_match_json)
 
     _status("Computing FotMob tables...")
     shots_df = fr.compute_shots(fm_match_json)
@@ -178,6 +181,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "fm_home_name": fm_home_name,
         "fm_away_name": fm_away_name,
         "referee": referee,
+        "kickoff": kickoff,
         "team_name_mismatch": team_name_mismatch,
         "totals_out": totals_out,
         "against_totals": against_totals,
@@ -285,9 +289,21 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
     single-match save). Raises on failure - caller decides how to surface
     that (a single st.error for one match, or a row in a batch results
     table for many).
+
+    match_date_iso: caller-supplied fallback date (a date picker's value,
+    or the batch runner's target day) - a plain date with no time. This is
+    used ONLY if report['kickoff'] (see run_combined_report(), which reads
+    it straight off FotMob's own kickoff timestamp) couldn't be extracted.
+    When kickoff IS available, it's used instead - it's a full 'YYYY-MM-DD
+    HH:MM' string (UK local time), not just a date. That distinction
+    matters for the Fixtures tab: several matches saved with the same
+    caller-supplied date and no time at all are indistinguishable when
+    sorting by Date - kickoff time is what lets same-day matches (a full
+    Saturday 3pm slate, say) actually come out in kickoff order.
     """
     match_id = report["fm_match_id"]
     team_stats, player_stats = build_db_stats(report)
+    match_date = report.get("kickoff") or match_date_iso
 
     db = hdb.get_db(db_url)
     try:
@@ -299,7 +315,7 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
             shots_df=report["combined_shots"],
             passes_df=report["all_passes"],
             touches_df=report["all_touches"],
-            competition=competition, match_date=match_date_iso,
+            competition=competition, match_date=match_date,
             ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
             referee=report.get("referee"),
         )
