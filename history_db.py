@@ -178,18 +178,24 @@ def init_schema(db: DB):
             ws_events     INTEGER,
             fm_shots      INTEGER,
             referee       TEXT,
+            matchweek     TEXT,
             scraped_at    TEXT
         )
     """)
     # Migration for databases that already had a 'matches' table BEFORE the
-    # referee column was added above - CREATE TABLE IF NOT EXISTS only
-    # applies to brand new tables, so an existing one needs its own ALTER
-    # TABLE. Wrapped in try/except because there's no portable
+    # referee/matchweek columns were added above - CREATE TABLE IF NOT
+    # EXISTS only applies to brand new tables, so an existing one needs its
+    # own ALTER TABLE. Wrapped in try/except because there's no portable
     # "ADD COLUMN IF NOT EXISTS" across SQLite and Postgres both - re-running
     # this against a database that already has the column just raises
     # "duplicate column"/"already exists", which is fine to ignore.
     try:
         db.execute("ALTER TABLE matches ADD COLUMN referee TEXT")
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute("ALTER TABLE matches ADD COLUMN matchweek TEXT")
         db.commit()
     except Exception:
         db.rollback()
@@ -370,11 +376,11 @@ def init_schema(db: DB):
 # Publish (upsert) helpers
 # ============================================================
 def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match_date=None,
-                  ws_events=None, fm_shots=None, referee=None):
+                  ws_events=None, fm_shots=None, referee=None, matchweek=None):
     db.execute("""
         INSERT INTO matches (match_id, competition, match_date, home_team, away_team,
-                              ws_events, fm_shots, referee, scraped_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              ws_events, fm_shots, referee, matchweek, scraped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(match_id) DO UPDATE SET
             competition = excluded.competition,
             match_date  = excluded.match_date,
@@ -383,9 +389,12 @@ def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match
             ws_events   = excluded.ws_events,
             fm_shots    = excluded.fm_shots,
             referee     = excluded.referee,
+            matchweek   = excluded.matchweek,
             scraped_at  = excluded.scraped_at
     """, (str(match_id), competition, match_date, home_team, away_team,
-          ws_events, fm_shots, referee, datetime.now(timezone.utc).isoformat()))
+          ws_events, fm_shots, referee,
+          str(matchweek) if matchweek is not None else None,
+          datetime.now(timezone.utc).isoformat()))
 
 
 def upsert_team_stats(db: DB, match_id, team, extra: dict, is_home=None):
@@ -533,7 +542,8 @@ def _text(v):
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
                     touches_df: pd.DataFrame = None,
-                    competition=None, match_date=None, ws_events=None, fm_shots=None, referee=None):
+                    competition=None, match_date=None, ws_events=None, fm_shots=None, referee=None,
+                    matchweek=None):
     """
     One-call orchestrator for a full match publish, wrapped in a single
     transaction (all-or-nothing - if any part fails, nothing is written).
@@ -546,10 +556,12 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
     touches_df:   whoscored_report.compute_all_touches() output, or None to
                   skip (same reasoning as passes_df).
     referee:      fotmob_report.extract_referee() output, or None if unknown.
+    matchweek:    fotmob_report.extract_matchweek() output, or None if unknown -
+                  powers the Fixtures tab's matchweek filter.
     """
     try:
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
-                     fm_shots, referee)
+                     fm_shots, referee, matchweek)
         # A re-save of an already-published match is meant to be a full
         # replace, not a merge: every child table below is keyed on tuples
         # like (match_id, team, player, minute, second, x, y) or similar, so
@@ -589,24 +601,49 @@ def fetch_matches(db: DB) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=cols)
 
 
+def _season_label(date_str):
+    """
+    Derives a 'YYYY/YY' season label (e.g. '2026/27') from a match's date -
+    there's no real 'season' field scraped from anywhere (FotMob's match
+    JSON doesn't carry one - see fotmob_report.extract_league_name()'s
+    docstring), so this is computed on the fly from match_date instead of
+    stored. Uses the standard European football season convention (roughly
+    July - June): a date in July or later belongs to the season starting
+    that year, anything before July belongs to the season that started the
+    PREVIOUS year. Returns None if match_date is missing/unparseable rather
+    than raising - a match with a bad/blank date just won't have a season
+    filter value.
+    """
+    if not date_str:
+        return None
+    try:
+        year, month = int(str(date_str)[:4]), int(str(date_str)[5:7])
+    except (ValueError, IndexError):
+        return None
+    start_year = year if month >= 7 else year - 1
+    return f"{start_year}/{(start_year + 1) % 100:02d}"
+
+
 def fetch_fixtures(db: DB) -> pd.DataFrame:
     """
     One row per match, shaped for dashboard_app.py's Fixtures tab: match_id
     (kept for the clickable link to the match detail view, not meant to be
-    shown as its own column), Date, Competition, Home Team, Home xG, Score,
-    Away xG, Away Team, Referee.
+    shown as its own column), Date, Competition, Matchweek, Season, Home
+    Team, Home xG, Score, Away xG, Away Team, Referee.
 
     Score and xG aren't their own columns on the 'matches' table - they're
     pulled from each team's own 'fm_totals' entry inside team_match_stats.
     extra_json (Goals / 'Total xG'), which every match saved via
     combined_streamlit_app.py or batch_lib.py already carries. That means
     this works retroactively for every match already in the database - no
-    re-scraping or backfill needed, unlike Referee (a genuinely new field -
-    see fotmob_report.extract_referee()), which is None for anything saved
-    before that existed.
+    re-scraping or backfill needed, unlike Referee/Matchweek (genuinely new
+    fields - see fotmob_report.extract_referee()/extract_matchweek()),
+    which are None for anything saved before those existed. Season needs no
+    backfill at all since it's derived from match_date, which every match
+    has always had.
     """
     matches = fetch_matches(db)
-    cols = ["match_id", "Date", "Competition", "Home Team", "Home xG",
+    cols = ["match_id", "Date", "Competition", "Matchweek", "Season", "Home Team", "Home xG",
             "Score", "Away xG", "Away Team", "Referee"]
     if matches.empty:
         return pd.DataFrame(columns=cols)
@@ -629,6 +666,8 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
             "match_id": m["match_id"],
             "Date": m["match_date"],
             "Competition": m["competition"],
+            "Matchweek": m.get("matchweek"),
+            "Season": _season_label(m["match_date"]),
             "Home Team": m["home_team"],
             "Home xG": home_totals.get("Total xG"),
             "Score": score,

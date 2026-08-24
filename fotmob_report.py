@@ -616,6 +616,48 @@ def _search_for_key_ci(obj, target_keys_lower, max_depth=25):
     return None
 
 
+def extract_matchweek(match_json):
+    """
+    Matchweek/round number for the dashboard's Fixtures tab matchweek
+    filter. CONFIRMED against a real live match_json dump
+    (fotmob_raw_5795368.json): general.matchRound = 1 (an int). Falls back
+    to general.leagueRoundName (also present in that same real sample, also
+    '1' there, but for cup competitions this is sometimes a name like
+    'Round 3' instead of a bare number, which is why it's kept as a
+    separate fallback rather than assumed identical). Returns None (never
+    raises) if neither is present, rather than blocking the match from
+    saving - older/other competitions may not carry either field.
+    """
+    general = match_json.get('general') if isinstance(match_json, dict) else None
+    if not isinstance(general, dict):
+        return None
+    matchweek = general.get('matchRound')
+    if matchweek is not None:
+        return matchweek
+    round_name = general.get('leagueRoundName')
+    if round_name is not None and str(round_name).strip():
+        return round_name
+    return None
+
+
+def extract_league_name(match_json):
+    """
+    FotMob's own league/competition name (general.leagueName - e.g.
+    'Premier League', confirmed against fotmob_raw_5795368.json) - kept
+    around as a fallback/reference only. The dashboard's League filter
+    actually reads matches.competition, which is the user's own free-text
+    "Competition" field from combined_streamlit_app.py's save form (defaults
+    to 'Premier League' but is user-editable for other leagues), not this
+    value - so this isn't currently wired into any save path.
+    """
+    general = match_json.get('general') if isinstance(match_json, dict) else None
+    if isinstance(general, dict):
+        name = general.get('leagueName')
+        if name and str(name).strip():
+            return name
+    return None
+
+
 def extract_referee(match_json):
     """
     Referee name lookup for the dashboard's Fixtures tab. CONFIRMED against

@@ -140,6 +140,8 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     # Real kickoff date+time (UK local), not just a date - see save_report_to_db()
     # for why this matters (same-day matches sorting correctly on the Fixtures tab).
     kickoff = fr.extract_kickoff_local_str(fm_match_json)
+    # Matchweek/round number - powers the Fixtures tab's matchweek filter.
+    matchweek = fr.extract_matchweek(fm_match_json)
 
     _status("Computing FotMob tables...")
     shots_df = fr.compute_shots(fm_match_json)
@@ -182,9 +184,11 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "fm_away_name": fm_away_name,
         "referee": referee,
         "kickoff": kickoff,
+        "matchweek": matchweek,
         "team_name_mismatch": team_name_mismatch,
         "totals_out": totals_out,
         "against_totals": against_totals,
+        "team_summary": team_summary,
         "player_third": player_third,
         "passing_out": passing_out,
         "defensive_actions": defensive_actions,
@@ -262,6 +266,21 @@ def build_db_stats(report):
     for _, row in report["fm_totals_df"].iterrows():
         t = _to_ws_name(row["team"])
         team_stats.setdefault(t, {})["fm_totals"] = row.drop("team").to_dict()
+    # team_summary (compute_touches()'s team-level table: Total touches,
+    # thirds, Attacking Box, Progressive Carries, Carries into Final Third/
+    # Box, and their %s) - saved under 'ws_touches' so dashboard_app.py's
+    # season Touches tab can read Progressive Carries/Carries into Final
+    # Third/Box directly instead of only approximating thirds/box from raw
+    # touch (x,y) coordinates (see history_db.fetch_season_touches_totals()'s
+    # own docstring for the full story on why this was missing before).
+    # .get() with an empty default rather than report["team_summary"], since
+    # any OLDER report dict built before this field existed (unlikely at this
+    # point, but cheap to guard) shouldn't hard-crash a save over it.
+    team_summary = report.get("team_summary")
+    if team_summary is not None and not team_summary.empty:
+        for _, row in team_summary.iterrows():
+            t = row["team"]
+            team_stats.setdefault(t, {})["ws_touches"] = row.drop("team").to_dict()
 
     player_stats = {}
     for _, row in report["passing_out"].iterrows():
@@ -270,6 +289,18 @@ def build_db_stats(report):
     for _, row in report["defensive_actions"].iterrows():
         key = (row["team"], row["player"])
         player_stats.setdefault(key, {})["ws_defensive"] = row.drop(["team", "player"]).to_dict()
+    # player_third (compute_touches()'s per-player table) - same 'ws_touches'
+    # key as team_summary above (different table, same namespace name - one
+    # is per-team, the other per-player, so there's no key collision). This
+    # is the ONLY place Passes Received/Progressive Passes Received are
+    # tracked at all (team_summary doesn't carry them) - see
+    # fetch_season_touches_totals()'s docstring for how these get summed
+    # into a team-level season total from here.
+    player_third = report.get("player_third")
+    if player_third is not None and not player_third.empty:
+        for _, row in player_third.iterrows():
+            key = (row["team"], row["player"])
+            player_stats.setdefault(key, {})["ws_touches"] = row.drop(["team", "player"]).to_dict()
     if not report["plus_minus"].empty:
         for _, row in report["plus_minus"].iterrows():
             team = _to_ws_name(row["Team"])
@@ -318,6 +349,7 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
             competition=competition, match_date=match_date,
             ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
             referee=report.get("referee"),
+            matchweek=report.get("matchweek"),
         )
     finally:
         db.close()

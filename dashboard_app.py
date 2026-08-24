@@ -620,25 +620,65 @@ else:
         if fixtures.empty:
             st.info("No matches published yet - run the combined report app and use 'Save to Database'.")
         else:
-            display_df = fixtures.copy()
-            # A relative link back to this same app with ?match_id=<id> set -
-            # clicking it is what triggers the dispatch above into the
-            # single-match detail view. Built here (rather than as a plain
-            # displayed column) so it renders as a real clickable link via
-            # LinkColumn below, not a big unreadable URL string.
-            display_df["Report"] = display_df["match_id"].apply(lambda m: f"?match_id={m}")
-            display_df = display_df.drop(columns=["match_id"])
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Home xG": st.column_config.NumberColumn("Home xG", format="%.2f"),
-                    "Away xG": st.column_config.NumberColumn("Away xG", format="%.2f"),
-                    "Report": st.column_config.LinkColumn("Report", display_text="View →"),
-                },
-            )
-            st.caption(f"{len(fixtures)} match(es) in the database.")
+            # Three independent filters, each defaulting to "All" so the tab
+            # opens showing every match exactly as before - League exists
+            # mainly for whenever more than one competition gets saved here
+            # (matches.competition is the free-text field on the "Save to
+            # Database" form, so it already supports that; today it's
+            # basically always "Premier League"). Matchweek/Season are None
+            # for matches saved before those fields existed (Matchweek is a
+            # genuinely new scraped field - see fotmob_report.extract_
+            # matchweek() - so needs a re-save to backfill; Season is
+            # derived from match_date, which every match already has, so it
+            # never needs backfilling).
+            filter_cols = st.columns(3)
+
+            def _matchweek_sort_key(w):
+                try:
+                    return (0, int(w))
+                except (ValueError, TypeError):
+                    return (1, str(w))
+
+            with filter_cols[0]:
+                weeks = sorted(fixtures["Matchweek"].dropna().unique(), key=_matchweek_sort_key)
+                week_choice = st.selectbox("Matchweek", ["All matchweeks"] + weeks, key="fixtures_matchweek")
+            with filter_cols[1]:
+                leagues = sorted(fixtures["Competition"].dropna().unique())
+                league_choice = st.selectbox("League", ["All leagues"] + leagues, key="fixtures_league")
+            with filter_cols[2]:
+                seasons = sorted(fixtures["Season"].dropna().unique(), reverse=True)
+                season_choice = st.selectbox("Season", ["All seasons"] + seasons, key="fixtures_season")
+
+            scoped = fixtures
+            if week_choice != "All matchweeks":
+                scoped = scoped[scoped["Matchweek"] == week_choice]
+            if league_choice != "All leagues":
+                scoped = scoped[scoped["Competition"] == league_choice]
+            if season_choice != "All seasons":
+                scoped = scoped[scoped["Season"] == season_choice]
+
+            if scoped.empty:
+                st.info("No matches match this filter.")
+            else:
+                display_df = scoped.copy()
+                # A relative link back to this same app with ?match_id=<id> set -
+                # clicking it is what triggers the dispatch above into the
+                # single-match detail view. Built here (rather than as a plain
+                # displayed column) so it renders as a real clickable link via
+                # LinkColumn below, not a big unreadable URL string.
+                display_df["Report"] = display_df["match_id"].apply(lambda m: f"?match_id={m}")
+                display_df = display_df.drop(columns=["match_id"])
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Home xG": st.column_config.NumberColumn("Home xG", format="%.2f"),
+                        "Away xG": st.column_config.NumberColumn("Away xG", format="%.2f"),
+                        "Report": st.column_config.LinkColumn("Report", display_text="View →"),
+                    },
+                )
+                st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
 
     with tab_team:
         matches = hdb.fetch_matches(db)

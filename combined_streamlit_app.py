@@ -140,6 +140,8 @@ if st.button("Generate Combined Report", type="primary"):
             # section below for why this is preferred over the manually-picked
             # match date.
             kickoff = fr.extract_kickoff_local_str(fm_match_json)
+            # Matchweek/round number - powers the Fixtures tab's matchweek filter.
+            matchweek = fr.extract_matchweek(fm_match_json)
 
             with st.spinner("Computing FotMob tables..."):
                 shots_df = fr.compute_shots(fm_match_json)
@@ -179,8 +181,10 @@ if st.button("Generate Combined Report", type="primary"):
                 "fm_away_name": fm_away_name,
                 "referee": referee,
                 "kickoff": kickoff,
+                "matchweek": matchweek,
                 "totals_out": totals_out,
                 "against_totals": against_totals,
+                "team_summary": team_summary,
                 "player_third": player_third,
                 "passing_out": passing_out,
                 "defensive_actions": defensive_actions,
