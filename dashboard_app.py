@@ -107,6 +107,15 @@ _SITUATION_DISPLAY_MAP = {
     "Unknown": "Unknown",
 }
 
+# Situation values that shouldn't be offered as their own filter option in
+# the season Shots tab's dropdown - "Unknown" covers shots saved with a
+# missing/garbled situation (including old rows saved before upsert_shots()
+# started sanitizing this - see history_db.py), and "IndividualPlay" was a
+# one-off request to keep it out of the picker too. Their shots are still
+# counted normally under "All situations" - this only hides them as a
+# selectable category, it doesn't drop the underlying shot data.
+_HIDDEN_SITUATIONS = {"Unknown", "IndividualPlay"}
+
 
 def _situation_display_name(raw):
     """Friendly label for a raw FotMob shot 'situation' value - see
@@ -591,9 +600,10 @@ else:
             else:
                 st.dataframe(touches_totals, use_container_width=True, hide_index=True)
                 st.caption(
-                    "Progressive Carries, Carries into Final Third/Box, and Passes Received aren't "
-                    "included here - they need data that isn't currently saved to the database (only "
-                    "raw touch locations are). Ask if you'd like these added going forward."
+                    "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
+                    "matches saved before this stat was added to the database - re-save an older match "
+                    "in the combined report app to backfill it. Total Touches/thirds/Attacking Box are "
+                    "unaffected and cover every match with saved touch data."
                 )
         elif totals_category == "Defensive Actions":
             defensive_totals = hdb.fetch_season_defensive_totals(db)
@@ -693,7 +703,9 @@ else:
         if for_df.empty and against_df.empty:
             st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
         else:
-            situations_present = sorted(set(for_df["Situation"]) | set(against_df["Situation"]))
+            situations_present = sorted(
+                (set(for_df["Situation"]) | set(against_df["Situation"])) - _HIDDEN_SITUATIONS
+            )
             situation_options = ["All situations"] + situations_present
             chosen = st.selectbox(
                 "Situation",

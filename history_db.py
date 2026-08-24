@@ -44,8 +44,21 @@ team_match_stats   - one row per (match, team). Rather than hard-coding
                      back out by fetch_team_trends() below.
 player_match_stats - same idea, one row per (match, team, player), with
                      per-player stats from whichever report tabs you publish
-                     (Passing, Defensive Actions, Plus Minus, ...) each
-                     nested under their own key in extra_json.
+                     (Passing, Defensive Actions, Plus Minus, Touches, ...)
+                     each nested under their own key in extra_json.
+                     'ws_touches' (on BOTH team_match_stats and
+                     player_match_stats - compute_touches()'s team_summary
+                     and player_third tables respectively) carries
+                     Progressive Carries/Carries into Final Third/Carries
+                     into Box (team_match_stats only) and Passes Received/
+                     Progressive Passes Received (player_match_stats only,
+                     summed across players for a team total - see
+                     fetch_season_touches_totals()) - added after the raw
+                     `touches` table below already existed, so matches saved
+                     before this key existed won't have it; those matches'
+                     season Touches totals just show 0 for these specific
+                     stats (re-save the match to backfill it), same pattern
+                     as 'referee' being None for pre-existing matches.
 shots              - the one genuinely well-known, stable shape across every
                      report (compute_shots()'s own column list), so this one
                      gets real columns instead of a JSON blob - it's the
@@ -418,6 +431,18 @@ def upsert_shots(db: DB, match_id, shots_df: pd.DataFrame):
         if post_shot_xg is None or (isinstance(post_shot_xg, float) and pd.isna(post_shot_xg)):
             post_shot_xg = r.get("PSxG")
         extra = {c: r.get(c) for c in extra_cols} if extra_cols else {}
+        situation = r.get("Situation")
+        # A missing situation can arrive here as a bare pandas/numpy float
+        # NaN (e.g. from a merge with no match) rather than None or a real
+        # string. Passed straight through, some DB drivers (psycopg2/
+        # Postgres in particular) silently coerce that into the literal
+        # TEXT string 'NaN' on insert - which then shows up forever as its
+        # own bogus entry in the season Shots tab's situation dropdown.
+        # Normalize to a real NULL here instead so it's caught downstream
+        # by fetch_season_shot_totals()'s fillna("Unknown") like any other
+        # missing value.
+        if situation is None or (isinstance(situation, float) and pd.isna(situation)):
+            situation = None
         db.execute("""
             INSERT INTO shots (match_id, team, player, minute, added_time, situation,
                                 body_part, outcome, on_target, xg, xgot, x, y, extra_json)
@@ -433,7 +458,7 @@ def upsert_shots(db: DB, match_id, shots_df: pd.DataFrame):
                 extra_json = excluded.extra_json
         """, (
             str(match_id), r.get("Team"), r.get("Player"),
-            _num(r.get("Minute")), _num(r.get("Added Time")), r.get("Situation"),
+            _num(r.get("Minute")), _num(r.get("Added Time")), situation,
             r.get("Body Part"), r.get("Outcome"),
             int(bool(r.get("On Target"))) if pd.notna(r.get("On Target")) else None,
             _num(r.get("xG")), _num(post_shot_xg), _num(r.get("X")), _num(r.get("Y")),
@@ -726,6 +751,14 @@ def fetch_season_shot_totals(db: DB):
         return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
 
     shots = shots.copy()
+    # Some shots saved before upsert_shots() sanitized this already have the
+    # literal string 'NaN' stored in the situation column (Postgres's own
+    # text rendering of a stray float NaN that slipped through on insert -
+    # see upsert_shots()'s docstring/comment) rather than a real NULL, so a
+    # plain fillna() alone won't catch it - fold it into "Unknown" too.
+    shots["situation"] = shots["situation"].replace(
+        {"NaN": "Unknown", "nan": "Unknown", "": "Unknown"}
+    )
     shots["situation"] = shots["situation"].fillna("Unknown")
 
     matches = fetch_matches(db)[["match_id", "home_team", "away_team"]]
@@ -1041,25 +1074,38 @@ def _in_attacking_box(x, y):
 def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
     """
     Season-cumulative touch totals per team, bucketed into pitch thirds and
-    the attacking box - the team-level slice of the WhoScored Touches tab
-    (compute_touches()'s own team_summary table). Rebuilt here from the raw
-    `touches` table's (x, y) coordinates using the exact same thresholds
-    WhoScored's own Touches tab uses (see _pitch_third()/_in_attacking_box()
-    above), since team_summary itself was never persisted to the database -
-    only raw touch events are (see the touches table's own note in this
-    module's top docstring).
+    the attacking box, PLUS Progressive Carries/Carries into Final Third/
+    Carries into Box/Passes Received/Progressive Passes Received - the full
+    team-level slice of the WhoScored Touches tab.
 
-    NOT included here, and NOT reconstructable from raw touch coordinates
-    alone: Progressive Carries, Carries into Final Third, Carries into Box,
-    Passes Received, Progressive Passes Received - compute_touches() derives
-    those from separate carry-detection/pass-event data (consecutive-event
-    deltas, pass qualifiers) that the touches table's plain (team, player,
-    minute, second, x, y) rows don't capture. Adding those to a season total
-    would need their own persistence added to build_db_stats() going
-    forward - ask if that's worth doing.
+    Two different sources are combined here:
+      - Total Touches/Own/Middle/Final Third/Attacking Box (+ their %s) are
+        rebuilt from the raw `touches` table's (x, y) coordinates, using the
+        exact same thresholds WhoScored's own Touches tab uses (see
+        _pitch_third()/_in_attacking_box() above). This works for EVERY
+        match that has any touch data at all, since it only needs plain
+        (x, y) coordinates.
+      - Progressive Carries, Carries into Final Third, Carries into Box come
+        from team_match_stats' 'ws_touches' key (compute_touches()'s own
+        team_summary table, saved by build_db_stats() - see batch_lib.py).
+        Passes Received/Progressive Passes Received come from
+        player_match_stats' 'ws_touches' key (compute_touches()'s
+        player_third table), summed across every player on a team. Both of
+        these can only be computed from carry-detection/pass-event data
+        that the raw touches table's plain (team, player, minute, second,
+        x, y) rows don't capture on their own - they were added to the
+        database more recently than the touches table itself, so a match
+        saved BEFORE that addition simply contributes 0 to these five
+        columns specifically (its Total Touches/thirds/box numbers are
+        unaffected, since those come from the always-available raw touches
+        table) - re-save an older match to backfill these five columns for
+        it.
     """
     cols = ["Team", "Total Touches", "Own Third", "Middle Third", "Final Third", "Attacking Box",
+            "Progressive Carries", "Carries into Final Third", "Carries into Box",
+            "Passes Received", "Progressive Passes Received",
             "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %"]
+
     touches = fetch_touches(db)
     if touches.empty:
         return pd.DataFrame(columns=cols)
@@ -1068,6 +1114,40 @@ def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
     touches["_third"] = touches["x"].apply(_pitch_third)
     touches["_in_box"] = touches.apply(lambda r: _in_attacking_box(r["x"], r["y"]), axis=1)
 
+    # team_match_stats' 'ws_touches' -> Progressive Carries/Carries into
+    # Final Third/Carries into Box, summed across every match a team appears
+    # in (0 for a match saved before this key existed).
+    team_carry_totals = {}
+    cur = db.execute("SELECT team, extra_json FROM team_match_stats")
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        ws_touches = extra.get("ws_touches")
+        if not ws_touches:
+            continue
+        agg = team_carry_totals.setdefault(team, {"Progressive Carries": 0,
+                                                    "Carries into Final Third": 0,
+                                                    "Carries into Box": 0})
+        for k in ("Progressive Carries", "Carries into Final Third", "Carries into Box"):
+            v = ws_touches.get(k)
+            if isinstance(v, (int, float)):
+                agg[k] += v
+
+    # player_match_stats' 'ws_touches' -> Passes Received/Progressive Passes
+    # Received, summed across every player on a team across every match.
+    player_received_totals = {}
+    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        ws_touches = extra.get("ws_touches")
+        if not ws_touches:
+            continue
+        agg = player_received_totals.setdefault(team, {"Passes Received": 0,
+                                                         "Progressive Passes Received": 0})
+        for k in ("Passes Received", "Progressive Passes Received"):
+            v = ws_touches.get(k)
+            if isinstance(v, (int, float)):
+                agg[k] += v
+
     records = []
     for team, g in touches.groupby("team"):
         total = len(g)
@@ -1075,9 +1155,16 @@ def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
         mid = int((g["_third"] == "Middle third").sum())
         final = int((g["_third"] == "Final third").sum())
         box = int(g["_in_box"].sum())
+        carry_totals = team_carry_totals.get(team, {})
+        received_totals = player_received_totals.get(team, {})
         records.append({
             "Team": team, "Total Touches": total,
             "Own Third": own, "Middle Third": mid, "Final Third": final, "Attacking Box": box,
+            "Progressive Carries": carry_totals.get("Progressive Carries", 0),
+            "Carries into Final Third": carry_totals.get("Carries into Final Third", 0),
+            "Carries into Box": carry_totals.get("Carries into Box", 0),
+            "Passes Received": received_totals.get("Passes Received", 0),
+            "Progressive Passes Received": received_totals.get("Progressive Passes Received", 0),
             "Own Third %": round(own / total * 100, 1) if total else 0.0,
             "Middle Third %": round(mid / total * 100, 1) if total else 0.0,
             "Final Third %": round(final / total * 100, 1) if total else 0.0,
