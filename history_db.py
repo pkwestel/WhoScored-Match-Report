@@ -431,18 +431,6 @@ def upsert_shots(db: DB, match_id, shots_df: pd.DataFrame):
         if post_shot_xg is None or (isinstance(post_shot_xg, float) and pd.isna(post_shot_xg)):
             post_shot_xg = r.get("PSxG")
         extra = {c: r.get(c) for c in extra_cols} if extra_cols else {}
-        situation = r.get("Situation")
-        # A missing situation can arrive here as a bare pandas/numpy float
-        # NaN (e.g. from a merge with no match) rather than None or a real
-        # string. Passed straight through, some DB drivers (psycopg2/
-        # Postgres in particular) silently coerce that into the literal
-        # TEXT string 'NaN' on insert - which then shows up forever as its
-        # own bogus entry in the season Shots tab's situation dropdown.
-        # Normalize to a real NULL here instead so it's caught downstream
-        # by fetch_season_shot_totals()'s fillna("Unknown") like any other
-        # missing value.
-        if situation is None or (isinstance(situation, float) and pd.isna(situation)):
-            situation = None
         db.execute("""
             INSERT INTO shots (match_id, team, player, minute, added_time, situation,
                                 body_part, outcome, on_target, xg, xgot, x, y, extra_json)
@@ -458,8 +446,8 @@ def upsert_shots(db: DB, match_id, shots_df: pd.DataFrame):
                 extra_json = excluded.extra_json
         """, (
             str(match_id), r.get("Team"), r.get("Player"),
-            _num(r.get("Minute")), _num(r.get("Added Time")), situation,
-            r.get("Body Part"), r.get("Outcome"),
+            _num(r.get("Minute")), _num(r.get("Added Time")), _text(r.get("Situation")),
+            _text(r.get("Body Part")), _text(r.get("Outcome")),
             int(bool(r.get("On Target"))) if pd.notna(r.get("On Target")) else None,
             _num(r.get("xG")), _num(post_shot_xg), _num(r.get("X")), _num(r.get("Y")),
             json.dumps(extra, default=str) if extra else None,
@@ -476,6 +464,7 @@ def upsert_passes(db: DB, match_id, passes_df: pd.DataFrame):
     if passes_df is None or passes_df.empty:
         return
     for _, r in passes_df.iterrows():
+        receiver = _text(r.get("receiver"))
         db.execute("""
             INSERT INTO passes (match_id, team, passer, receiver, minute, second,
                                  x, y, end_x, end_y, completed, is_progressive,
@@ -490,11 +479,11 @@ def upsert_passes(db: DB, match_id, passes_df: pd.DataFrame):
                 is_key_pass    = excluded.is_key_pass,
                 category       = excluded.category
         """, (
-            str(match_id), r.get("team"), r.get("passer"), r.get("receiver"),
+            str(match_id), r.get("team"), r.get("passer"), receiver,
             _num(r.get("minute")), _num(r.get("second")), _num(r.get("x")), _num(r.get("y")),
             _num(r.get("endX")), _num(r.get("endY")),
             int(bool(r.get("completed"))), int(bool(r.get("is_progressive"))),
-            int(bool(r.get("is_key_pass"))), r.get("category"),
+            int(bool(r.get("is_key_pass"))), _text(r.get("category")),
         ))
 
 
@@ -513,7 +502,7 @@ def upsert_touches(db: DB, match_id, touches_df: pd.DataFrame):
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(match_id, team, player, minute, second, x, y) DO NOTHING
         """, (
-            str(match_id), r.get("team"), r.get("player"),
+            str(match_id), _text(r.get("team")), _text(r.get("player")),
             _num(r.get("minute")), _num(r.get("second")), _num(r.get("x")), _num(r.get("y")),
         ))
 
@@ -521,6 +510,24 @@ def upsert_touches(db: DB, match_id, touches_df: pd.DataFrame):
 def _num(v):
     """NaN/None -> None (so it round-trips through the DB as NULL, not the string 'nan')."""
     return None if v is None or (isinstance(v, float) and pd.isna(v)) else float(v)
+
+
+def _text(v):
+    """
+    Same idea as _num() but for TEXT columns (situation, receiver, category,
+    etc). A pandas/numpy NaN (e.g. from _pass_receiver_map()'s shift(-1)
+    heuristic finding no valid receiver, or a merge with no match) is a
+    float, not a string or None - passed straight into a TEXT column param,
+    some drivers (psycopg2/Postgres in particular) coerce it into the
+    literal text 'NaN' on insert rather than a real NULL. That string then
+    round-trips forever as its own bogus value (a fake player/situation
+    showing up in a dropdown). Catch it here before it ever reaches SQL.
+    """
+    if v is None:
+        return None
+    if isinstance(v, float) and pd.isna(v):
+        return None
+    return v
 
 
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
@@ -543,6 +550,20 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
     try:
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
                      fm_shots, referee)
+        # A re-save of an already-published match is meant to be a full
+        # replace, not a merge: every child table below is keyed on tuples
+        # like (match_id, team, player, minute, second, x, y) or similar, so
+        # if the newly computed rows don't line up EXACTLY with the old
+        # ones - a receiver that resolves differently now, a fixed team-name
+        # alias, a code change that drops/adds a row, or literally any
+        # difference between the two runs - the old rows that no longer
+        # match anything new just sit there forever as orphans, still
+        # counted in every season table/graphic. Clearing everything tied to
+        # this match_id first (inside the same transaction as the upserts
+        # below, so a failed save still rolls back cleanly) guarantees the
+        # old version can never linger and pollute aggregates.
+        for _table in ("shots", "passes", "touches", "team_match_stats", "player_match_stats"):
+            db.execute(f"DELETE FROM {_table} WHERE match_id = ?", (str(match_id),))
         for team, extra in team_stats.items():
             upsert_team_stats(db, match_id, team, extra, is_home=(team == home_team))
         for (team, player), extra in player_stats.items():
@@ -830,6 +851,14 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
         df["completed"] = df["completed"].astype(bool)
         df["is_progressive"] = df["is_progressive"].astype(bool)
         df["is_key_pass"] = df["is_key_pass"].astype(bool)
+        # Some passes saved before upsert_passes() sanitized this have the
+        # literal string 'NaN' stored in receiver (Postgres's own text
+        # rendering of a stray float NaN from _pass_receiver_map()'s
+        # next-event heuristic finding no receiver - see upsert_passes()'s
+        # comment) rather than a real NULL. dashboard_app.py's player
+        # dropdowns already .dropna() this column, so turning it into a
+        # real null here is enough to make it disappear as a "player".
+        df["receiver"] = df["receiver"].replace({"NaN": None, "nan": None, "": None})
     return df
 
 
