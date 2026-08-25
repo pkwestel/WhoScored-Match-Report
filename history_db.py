@@ -539,6 +539,56 @@ def _text(v):
     return v
 
 
+def _find_stale_duplicate_match_ids(db: DB, match_id, home_team, away_team, match_date) -> list:
+    """
+    Looks for OTHER match rows for the same real-world fixture (same
+    home_team + away_team + calendar date) but a DIFFERENT match_id than
+    the one this save is about to use - the signature of a match that got
+    saved once, then re-scraped/re-saved later under a match_id that came
+    out differently the second time around.
+
+    This matters because match_id in this project is parsed straight out
+    of the source URL (fotmob_report.extract_match_id() pulls the numeric
+    id after '#' in the FotMob URL) rather than read from anything on the
+    scraped page itself - it is NOT guaranteed to come out the same twice
+    for "the same" real match if the pasted URL differs even slightly
+    between saves (missing the '#1234567' fragment, a shortened or
+    redirected link, etc. all parse to a different id). publish_report()'s
+    own delete-then-insert step (below) only clears rows for the match_id
+    THIS save actually computed, so a match_id drift like that leaves the
+    PREVIOUS save's row sitting there as an untouched orphan under its own,
+    different match_id - invisible on the Fixtures tab (which just happens
+    to look like a duplicate row of the same fixture) but still fully
+    summed into every season-wide Team Stats table right alongside the new
+    row, silently doubling every number for that match's players and teams
+    (confirmed happening in production - a re-saved match's Team Stats
+    numbers came out exactly 2x).
+
+    Matched on calendar date only (the first 10 characters of match_date,
+    'YYYY-MM-DD') rather than exact match_date string equality, since the
+    same real match can legitimately be saved once with a precise kickoff
+    date+time and once with just a fallback date-only value (see
+    save_report_to_db()'s own docstring on kickoff vs. the date picker) -
+    exact-string matching would miss that as a duplicate. A match_date of
+    None never matches anything here - too big a false-positive risk to
+    treat every date-less match as a duplicate of every other.
+
+    Returns a list of the OTHER match_id(s) found (usually zero or one,
+    but not assumed to be at most one) - publish_report() fully deletes
+    every one of them, across every child table AND the matches row
+    itself, before proceeding with this save.
+    """
+    if not match_date:
+        return []
+    date_part = str(match_date)[:10]
+    cur = db.execute("""
+        SELECT match_id FROM matches
+        WHERE home_team = ? AND away_team = ? AND match_id != ?
+          AND substr(match_date, 1, 10) = ?
+    """, (home_team, away_team, str(match_id), date_part))
+    return [r[0] for r in cur.fetchall()]
+
+
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
                     touches_df: pd.DataFrame = None,
@@ -560,6 +610,19 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
                   powers the Fixtures tab's matchweek filter.
     """
     try:
+        # See _find_stale_duplicate_match_ids()'s own docstring - this
+        # catches a re-saved match whose match_id came out DIFFERENT from a
+        # previous save (a URL/parsing quirk, not a real second fixture),
+        # which the match_id-scoped delete-then-insert below can't catch on
+        # its own since it only knows about ITS OWN match_id. Deleting the
+        # stale row(s) entirely - matches row included - before this save
+        # proceeds guarantees at most one row per real-world fixture,
+        # regardless of what match_id string this particular scrape/URL
+        # happened to produce.
+        for _stale_id in _find_stale_duplicate_match_ids(db, match_id, home_team, away_team, match_date):
+            for _table in ("shots", "passes", "touches", "team_match_stats", "player_match_stats", "matches"):
+                db.execute(f"DELETE FROM {_table} WHERE match_id = ?", (_stale_id,))
+
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
                      fm_shots, referee, matchweek)
         # A re-save of an already-published match is meant to be a full
