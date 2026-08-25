@@ -89,7 +89,20 @@ _extract_via_network_logs(). Embedded __NEXT_DATA__ polling is kept as a
 fallback for the (probably common) case of a pre-rendered, popular match
 that never needed a corrective client-side fetch at all.
 
-A second wrinkle, specific to FotMob's short "team-vs-team" URLs (the
+A second wrinkle, confirmed by a real user report (not hypothetical): FotMob
+is ad-supported, and the real non-headless browser this all requires is
+exposed to the same intrusive redirect/pop-under ads a normal visitor sees -
+one of these can hijack the WHOLE TAB to a completely different domain
+mid-scrape, silently stranding every later poll on a page that could never
+contain the match data (previously showing up as this function's own "no
+match data found" RuntimeError, with no indication why). scrape_match() now
+checks driver.current_url against the target domain at every poll iteration
+and navigates straight back if it's drifted - see _recover_from_redirect()
+inside scrape_match(). If this keeps happening on the same match, running
+with an ad-blocker extension loaded in the Selenium Chrome profile is the
+real fix; the redirect-recovery here only handles it after the fact.
+
+A third wrinkle, specific to FotMob's short "team-vs-team" URLs (the
 `/matches/<slug>/<shortcode>#<matchId>` form): the shortcode alone can
 default-render whichever meeting between two teams is chronologically
 NEXT, ignoring the `#<matchId>` fragment (fragments are never sent to a
@@ -141,6 +154,7 @@ import time
 import base64
 import argparse
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -504,6 +518,33 @@ def scrape_match(url: str, out_dir: str = '.'):
     never needed a client-side fetch at all).
     """
     match_id = extract_match_id(url)
+    target_domain = urlparse(url).netloc  # e.g. 'www.fotmob.com'
+
+    def _recover_from_redirect(driver, context):
+        """
+        FotMob is ad-supported, and a real (non-headless) browser session -
+        required for the network-log capture above, see this module's own
+        ANTI-SCRAPING NOTE - is exposed to the same intrusive redirect/
+        pop-under ads a normal visitor would see. One of those can hijack
+        the WHOLE TAB to a different domain entirely (confirmed by a real
+        user report - not a hypothetical), which silently strands every
+        later poll on the wrong page instead of ever raising a clear error.
+        Checked at every poll iteration below; if the current URL has
+        drifted off FotMob entirely, navigates straight back rather than
+        continuing to poll a page that can never contain the match data.
+        """
+        current_domain = urlparse(driver.current_url).netloc
+        if current_domain and current_domain != target_domain:
+            print(f"Redirected away from FotMob mid-scrape ({context}): "
+                  f"now on {current_domain!r}, expected {target_domain!r}. "
+                  "An ad likely hijacked the tab - navigating back.")
+            driver.get(url)
+            WebDriverWait(driver, PAGE_LOAD_WAIT_SEC).until(
+                EC.presence_of_element_located((By.TAG_NAME, 'body'))
+            )
+            return True
+        return False
+
     match_json = None
     with get_driver(track_network=True) as driver:
         driver.get(url)
@@ -512,6 +553,7 @@ def scrape_match(url: str, out_dir: str = '.'):
         )
         # Give the page's own JS time to hydrate and make its real request.
         time.sleep(HYDRATION_POLL_INTERVAL_SEC * 4)
+        _recover_from_redirect(driver, "before network-log extraction")
 
         match_json = _extract_via_network_logs(driver, match_id)
 
@@ -519,6 +561,7 @@ def scrape_match(url: str, out_dir: str = '.'):
             print("Network-log extraction didn't find the target match - "
                   "falling back to polling embedded page JSON.")
             for attempt in range(1, HYDRATION_POLL_ATTEMPTS + 1):
+                _recover_from_redirect(driver, f"hydration poll {attempt}")
                 html = driver.page_source
                 next_data = _find_next_data_json(html)
                 candidate = _extract_content_json(next_data)
@@ -538,9 +581,13 @@ def scrape_match(url: str, out_dir: str = '.'):
     if match_json is None:
         raise RuntimeError(
             "Couldn't find match data via either the embedded page JSON or a "
-            "browser-side fetch. FotMob likely changed something - re-inspect "
-            "the page's Network tab for the matchDetails request and compare "
-            "against the DEBUGGING NOTE in this file's module docstring."
+            "browser-side fetch, even after navigating back from any mid-scrape "
+            "redirect. If the Chrome window showed an ad hijacking the tab to a "
+            "different domain repeatedly, that's the likely cause - try again, "
+            "or run with an ad-blocker extension loaded in the browser profile. "
+            "Otherwise, FotMob likely changed something - re-inspect the page's "
+            "Network tab for the matchDetails request and compare against the "
+            "DEBUGGING NOTE in this file's module docstring."
         )
 
     if not _matches_target_id(match_json, match_id):
@@ -871,12 +918,106 @@ def compute_shots(match_json):
 # ============================================================
 # 5. TOTALS (ROLLED-UP + FOTMOB'S OWN STAT GROUPS)
 # ============================================================
+_FOTMOB_XG_STAT_TITLES = {"expected goals (xg)", "expected goals"}
+
+
+def _get_fotmob_stat_groups(match_json):
+    """
+    FotMob's own published match-stat groups, if present. CONFIRMED real
+    path (against fotmob_raw_5795364.json) is content.stats.Periods.All.
+    stats[] (each entry: {title, key, stats: [home, away], format, type}) -
+    note this is nested under 'content', NOT at the top level of
+    match_json, which an earlier version of this function checked first and
+    never actually matched for any real match. Falls back to a couple of
+    looser lookups in case this nesting shifts again. Returns None if this
+    match has no stat groups at all (coverage varies by competition/match).
+    """
+    stat_groups = None
+    stats_root = match_json.get('stats') if isinstance(match_json, dict) else None
+    if not isinstance(stats_root, dict) and isinstance(match_json, dict):
+        content = match_json.get('content')
+        if isinstance(content, dict):
+            stats_root = content.get('stats')
+    if isinstance(stats_root, dict):
+        periods = stats_root.get('Periods')
+        all_period = periods.get('All') if isinstance(periods, dict) else None
+        if isinstance(all_period, dict) and isinstance(all_period.get('stats'), list):
+            stat_groups = all_period['stats']
+        elif isinstance(stats_root.get('stats'), list):
+            stat_groups = stats_root['stats']
+    if stat_groups is None:
+        # _search_for_key() finds the first key literally named 'stats'
+        # anywhere in the payload - for this shape that's content.stats
+        # itself (a dict with its own 'Periods' key), not a bare list, so it
+        # needs the same Periods.All.stats drill-down as the primary path
+        # above rather than being used directly.
+        generic = _search_for_key(match_json, {'stats'})
+        if isinstance(generic, list):
+            stat_groups = generic
+        elif isinstance(generic, dict):
+            periods = generic.get('Periods')
+            all_period = periods.get('All') if isinstance(periods, dict) else None
+            if isinstance(all_period, dict) and isinstance(all_period.get('stats'), list):
+                stat_groups = all_period['stats']
+    return stat_groups
+
+
+def _fotmob_published_xg(stat_groups):
+    """
+    FotMob's OWN separately-published match-level xG figure (the same
+    number shown on fotmob.com's Stats tab), as (home_xg, away_xg) floats -
+    or (None, None) if not found/unparseable. This is a genuinely different
+    number from summing the shot map's own per-shot xG values (what this
+    module otherwise uses for 'Total xG' below): confirmed on a real match
+    where the shot map summed to 1.07 for a team while FotMob's own
+    published stat for that same match was 1.01 - these two FotMob-sourced
+    numbers simply don't always agree with each other. Matched by title
+    ('Expected goals (xG)', case-insensitively) rather than key, since the
+    key wasn't confirmed stable across matches in testing.
+    """
+    if not isinstance(stat_groups, list):
+        return None, None
+    for group in stat_groups:
+        group_stats = _get_first(group, ['stats']) if isinstance(group, dict) else None
+        if not isinstance(group_stats, list):
+            continue
+        for stat in group_stats:
+            title = _get_first(stat, ['title', 'key'])
+            if not title or str(title).strip().lower() not in _FOTMOB_XG_STAT_TITLES:
+                continue
+            values = _get_first(stat, ['stats', 'values'])
+            if not isinstance(values, list) or len(values) < 2:
+                continue
+            home_val, away_val = values[0], values[1]
+            if isinstance(home_val, dict):
+                home_val = home_val.get('value', home_val)
+            if isinstance(away_val, dict):
+                away_val = away_val.get('value', away_val)
+            try:
+                home_val = float(home_val) if home_val is not None else None
+                away_val = float(away_val) if away_val is not None else None
+            except (TypeError, ValueError):
+                continue
+            if home_val is not None and away_val is not None:
+                return home_val, away_val
+    return None, None
+
+
 def compute_totals(match_json, shots_df, home_name, away_name):
     """
-    Team-level Totals tab: Shots/Shots on Target/Goals/Total xG rolled up
-    from the shot map, plus whichever aggregate stat groups FotMob itself
+    Team-level Totals tab: Shots/Shots on Target/Total xG rolled up from
+    the shot map, plus whichever aggregate stat groups FotMob itself
     published for this match (possession, corners, fouls, cards, passes,
     etc. - varies by competition/match).
+
+    Total xG specifically prefers FotMob's OWN published match-level xG
+    figure (see _fotmob_published_xg()) over summing the shot map's own
+    per-shot xG values, falling back to that shot-map sum only if FotMob
+    didn't publish the stat for this match - by request, so this number
+    always matches what fotmob.com itself shows rather than occasionally
+    drifting from it (confirmed happening on a real match). Goals still
+    always comes from counting the shot map directly (FotMob doesn't
+    publish goals as one of these stat groups).
     """
     teams_order = [t for t in [home_name, away_name] if t] or sorted(shots_df['Team'].dropna().unique())
     totals = pd.DataFrame({'team': teams_order}).set_index('team')
@@ -899,22 +1040,14 @@ def compute_totals(match_json, shots_df, home_name, away_name):
         if c in totals.columns:
             totals[c] = totals[c].round(2)
 
-    # FotMob's own published match-stat groups, if present. Confirmed live
-    # path is content.stats.Periods.All.stats[] (each entry: {title, key,
-    # stats: [home, away], format, type}) - fall back to a couple of looser
-    # lookups in case that nesting shifts again.
-    stat_groups = None
-    stats_root = match_json.get('stats') if isinstance(match_json, dict) else None
-    if isinstance(stats_root, dict):
-        periods = stats_root.get('Periods')
-        all_period = periods.get('All') if isinstance(periods, dict) else None
-        if isinstance(all_period, dict) and isinstance(all_period.get('stats'), list):
-            stat_groups = all_period['stats']
-        elif isinstance(stats_root.get('stats'), list):
-            stat_groups = stats_root['stats']
-    if stat_groups is None:
-        generic = _search_for_key(match_json, {'stats'})
-        stat_groups = generic if isinstance(generic, list) else None
+    stat_groups = _get_fotmob_stat_groups(match_json)
+
+    fm_xg_home, fm_xg_away = _fotmob_published_xg(stat_groups)
+    if fm_xg_home is not None and home_name in totals.index:
+        totals.loc[home_name, 'Total xG'] = round(fm_xg_home, 2)
+    if fm_xg_away is not None and away_name in totals.index:
+        totals.loc[away_name, 'Total xG'] = round(fm_xg_away, 2)
+
     if isinstance(stat_groups, list):
         for group in stat_groups:
             group_stats = _get_first(group, ['stats']) if isinstance(group, dict) else None
@@ -925,8 +1058,11 @@ def compute_totals(match_json, shots_df, home_name, away_name):
                 values = _get_first(stat, ['stats', 'values'])
                 if not title or not isinstance(values, list) or len(values) < 2:
                     continue
-                if title in totals.columns:
-                    continue  # already set from an earlier group - keep first occurrence
+                # 'Expected goals (xG)' is folded straight into Total xG
+                # above rather than also appearing as its own redundant
+                # column here (same number, would just show up twice).
+                if title in totals.columns or str(title).strip().lower() in _FOTMOB_XG_STAT_TITLES:
+                    continue
                 home_val, away_val = values[0], values[1]
                 # Some stat entries wrap each value as {'value': X, ...}.
                 if isinstance(home_val, dict):
@@ -1209,21 +1345,26 @@ def extract_player_windows(match_json, player_minutes=None, shots_df=None):
     'subOut' time if they were substituted off - this case needs nothing
     else, since sub_in/sub_out times alone fully define their window.
     Otherwise (played to the final whistle - a starter never subbed off,
-    or a substitute who stayed on) end_minute is start_minute + however
-    many minutes they're known to have played: preferably FotMob's own
-    per-player Minutes Played figure (from extract_player_minutes, passed
-    in via player_minutes or computed here if not given) since that
-    already correctly accounts for stoppage time; but FotMob's per-player
-    stats (unlike the shot map) are sometimes missing or incomplete, most
-    often for a very recently finished match FotMob hasn't fully processed
-    yet - when that per-player figure isn't available for a player who
-    otherwise clearly appeared (has a lineup rating, or a sub event),
-    end_minute falls back to a match-wide estimate instead: the latest
-    effective minute (Minute + Added Time) seen anywhere on the shot map
-    (passed in via shots_df), or a flat 90 if there's no shot map either.
-    That fallback is necessarily an approximation - it can't know about
-    stoppage time beyond whatever the shot map itself shows - which is
-    why FotMob's own figure is always preferred when it's there.
+    or a substitute who stayed on) end_minute is the LATER of two
+    estimates: start_minute + FotMob's own per-player Minutes Played
+    figure (from extract_player_minutes, passed in via player_minutes or
+    computed here if not given), or fallback_end - the latest effective
+    minute (Minute + Added Time) seen anywhere on the shot map (passed in
+    via shots_df), or a flat 90 if there's no shot map either. Taking the
+    max of the two (rather than always preferring FotMob's own figure, as
+    an earlier version of this function did) matters because FotMob's own
+    Minutes Played figure turns out to be a NOMINAL count that does NOT
+    reliably include stoppage time - confirmed against a real match where
+    a never-subbed player showed exactly 90 despite the match actually
+    running to 90+5, which was silently excluding their own stoppage-time
+    shot from the Plus Minus tab's tally. FotMob's per-player stats can
+    also be missing entirely (most often for a very recently finished
+    match FotMob hasn't fully processed yet), in which case
+    start_minute + minutes_played isn't available at all and fallback_end
+    alone is used. That fallback is necessarily an approximation either
+    way - it can't know about stoppage time beyond whatever the shot map
+    itself shows, e.g. a match with zero late shots gives no signal that
+    stoppage time even happened.
 
     subbed_off (bool) tells compute_plus_minus() how to treat the boundary
     at end_minute: a player who WAS subbed off doesn't get credit for the
@@ -1289,7 +1430,21 @@ def extract_player_windows(match_json, player_minutes=None, shots_df=None):
             if subbed_off:
                 end = sub_out
             elif minutes_played is not None:
-                end = start + minutes_played
+                # FotMob's own per-player "Minutes Played" figure turns out
+                # to be a NOMINAL count, not stoppage-time-inclusive as this
+                # function originally assumed - confirmed against a real
+                # match where a player who was on the pitch for the entire
+                # match (never subbed off) showed exactly 90 here despite
+                # the match actually running to 90+5. Using start+
+                # minutes_played alone as end_minute would then wrongly
+                # exclude a stoppage-time shot they were genuinely on the
+                # pitch for from their own Plus Minus tally. A player who
+                # wasn't subbed off played through to the ACTUAL final
+                # whistle, whatever effective minute that was - so their
+                # window has to extend at least as far as fallback_end (the
+                # latest effective minute seen anywhere on the shot map),
+                # even if that's later than start+minutes_played suggests.
+                end = max(start + minutes_played, fallback_end)
             else:
                 end = fallback_end  # FotMob's own per-player total wasn't available - best effort
 
