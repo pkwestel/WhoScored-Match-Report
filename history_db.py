@@ -761,11 +761,12 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     """
     Compact home-vs-away summary table for the match detail view's Team
     Totals tab: one row per stat (Goals, Shots, Shots on target, Shots
-    inside box, Possession, xG, Big Chances, Corners), laid out as Home |
-    Metric | Away rather than one row per team - plus a leading 'Team' row
-    showing the two team names themselves, so the table reads top-to-bottom
-    as a single side-by-side comparison instead of needing to cross-
-    reference two separate rows.
+    inside box, Possession, xG, Big Chances, Corners), laid out as
+    <home team name> | Metric | <away team name> - the two team names ARE
+    the column headers (rather than generic 'Home'/'Away' headers plus a
+    separate leading 'Team' data row repeating them), so the table reads
+    top-to-bottom as a single side-by-side comparison with no redundant
+    first row.
 
     Reads straight from team_match_stats.extra_json's 'fm_totals' namespace
     (compute_totals()'s own output) by field name, rather than going
@@ -779,13 +780,13 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     raw JSON - see fotmob_report._get_fotmob_stat_groups()) shows as '-'
     rather than a misleading 0 - re-save that match to backfill it.
     """
-    cols = ["Home", "Metric", "Away"]
     matches = fetch_matches(db)
     match_row = matches[matches["match_id"] == str(match_id)]
     if match_row.empty:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=["Home", "Metric", "Away"])
     match_row = match_row.iloc[0]
     home_team, away_team = match_row["home_team"], match_row["away_team"]
+    cols = [home_team, "Metric", away_team]
 
     cur = db.execute("SELECT team, extra_json FROM team_match_stats WHERE match_id = ?", (str(match_id),))
     fm_totals_by_team = {}
@@ -796,12 +797,12 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     home_stats = fm_totals_by_team.get(home_team, {})
     away_stats = fm_totals_by_team.get(away_team, {})
 
-    records = [{"Home": home_team, "Metric": "Team", "Away": away_team}]
+    records = []
     for label, key in _MATCH_SUMMARY_FIELDS:
         records.append({
-            "Home": _fmt_match_summary_value(home_stats.get(key), label),
+            home_team: _fmt_match_summary_value(home_stats.get(key), label),
             "Metric": label,
-            "Away": _fmt_match_summary_value(away_stats.get(key), label),
+            away_team: _fmt_match_summary_value(away_stats.get(key), label),
         })
     return pd.DataFrame(records, columns=cols)
 
@@ -854,27 +855,35 @@ def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: l
     """
     Shared plumbing for every Player Stats category table on the match
     detail view: pulls the given namespace(s) (see _fetch_player_namespaces()
-    above), keeps only the requested columns (in the given order - any
-    column missing from the underlying data for every player, e.g. an older
-    match saved before a newer stat existed, is filled with 0 rather than
-    dropped, so the table shape never depends on which fields happen to be
-    populated), then splits into (home, away) with a 'Team Total' row
-    appended to each summing every numeric column - matching the requested
-    layout (two separate tables, home on top / away below, each with a
-    bottom total row).
+    above), keeps only the requested columns (in the given order), then
+    splits into (home, away) with a 'Team Total' row appended to each
+    summing every numeric column - matching the requested layout (two
+    separate tables, home on top / away below, each with a bottom total
+    row).
+
+    A column that's ENTIRELY missing for this match - e.g. 'fm_scoring'
+    (Scoring Stats) or 'ws_defensive_locations' (Defensive Action Locations)
+    not existing at all for a match saved before those namespaces were
+    added - shows '-' for every player AND the Team Total, rather than a
+    fabricated 0 that would misleadingly read as "confirmed zero shots/
+    sprints/etc for every single player". A column that DOES exist but is
+    blank for one specific player (a real, individually-confirmed zero -
+    e.g. a substitute with 0 Tackles) still shows a real 0. Re-save the
+    match to backfill a genuinely '-' column.
 
     Returns {'home': DataFrame, 'away': DataFrame} - either can be empty if
-    that team has no saved rows for these namespaces yet (e.g. an older
-    match saved before this category existed).
+    that team has no saved rows for these namespaces yet at all (e.g. an
+    older match saved before this category existed).
     """
     df = _fetch_player_namespaces(db, match_id, namespaces)
     if df.empty:
         empty = pd.DataFrame(columns=["Player"] + columns)
         return {"home": empty, "away": empty}
 
-    for c in columns:
-        if c not in df.columns:
-            df[c] = 0
+    missing_cols = [c for c in columns if c not in df.columns]
+    present_cols = [c for c in columns if c in df.columns]
+
+    for c in present_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
         # xG/xA-style decimal stats keep 2 decimal places; every other
         # column here is a plain count, shown as a whole number. Decided by
@@ -887,10 +896,13 @@ def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: l
             df[c] = df[c].astype(int)
 
     def _one(team_name):
-        sub = df[df["Team"] == team_name][["Player"] + columns].reset_index(drop=True)
+        sub = df[df["Team"] == team_name][["Player"] + present_cols].reset_index(drop=True)
         if sub.empty:
             return sub
-        total = {c: sub[c].sum() for c in columns}
+        for c in missing_cols:
+            sub[c] = "-"
+        sub = sub[["Player"] + columns]
+        total = {c: (sub[c].sum() if c in present_cols else "-") for c in columns}
         total["Player"] = "Team Total"
         return pd.concat([sub, pd.DataFrame([total])], ignore_index=True)
 
