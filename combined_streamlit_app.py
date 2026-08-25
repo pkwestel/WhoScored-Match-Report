@@ -287,7 +287,38 @@ if report:
                 "be saved instead (date only, no time)."
             )
 
-        if st.button("Save this match to the database"):
+        # Saving fully REPLACES this match's FotMob-side stats (Goals/Shots/
+        # xG/Possession/etc.) rather than merging with whatever's already in
+        # the database - see history_db.publish_report()'s docstring on why
+        # re-saves are a full delete-then-insert. That's the right behavior
+        # for a genuinely updated scrape, but it's a real risk if THIS
+        # scrape's own FotMob shot map came back empty (an ad redirect mid-
+        # scrape, a transient network hiccup, etc.) while a previous save
+        # already has good data - saving now would silently overwrite that
+        # good data with blanks. Detected here by checking whether FotMob's
+        # own Totals table has a 'Goals' column at all (compute_totals()
+        # never creates it when shots_df came back empty - see that
+        # function's docstring), and gated behind an explicit confirmation
+        # checkbox rather than silently blocking or silently proceeding.
+        fm_totals_df = report.get("fm_totals_df")
+        fm_data_missing = fm_totals_df is None or fm_totals_df.empty or "Goals" not in fm_totals_df.columns
+        confirm_partial_save = True
+        if fm_data_missing:
+            st.warning(
+                "FotMob's scrape for this match came back with no Goals/Shots/xG data at all (the "
+                "shot map was empty) - this can happen from a transient scrape hiccup (e.g. an ad "
+                "redirect mid-scrape). Saving now will overwrite ALL of this match's FotMob-side "
+                "stats in the database with blanks, INCLUDING any good data already saved from a "
+                "previous run - the Team Totals/Fixtures Score/xG for this match would go blank on "
+                "the dashboard. If you already have good data saved for this match, try re-scraping "
+                "FotMob again above (re-paste the URL and regenerate) instead of saving now."
+            )
+            confirm_partial_save = st.checkbox(
+                "I understand this will overwrite any existing FotMob stats for this match with "
+                "blanks - save anyway"
+            )
+
+        if st.button("Save this match to the database", disabled=fm_data_missing and not confirm_partial_save):
             try:
                 # Team/player stats, team-name reconciliation, and the actual
                 # publish_report() call all live in batch_lib.save_report_to_db()

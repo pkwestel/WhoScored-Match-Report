@@ -15,7 +15,13 @@ HOW IT WORKS (five steps, top to bottom on the page)
    (wr.get_fixture_urls()) or pasted in by hand (or both, combined).
 2. Review each match, let it try to auto-find the matching FotMob URL
    (fr.find_fotmob_match_url()), and fix up anything wrong by hand -
-   nothing here is locked to the auto-detected guess.
+   nothing here is locked to the auto-detected guess. This step also checks
+   the database for matches you've already saved (batch_lib.
+   find_existing_match()) and unchecks their "Run" box by default, so
+   re-running this app over a weekend you already processed doesn't
+   silently re-scrape (and re-hit WhoScored/FotMob for) matches you already
+   have - check the box yourself if you deliberately want to re-scrape one
+   (e.g. after a stat-calculation fix).
 3. Set a random min/max delay range and click "Run batch" - it scrapes each
    match one after another (same real, non-headless Chrome requirement as
    the single-match app), sleeping a random number of seconds between
@@ -161,6 +167,52 @@ if matches:
                         "yet) - paste its FotMob URL directly below instead.")
         st.session_state["batch_matches"] = matches
 
+    # -----------------------------------------------------------------------
+    # Anti-duplicate check: is a match already saved in the database for
+    # this (home, away, date)? Re-scraping something already saved wastes
+    # exactly the kind of unnecessary WhoScored/FotMob traffic the random
+    # delay between matches is meant to minimize - see
+    # batch_lib.find_existing_match()'s own docstring for the full
+    # reasoning, including why this only affects the checkbox DEFAULT
+    # rather than blocking a deliberate re-run.
+    # -----------------------------------------------------------------------
+    db_url_for_check = st.text_input(
+        "Database URL (used both to check for already-saved matches below, and to save at the end)",
+        value=st.session_state.get("batch_db_url", os.environ.get("DATABASE_URL", "sqlite:///history.db")),
+        key="batch_db_url",
+    )
+
+    if st.button("Check for already-saved matches"):
+        n_found = 0
+        for i, m in enumerate(matches):
+            row_date_key = f"batch_date_{i}"
+            row_date = st.session_state.get(row_date_key, default_date)
+            row_date_iso = row_date.isoformat() if hasattr(row_date, "isoformat") else str(row_date)
+            if m.get("home_name") and m.get("away_name"):
+                already = batch_lib.find_existing_match(
+                    db_url_for_check, m["home_name"], m["away_name"], row_date_iso
+                )
+                matches[i]["already_saved"] = already
+                matches[i]["already_saved_date"] = row_date_iso
+                if already:
+                    n_found += 1
+                    # Un-check its "Run" box now that we know it's a duplicate -
+                    # this only takes effect if the widget hasn't been created
+                    # yet this session; if it already has a value, setting the
+                    # dict here still updates the checkbox default the NEXT
+                    # time this list is rebuilt, and the caption below makes
+                    # the already-saved status visible either way so you can
+                    # uncheck it yourself right now if needed.
+                    st.session_state.setdefault(f"batch_include_{i}", False)
+            else:
+                st.info(f"Can't check {m['match_url']} yet (manually pasted, no team names known until "
+                        "it's scraped) - it'll run normally; duplicates among manually pasted matches "
+                        "aren't caught until AFTER they're saved (the database save itself is still "
+                        "safe to re-run - see history_db.py's own upsert behavior).")
+        st.session_state["batch_matches"] = matches
+        st.success(f"{n_found} of {len(matches)} match(es) already found in the database - their 'Run' "
+                   "boxes are unchecked by default below. Check a box yourself to re-scrape it anyway.")
+
     st.write(f"{len(matches)} match(es) in this batch - uncheck any you don't want to run, and fix up "
              "URLs/dates as needed:")
 
@@ -170,8 +222,14 @@ if matches:
             if m.get("status"):
                 label += f"  ({m['status']})"
             st.write(f"**{label}**")
+            if m.get("already_saved"):
+                st.caption(
+                    f"⚠️ Already saved to the database for {m.get('already_saved_date')} - unchecked by "
+                    "default. Check the box below only if you want to re-scrape and overwrite it (e.g. "
+                    "after a stat-calculation fix)."
+                )
             cols = st.columns([0.6, 2.2, 2.2, 1.4])
-            cols[0].checkbox("Run", value=True, key=f"batch_include_{i}")
+            cols[0].checkbox("Run", value=not m.get("already_saved", False), key=f"batch_include_{i}")
             cols[1].text_input("WhoScored URL", value=m["match_url"], key=f"batch_ws_url_{i}")
             cols[2].text_input("FotMob URL", value=m.get("fm_url") or "", key=f"batch_fm_url_{i}")
             cols[3].date_input("Match date", value=default_date, key=f"batch_date_{i}")
@@ -273,10 +331,11 @@ if results:
                     st.code(r["traceback"])
 
     st.header("Step 5: Save to database")
-    default_db_url = os.environ.get("DATABASE_URL", "sqlite:///history.db")
     db_url = st.text_input(
-        "Database URL", value=default_db_url,
-        help="Same DATABASE_URL convention as combined_streamlit_app.py's own 'Save to Database'.",
+        "Database URL",
+        value=st.session_state.get("batch_db_url", os.environ.get("DATABASE_URL", "sqlite:///history.db")),
+        help="Reuses whatever you entered in Step 2's duplicate-check field - change it here if needed.",
+        key="batch_db_url_save",
     )
     competition = st.text_input("Competition", value="Premier League")
 
@@ -286,6 +345,28 @@ if results:
             if not r["success"]:
                 continue
             report = r["report"]
+            # Same safety check as combined_streamlit_app.py's single-match
+            # "Save to Database" - a match whose FotMob shot map came back
+            # empty (transient scrape hiccup, e.g. an ad redirect mid-scrape)
+            # would otherwise SILENTLY overwrite any already-saved good
+            # FotMob stats for this match with blanks (saves fully replace,
+            # not merge - see history_db.publish_report()'s docstring). A
+            # batch run has no per-match interactive confirmation, so the
+            # safe default is to skip saving that one match and flag it,
+            # rather than either blocking the whole batch or corrupting data
+            # silently - re-run just that match through the single-match
+            # combined report app (which does let you confirm and save
+            # anyway) if you're sure the blank data is correct.
+            fm_totals_df = report.get("fm_totals_df")
+            if fm_totals_df is None or fm_totals_df.empty or "Goals" not in fm_totals_df.columns:
+                st.warning(
+                    f"Skipped {report['ws_home_name']} vs {report['ws_away_name']}: FotMob's scrape "
+                    "came back with no Goals/Shots/xG data at all, so saving would overwrite any "
+                    "existing good FotMob stats for this match with blanks. Re-scrape it, or save it "
+                    "individually via the single-match combined report app if the blank data is "
+                    "actually correct."
+                )
+                continue
             match_date = report["match_date"]
             match_date_iso = match_date.isoformat() if hasattr(match_date, "isoformat") else str(match_date)
             try:

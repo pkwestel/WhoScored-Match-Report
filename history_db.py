@@ -1427,6 +1427,42 @@ def fetch_season_defensive_totals(db: DB) -> pd.DataFrame:
         "Tackles", ascending=False).reset_index(drop=True)
 
 
+def fetch_season_defensive_location_totals(db: DB) -> pd.DataFrame:
+    """
+    Season-cumulative defensive-action-by-pitch-third totals per team,
+    summed across every player and match - the team-level rollup of the
+    WhoScored Defensive Action Location tab (compute_defensive_action_
+    location()'s per-player stats, saved under the 'ws_defensive_locations'
+    key). All twelve columns are plain counts, so summing is exact.
+
+    This namespace was only added partway through this project, so a match
+    saved before then contributes nothing here even if it has other
+    defensive stats - re-save it in the combined report app to backfill.
+    """
+    cols = ["Team"] + _DEFENSIVE_LOCATIONS_COLUMNS
+    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    sums = {}
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        locations = extra.get("ws_defensive_locations")
+        if not locations:
+            continue
+        agg = sums.setdefault(team, {})
+        for k, v in locations.items():
+            if isinstance(v, (int, float)):
+                agg[k] = agg.get(k, 0) + v
+
+    if not sums:
+        return pd.DataFrame(columns=cols)
+
+    records = [
+        {"Team": team, **{c: agg.get(c, 0) for c in _DEFENSIVE_LOCATIONS_COLUMNS}}
+        for team, agg in sums.items()
+    ]
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Team").reset_index(drop=True)
+
+
 # Duplicated from whoscored_report.py's own third()/in_box() pitch-zone
 # logic (same reasoning as pitch_viz.py duplicating PITCH_LEN_M/PITCH_WID_M
 # rather than importing whoscored_report.py - see that file's own

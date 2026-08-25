@@ -127,6 +127,21 @@ def _situation_display_name(raw):
     return re.sub(r"(?<!^)(?=[A-Z])", " ", raw) if isinstance(raw, str) else str(raw)
 
 
+def _no_scroll_height(df) -> int:
+    """
+    st.dataframe defaults to a fixed height (~400px) regardless of row
+    count, which forces its OWN internal scrollbar on any table with more
+    than about a dozen rows - e.g. the League Table or a season Team Stats
+    table, where every row is a team and there usually aren't more than
+    20-ish of them. Sizing the table to its exact content height instead
+    means the table itself never scrolls - the PAGE scrolls to reach the
+    bottom of a tall table instead, per the requested behavior. ~35px per
+    row (Streamlit's own default row height) + ~38px for the header, with
+    a few px of border padding on top.
+    """
+    return int(len(df) + 1) * 35 + 3
+
+
 def _match_picker(matches, key):
     """Shared match dropdown for the Pass Map/Passes Received tabs below."""
     options = {
@@ -621,12 +636,17 @@ else:
             # (W/D/L/GF/GA/...) ends up with huge padding per cell on a wide
             # screen. False lets Streamlit size each column to its actual
             # content instead, which is far more compact for a table this
-            # narrow in substance.
-            st.dataframe(league_table, use_container_width=False, hide_index=True)
+            # narrow in substance. height=_no_scroll_height(...) sizes the
+            # table to fit every team's row with no internal scrollbar - the
+            # page scrolls instead, if needed.
+            st.dataframe(league_table, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(league_table))
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
-            "Category", ["Shots", "Passing", "Touches", "Defensive Actions"], key="team_totals_category"
+            "Category", ["Shots", "Passing", "Touches", "Defensive Actions",
+                         "Defensive Action Location"],
+            key="team_totals_category"
         )
         if totals_category == "Shots":
             shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(db)
@@ -650,17 +670,20 @@ else:
                     if c != "Team":
                         shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
                 shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
-                # use_container_width=False here and on the other three Team
-                # Stats tables below - same reasoning as the League Table
-                # above, sized to actual content rather than stretched full-
-                # width.
-                st.dataframe(shot_totals, use_container_width=False, hide_index=True)
+                # use_container_width=False here and on the other Team Stats
+                # tables below - same reasoning as the League Table above,
+                # sized to actual content rather than stretched full-width -
+                # and height=_no_scroll_height(...) so none of these tables
+                # scroll internally either.
+                st.dataframe(shot_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(shot_totals))
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(db)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
-                st.dataframe(passing_totals, use_container_width=False, hide_index=True)
+                st.dataframe(passing_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(passing_totals))
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(db)
             if touches_totals.empty:
@@ -670,7 +693,8 @@ else:
                     "backfill it."
                 )
             else:
-                st.dataframe(touches_totals, use_container_width=False, hide_index=True)
+                st.dataframe(touches_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(touches_totals))
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -685,7 +709,19 @@ else:
                     "first."
                 )
             else:
-                st.dataframe(defensive_totals, use_container_width=False, hide_index=True)
+                st.dataframe(defensive_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(defensive_totals))
+        elif totals_category == "Defensive Action Location":
+            defensive_location_totals = hdb.fetch_season_defensive_location_totals(db)
+            if defensive_location_totals.empty:
+                st.info(
+                    "No defensive action location data saved yet. This namespace was added partway "
+                    "through this project - re-run 'Save to Database' on your matches in the combined "
+                    "report app to backfill it."
+                )
+            else:
+                st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(defensive_location_totals))
 
     with tab_fixtures:
         fixtures = hdb.fetch_fixtures(db)
