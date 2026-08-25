@@ -640,14 +640,14 @@ else:
                     return (1, str(w))
 
             with filter_cols[0]:
-                weeks = sorted(fixtures["Matchweek"].dropna().unique(), key=_matchweek_sort_key)
-                week_choice = st.selectbox("Matchweek", ["All matchweeks"] + weeks, key="fixtures_matchweek")
+                seasons = sorted(fixtures["Season"].dropna().unique(), reverse=True)
+                season_choice = st.selectbox("Season", ["All seasons"] + seasons, key="fixtures_season")
             with filter_cols[1]:
                 leagues = sorted(fixtures["Competition"].dropna().unique())
                 league_choice = st.selectbox("League", ["All leagues"] + leagues, key="fixtures_league")
             with filter_cols[2]:
-                seasons = sorted(fixtures["Season"].dropna().unique(), reverse=True)
-                season_choice = st.selectbox("Season", ["All seasons"] + seasons, key="fixtures_season")
+                weeks = sorted(fixtures["Matchweek"].dropna().unique(), key=_matchweek_sort_key)
+                week_choice = st.selectbox("Matchweek", ["All matchweeks"] + weeks, key="fixtures_matchweek")
 
             scoped = fixtures
             if week_choice != "All matchweeks":
