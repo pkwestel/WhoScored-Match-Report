@@ -148,7 +148,10 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     fm_totals_df = fr.compute_totals(fm_match_json, shots_df, fm_home_name, fm_away_name)
     player_xa = fr.extract_player_xa(fm_match_json)
     player_minutes = fr.extract_player_minutes(fm_match_json)
-    shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
+    player_sprints = fr.extract_player_sprints(fm_match_json)
+    player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
+    shot_breakdowns = fr.compute_shot_breakdowns(
+        shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
     xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
     player_windows = fr.extract_player_windows(fm_match_json, player_minutes, shots_df)
     plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)
@@ -306,6 +309,32 @@ def build_db_stats(report):
             team = _to_ws_name(row["Team"])
             key = (team, row["Player"])
             player_stats.setdefault(key, {})["fm_plus_minus"] = row.drop(["Team", "Player"]).to_dict()
+
+    # FotMob's per-player Sprints total (compute_shot_breakdowns()'s 'By
+    # Player' table) - saved under its own 'fm_sprints' namespace so it
+    # shows up automatically on the match detail view's Player Stats table
+    # (history_db._flatten_extra() flattens every namespace generically, no
+    # dashboard_app.py changes needed). Team names here are FotMob's own,
+    # same as fm_totals_df/plus_minus above, so the same _to_ws_name()
+    # reconciliation applies. Players with no resolvable Sprints figure
+    # (blank on the Shot Breakdown tab - see compute_shot_breakdowns()'s own
+    # docstring) are skipped rather than saving a fake 0.
+    by_player = (report.get("shot_breakdowns") or {}).get("By Player")
+    if by_player is not None and not by_player.empty and "Sprints" in by_player.columns:
+        for _, row in by_player.dropna(subset=["Sprints"]).iterrows():
+            team = _to_ws_name(row["Team"])
+            key = (team, row["Player"])
+            player_stats.setdefault(key, {})["fm_sprints"] = {"Sprints": int(row["Sprints"])}
+
+    # Same idea as fm_sprints above, for FotMob's per-player Line Breaking
+    # Passes total (also from the 'By Player' table).
+    if by_player is not None and not by_player.empty and "Line Breaking Passes" in by_player.columns:
+        for _, row in by_player.dropna(subset=["Line Breaking Passes"]).iterrows():
+            team = _to_ws_name(row["Team"])
+            key = (team, row["Player"])
+            player_stats.setdefault(key, {})["fm_line_breaking_passes"] = {
+                "Line Breaking Passes": int(row["Line Breaking Passes"])
+            }
 
     return team_stats, player_stats
 

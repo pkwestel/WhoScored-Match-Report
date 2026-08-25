@@ -1013,6 +1013,130 @@ def extract_player_xa(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+def extract_player_sprints(match_json):
+    """
+    Per-player total number of sprints for this match - FotMob's own figure
+    (a newer stat than xA/minutes - CONFIRMED against a real live match_json
+    dump, fotmob_raw_5795364.json). Read the same way as extract_player_xa()
+    (content.playerStats, keyed by playerId - each value has a 'stats' list
+    of groups, each group's 'stats' a dict keyed by stat label to {key,
+    stat: {value, ...}}). The real group is titled 'Physical metrics' (key
+    'physical_metrics'), containing both 'Sprinting' (a DISTANCE in metres,
+    key 'physical_metrics_sprinting' - not this stat) and 'Number of
+    sprints' (a plain integer count, key
+    'physical_metrics_number_of_sprints' - this one). Matched on that exact
+    key (falling back to a label containing "number of sprints", in case
+    FotMob retitles the group later) specifically to avoid confusing the
+    two. Not every match/competition carries physical tracking data at all
+    (coverage varies - see compute_totals()'s own docstring for the same
+    caveat about its stat groups), in which case this just returns an empty
+    DataFrame rather than raising. Players who didn't play (stats: []) are
+    skipped. Returns columns: Team, Player, Sprints.
+    """
+    columns = ['Team', 'Player', 'Sprints']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        stat_groups = pdata.get('stats')
+        if not stat_groups:
+            continue  # didn't play
+        sprints_value = None
+        for group in stat_groups:
+            group_stats = group.get('stats') if isinstance(group, dict) else None
+            if not isinstance(group_stats, dict):
+                continue
+            for label, entry in group_stats.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get('key', '')).lower()
+                if key == 'physical_metrics_number_of_sprints' or 'number of sprints' in str(label).lower():
+                    stat_obj = entry.get('stat')
+                    val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                    if val is not None:
+                        sprints_value = val
+                    break
+            if sprints_value is not None:
+                break
+        if sprints_value is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'Sprints': int(sprints_value),
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def extract_player_line_breaking_passes(match_json):
+    """
+    Per-player total number of line-breaking passes for this match -
+    FotMob's own figure (CONFIRMED against a real live match_json dump,
+    fotmob_raw_5795364.json: content.playerStats.<id>.stats[i].stats['Line
+    breaking passes'] = {'key': 'line_breaking_passes', 'stat': {'value': N,
+    'type': 'integer'}}). Read the same way as extract_player_xa()/
+    extract_player_sprints() - the group this lives in varies by player
+    (seen under both 'Attack' and 'Top stats' in the same real match), so
+    matched purely on the key rather than assuming a fixed group index/
+    title. Not every match/competition carries this stat (coverage varies -
+    same caveat as extract_player_sprints()), in which case this just
+    returns an empty DataFrame rather than raising. Players who didn't play
+    (stats: []) are skipped. Returns columns: Team, Player, Line Breaking
+    Passes.
+    """
+    columns = ['Team', 'Player', 'Line Breaking Passes']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        stat_groups = pdata.get('stats')
+        if not stat_groups:
+            continue  # didn't play
+        lbp_value = None
+        for group in stat_groups:
+            group_stats = group.get('stats') if isinstance(group, dict) else None
+            if not isinstance(group_stats, dict):
+                continue
+            for label, entry in group_stats.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get('key', '')).lower()
+                if key == 'line_breaking_passes' or 'line breaking passes' in str(label).lower():
+                    stat_obj = entry.get('stat')
+                    val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                    if val is not None:
+                        lbp_value = val
+                    break
+            if lbp_value is not None:
+                break
+        if lbp_value is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'Line Breaking Passes': int(lbp_value),
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def extract_player_minutes(match_json):
     """
     Per-player minutes played for this match - FotMob's own figure, read the
@@ -1265,7 +1389,8 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     return out
 
 
-def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
+def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, player_sprints=None,
+                             player_line_breaking_passes=None):
     """
     Roll the shot map up along a few dimensions - by player, by situation
     (open play / set piece / penalty / corner / fast break, per FotMob's own
@@ -1275,10 +1400,22 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
     grain. If player_xa (from extract_player_xa) is supplied, an extra xA
     column is merged onto the 'By Player' table only - it's a per-player
     stat, not something the other two dimensions (situation/body part) can
-    meaningfully carry. Likewise, if player_minutes (from
-    extract_player_minutes) is supplied, a Minutes Played column is merged
-    onto the 'By Player' table only, placed directly to the right of Player
-    (before Shots).
+    meaningfully carry. Likewise, player_minutes (extract_player_minutes)
+    adds a Minutes Played column directly to the right of Player (before
+    Shots); player_sprints (extract_player_sprints) adds a Sprints column
+    right after xA; and player_line_breaking_passes
+    (extract_player_line_breaking_passes) adds a Line Breaking Passes column
+    right after Sprints.
+
+    EVERY player who appears in ANY of player_xa/player_minutes/
+    player_sprints/player_line_breaking_passes shows up as its own row on
+    the 'By Player' table, regardless of whether they took a shot or created
+    a chance - a defender who never got near goal still gets a row showing
+    their Minutes Played/Sprints/Line Breaking Passes, with Shots/Goals/
+    Total xG/xA all reading 0 for them. (This table's shot-based dimensions
+    are still the only source of Shots/Goals/Total xG themselves - a player
+    who genuinely never touched the ball never gets invented shot data, they
+    just aren't excluded from the table anymore on that basis alone.)
 
     Penalties are excluded from Shots / Goals / Total xG everywhere on this
     tab - a penalty kick isn't a shot in the run-of-play sense, so it
@@ -1294,11 +1431,6 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
     drops out of its breakdown entirely, since after this exclusion it would
     only ever show up as an all-zero row.
 
-    Any player with xA > 0 is included on the 'By Player' table even if they
-    took zero (non-penalty) shots (e.g. a player who set up a good chance but
-    didn't shoot themselves) - their Shots/Goals/Total xG all show 0 in that
-    case.
-
     Returns an ordered dict: {'By Player': df, 'By Situation': df, 'By Body
     Part': df}, each sorted by team then descending shot count.
     """
@@ -1306,7 +1438,8 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
     for label, group_col in SHOT_BREAKDOWN_DIMENSIONS:
         cols = ['Team', group_col, 'Shots', 'Goals', 'Total xG']
         if label == 'By Player':
-            out_cols = ['Team', group_col, 'Minutes Played', 'Shots', 'Goals', 'Total xG', 'xA']
+            out_cols = ['Team', group_col, 'Minutes Played', 'Shots', 'Goals', 'Total xG', 'xA',
+                        'Sprints', 'Line Breaking Passes']
         else:
             out_cols = cols
         if shots_df.empty or group_col not in shots_df.columns:
@@ -1339,35 +1472,51 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None):
                     agg = agg[cols]
 
         if label == 'By Player':
+            # Full roster: every (Team, Player) that appears in ANY per-
+            # player data source, not just the shot-based agg above - this
+            # is what makes a defender with 0 shots/0 xA still show up (with
+            # their Minutes Played/Sprints/Line Breaking Passes), rather
+            # than being silently excluded from the table entirely.
+            roster_sources = [agg[['Team', group_col]].rename(columns={group_col: 'Player'})]
+            for src in (player_xa, player_minutes, player_sprints, player_line_breaking_passes):
+                if src is not None and not src.empty:
+                    roster_sources.append(src[['Team', 'Player']])
+            roster = pd.concat(roster_sources, ignore_index=True).drop_duplicates().reset_index(drop=True)
+
+            agg = roster.merge(agg, how='left', on=['Team', 'Player'])
+            # pd.to_numeric() first (rather than a bare .fillna()) - an
+            # entirely empty match (no shots recorded AND no player data
+            # sources supplied at all) leaves these columns as object dtype
+            # with zero rows, which a bare .fillna(0.0).round(2) can't
+            # handle ("Expected numeric dtype, got object instead").
+            # to_numeric() forces a real numeric dtype first in every case,
+            # empty or not.
+            agg['Shots'] = pd.to_numeric(agg['Shots'], errors='coerce').fillna(0).astype(int)
+            agg['Goals'] = pd.to_numeric(agg['Goals'], errors='coerce').fillna(0).astype(int)
+            agg['Total xG'] = pd.to_numeric(agg['Total xG'], errors='coerce').fillna(0.0).round(2)
+
             if player_xa is not None and not player_xa.empty:
                 agg = agg.merge(player_xa, how='left', on=['Team', 'Player'])
             else:
                 agg['xA'] = 0.0
             agg['xA'] = agg['xA'].fillna(0.0).round(2)
 
+            if player_sprints is not None and not player_sprints.empty:
+                agg = agg.merge(player_sprints, how='left', on=['Team', 'Player'])
+                agg['Sprints'] = agg['Sprints'].fillna(0).astype(int)
+            else:
+                agg['Sprints'] = None
+
+            if player_line_breaking_passes is not None and not player_line_breaking_passes.empty:
+                agg = agg.merge(player_line_breaking_passes, how='left', on=['Team', 'Player'])
+                agg['Line Breaking Passes'] = agg['Line Breaking Passes'].fillna(0).astype(int)
+            else:
+                agg['Line Breaking Passes'] = None
+
             if player_minutes is not None and not player_minutes.empty:
                 agg = agg.merge(player_minutes, how='left', on=['Team', 'Player'])
             else:
                 agg['Minutes Played'] = None
-
-            # Add zero-shot rows for any player with xA > 0 who isn't already
-            # in the table (took no shots themselves, but created a chance).
-            if player_xa is not None and not player_xa.empty:
-                existing = set(zip(agg['Team'], agg['Player']))
-                extra = player_xa[
-                    (player_xa['xA'] > 0)
-                    & ~player_xa.apply(lambda r: (r['Team'], r['Player']) in existing, axis=1)
-                ].copy()
-                if not extra.empty:
-                    extra['Shots'] = 0
-                    extra['Goals'] = 0
-                    extra['Total xG'] = 0.0
-                    extra['xA'] = extra['xA'].round(2)
-                    if player_minutes is not None and not player_minutes.empty:
-                        extra = extra.merge(player_minutes, how='left', on=['Team', 'Player'])
-                    else:
-                        extra['Minutes Played'] = None
-                    agg = pd.concat([agg, extra[out_cols]], ignore_index=True)
 
         agg = agg.sort_values(['Team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
         breakdowns[label] = agg[out_cols]
@@ -1551,13 +1700,17 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         " breakdown entirely, since it would only ever show up as an all-zero row after this"
         " exclusion. Shots missing that dimension's value are dropped from that particular"
         " breakdown (rare). The By Player table additionally has a Minutes Played column (directly"
-        " to the right of Player) and an xA (expected assists) column - both FotMob's own"
-        " per-player match figures (read from their per-player match stat groups, not derived from"
-        " our shot map, since the shot map has no minutes/passer/assist fields to compute them from"
-        " ourselves). Players with shots but no resolvable Minutes Played figure show blank; no"
-        " resolvable xA figure shows 0.0. Any player with xA > 0 is included even if they took zero"
-        " non-penalty shots themselves (their Shots/Goals/Total xG all show 0) - so a player who"
-        " only created chances, without shooting, still shows up on this table.",
+        " to the right of Player), an xA (expected assists) column, a Sprints column (total number"
+        " of sprints for the match, right after xA), and a Line Breaking Passes column (right after"
+        " Sprints) - all FotMob's own per-player match figures (read from their per-player match"
+        " stat groups, not derived from our shot map, since the shot map has no minutes/passer/"
+        " assist/physical-tracking/passing fields to compute them from ourselves). EVERY player who"
+        " appears in ANY of these per-player data sources gets a row on this table, regardless of"
+        " whether they took a shot or created a chance - a defender with 0 shots and 0 xA still"
+        " shows up, with Shots/Goals/Total xG/xA all reading 0 and their Minutes Played/Sprints/Line"
+        " Breaking Passes shown normally. Any of Minutes Played/Sprints/Line Breaking Passes shows"
+        " blank for a player with no resolvable figure for it (not every match/competition has that"
+        " data); no resolvable xA figure shows 0.0.",
         "",
         "Plus Minus tab: one table per team, one row per player, with Minutes Played directly next"
         " to the player's name, then Goals For, Goals Against, Shots, Shots Against, xG, and xG"
@@ -1652,7 +1805,10 @@ def main():
 
     print("Computing shot breakdowns...")
     player_xa = extract_player_xa(match_json)
-    shot_breakdowns = compute_shot_breakdowns(shots_df, player_xa)
+    player_sprints = extract_player_sprints(match_json)
+    player_line_breaking_passes = extract_player_line_breaking_passes(match_json)
+    shot_breakdowns = compute_shot_breakdowns(shots_df, player_xa, player_sprints=player_sprints,
+                                               player_line_breaking_passes=player_line_breaking_passes)
 
     print("Computing xG breakdown...")
     xg_breakdown = compute_xg_breakdown(shots_df, home_name, away_name)

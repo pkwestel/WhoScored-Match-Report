@@ -148,7 +148,10 @@ if st.button("Generate Combined Report", type="primary"):
                 fm_totals_df = fr.compute_totals(fm_match_json, shots_df, fm_home_name, fm_away_name)
                 player_xa = fr.extract_player_xa(fm_match_json)
                 player_minutes = fr.extract_player_minutes(fm_match_json)
-                shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
+                player_sprints = fr.extract_player_sprints(fm_match_json)
+                player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
+                shot_breakdowns = fr.compute_shot_breakdowns(
+                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
                 player_windows = fr.extract_player_windows(fm_match_json, player_minutes, shots_df)
                 plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)

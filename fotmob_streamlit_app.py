@@ -93,7 +93,10 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing shot breakdowns..."):
                 player_xa = fr.extract_player_xa(match_json)
                 player_minutes = fr.extract_player_minutes(match_json)
-                shot_breakdowns = fr.compute_shot_breakdowns(shots_df, player_xa, player_minutes)
+                player_sprints = fr.extract_player_sprints(match_json)
+                player_line_breaking_passes = fr.extract_player_line_breaking_passes(match_json)
+                shot_breakdowns = fr.compute_shot_breakdowns(
+                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
 
             with st.spinner("Computing xG breakdown..."):
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, home_name, away_name)
