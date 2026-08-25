@@ -554,7 +554,14 @@ else:
             )
         else:
             st.subheader("League Table")
-            st.dataframe(league_table, use_container_width=True, hide_index=True)
+            # use_container_width=False (rather than the True used almost
+            # everywhere else in this app) is deliberate here - a stretched-
+            # to-fill table with only ~12 mostly single/double-digit columns
+            # (W/D/L/GF/GA/...) ends up with huge padding per cell on a wide
+            # screen. False lets Streamlit size each column to its actual
+            # content instead, which is far more compact for a table this
+            # narrow in substance.
+            st.dataframe(league_table, use_container_width=False, hide_index=True)
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
@@ -582,13 +589,17 @@ else:
                     if c != "Team":
                         shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
                 shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
-                st.dataframe(shot_totals, use_container_width=True, hide_index=True)
+                # use_container_width=False here and on the other three Team
+                # Stats tables below - same reasoning as the League Table
+                # above, sized to actual content rather than stretched full-
+                # width.
+                st.dataframe(shot_totals, use_container_width=False, hide_index=True)
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(db)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
-                st.dataframe(passing_totals, use_container_width=True, hide_index=True)
+                st.dataframe(passing_totals, use_container_width=False, hide_index=True)
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(db)
             if touches_totals.empty:
@@ -598,7 +609,7 @@ else:
                     "backfill it."
                 )
             else:
-                st.dataframe(touches_totals, use_container_width=True, hide_index=True)
+                st.dataframe(touches_totals, use_container_width=False, hide_index=True)
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -613,7 +624,7 @@ else:
                     "first."
                 )
             else:
-                st.dataframe(defensive_totals, use_container_width=True, hide_index=True)
+                st.dataframe(defensive_totals, use_container_width=False, hide_index=True)
 
     with tab_fixtures:
         fixtures = hdb.fetch_fixtures(db)
