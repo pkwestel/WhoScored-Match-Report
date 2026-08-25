@@ -1327,6 +1327,142 @@ def extract_player_minutes(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+# Keys matched against each player's FotMob stat groups for
+# compute_player_scoring_stats() below - same key-based matching approach
+# as extract_player_xa()/extract_player_sprints() (the group a given stat
+# lives under varies by player - confirmed 'Assists' living under 'Top
+# stats' and 'xG Non-penalty' under 'Attack' for the SAME player in a real
+# match), so these are matched by key, not a fixed group index/title.
+_SCORING_STAT_KEYS = {
+    'assists': 'Assists',
+    'expected_goals_non_penalty': 'NPxG',
+    'expected_goals_on_target_variant': 'PS-xG',
+}
+
+
+def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_minutes=None,
+                                  player_sprints=None):
+    """
+    Full per-player scoring-stats table for the match detail view's Scoring
+    Stats category (dashboard_app.py's Player Stats tab): Minutes Played,
+    Goals, Assists, Shots, NPxG, PS-xG, xA, PK, PK Attempted, Sprints.
+
+    Goals/Shots/PK/PK Attempted are derived from shots_df (the shot map) -
+    the same source as the Shot Breakdown and Team Totals tabs - rather
+    than FotMob's own per-player 'goals'/'total_shots' stat-group figures,
+    to stay self-consistent with those tabs instead of introducing a
+    second, separately-sourced count of the same events. PK Attempted is
+    every shot with Situation == 'Penalty'; PK is those of those with
+    Outcome == 'Goal' (same penalty definition as PENALTY_XG elsewhere in
+    this module).
+
+    Assists/NPxG ('xG Non-penalty')/PS-xG ('Expected goals on target
+    (xGOT)') have no shot-map equivalent - they're FotMob's own per-player
+    figures, matched by stat key (see _SCORING_STAT_KEYS above).
+
+    Minutes Played/xA/Sprints are passed in as already-computed
+    (extract_player_minutes()/extract_player_xa()/extract_player_sprints())
+    rather than recomputed here, since every caller already needs those
+    three for compute_shot_breakdowns() - this just reuses them instead of
+    walking playerStats a second time for the same figures.
+
+    Full-roster union (same approach as compute_shot_breakdowns()'s 'By
+    Player' table): a player shows up here if they took a shot, took a
+    penalty, or have ANY of Assists/NPxG/PS-xG/xA/Minutes Played/Sprints -
+    zero-filled for whichever of those they don't have - rather than only
+    players who took a shot. Minutes Played is left blank ('-' once
+    formatted for display) rather than zero-filled for a roster member with
+    no minutes figure at all, since a real 0 there would look identical to
+    "played, 0 minutes" and this project doesn't have any other way to
+    distinguish the two.
+    """
+    columns = ['Team', 'Player', 'Minutes Played', 'Goals', 'Assists', 'Shots',
+               'NPxG', 'PS-xG', 'xA', 'PK', 'PK Attempted', 'Sprints']
+
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    team_map = extract_team_id_map(match_json)
+
+    fm_rows = []
+    if isinstance(player_stats, dict):
+        for pdata in player_stats.values():
+            if not isinstance(pdata, dict):
+                continue
+            stat_groups = pdata.get('stats')
+            if not stat_groups:
+                continue  # didn't play
+            found = {}
+            for group in stat_groups:
+                group_stats = group.get('stats') if isinstance(group, dict) else None
+                if not isinstance(group_stats, dict):
+                    continue
+                for entry in group_stats.values():
+                    if not isinstance(entry, dict):
+                        continue
+                    label = _SCORING_STAT_KEYS.get(str(entry.get('key', '')))
+                    if label and label not in found:
+                        stat_obj = entry.get('stat')
+                        val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                        if val is not None:
+                            found[label] = val
+                if len(found) == len(_SCORING_STAT_KEYS):
+                    break
+            if not found:
+                continue
+            team_id = pdata.get('teamId')
+            row = {'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+                   'Player': pdata.get('name')}
+            row.update(found)
+            fm_rows.append(row)
+    fm_df = pd.DataFrame(fm_rows, columns=['Team', 'Player', 'Assists', 'NPxG', 'PS-xG'])
+
+    if shots_df is not None and not shots_df.empty:
+        shot_agg = shots_df.groupby(['Team', 'Player']).agg(
+            Shots=('Outcome', 'size'),
+            Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
+        ).reset_index()
+        pens = shots_df[shots_df['Situation'] == 'Penalty']
+        if not pens.empty:
+            pk_agg = pens.groupby(['Team', 'Player']).agg(
+                **{'PK Attempted': ('Outcome', 'size'),
+                   'PK': ('Outcome', lambda s: int((s == 'Goal').sum()))}
+            ).reset_index()
+        else:
+            pk_agg = pd.DataFrame(columns=['Team', 'Player', 'PK Attempted', 'PK'])
+        shot_agg = shot_agg.merge(pk_agg, on=['Team', 'Player'], how='left')
+    else:
+        shot_agg = pd.DataFrame(columns=['Team', 'Player', 'Shots', 'Goals', 'PK Attempted', 'PK'])
+
+    roster_sources = []
+    for df in [fm_df, shot_agg, player_xa, player_minutes, player_sprints]:
+        if df is not None and not df.empty:
+            roster_sources.append(df[['Team', 'Player']])
+    if not roster_sources:
+        return pd.DataFrame(columns=columns)
+    roster = pd.concat(roster_sources).drop_duplicates().reset_index(drop=True)
+
+    out = roster.merge(shot_agg, on=['Team', 'Player'], how='left')
+    out = out.merge(fm_df, on=['Team', 'Player'], how='left')
+    out = out.merge(player_xa if player_xa is not None and not player_xa.empty
+                     else pd.DataFrame(columns=['Team', 'Player', 'xA']), on=['Team', 'Player'], how='left')
+    out = out.merge(player_minutes if player_minutes is not None and not player_minutes.empty
+                     else pd.DataFrame(columns=['Team', 'Player', 'Minutes Played']),
+                     on=['Team', 'Player'], how='left')
+    out = out.merge(player_sprints if player_sprints is not None and not player_sprints.empty
+                     else pd.DataFrame(columns=['Team', 'Player', 'Sprints']), on=['Team', 'Player'], how='left')
+
+    for c in ['Goals', 'Shots', 'PK', 'PK Attempted', 'Sprints', 'Assists']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0).astype(int)
+    for c in ['NPxG', 'PS-xG', 'xA']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0).round(2)
+    out['Minutes Played'] = pd.to_numeric(out['Minutes Played'], errors='coerce')
+
+    return (out[columns]
+            .sort_values(['Team', 'Minutes Played'], ascending=[True, False])
+            .reset_index(drop=True))
+
+
 def extract_player_windows(match_json, player_minutes=None, shots_df=None):
     """
     Per-player on-pitch window for this match: Team, Player, start_minute,

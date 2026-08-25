@@ -482,18 +482,64 @@ def _render_match_detail(db, match_id):
     )
 
     with mt_totals:
-        team_stats = hdb.fetch_team_stats_for_match(db, match_id)
-        if team_stats.empty:
+        match_summary = hdb.fetch_match_summary(db, match_id)
+        if match_summary.empty:
             st.info("No team stats saved for this match.")
         else:
-            st.dataframe(team_stats, use_container_width=True, hide_index=True)
+            st.dataframe(match_summary, use_container_width=False, hide_index=True)
+
+        # Full flattened stat breakdown (Possession/Passes/Tackles/Duels/
+        # Physical performance/etc.) still available for anyone who wants
+        # more than the summary table above - tucked away so it doesn't
+        # compete with the compact Home/Metric/Away view for attention.
+        with st.expander("All team stats"):
+            team_stats = hdb.fetch_team_stats_for_match(db, match_id)
+            if team_stats.empty:
+                st.info("No team stats saved for this match.")
+            else:
+                st.dataframe(team_stats, use_container_width=False, hide_index=True)
 
     with mt_players:
-        player_stats = hdb.fetch_player_stats_for_match(db, match_id)
-        if player_stats.empty:
-            st.info("No player stats saved for this match.")
+        home_team, away_team = row["Home Team"], row["Away Team"]
+
+        # Each category is its own pair of home/away tables (rather than one
+        # giant flattened table) - a dropdown picks which category shows,
+        # matching the requested layout of one category at a time, home
+        # team on top / away team below, each with a 'Team Total' row.
+        _PLAYER_CATEGORY_FETCHERS = {
+            "Scoring Stats": hdb.fetch_player_scoring_stats,
+            "Possession": hdb.fetch_player_possession,
+            "Passing": hdb.fetch_player_passing,
+            "Defensive Actions": hdb.fetch_player_defensive_actions,
+            "Defensive Action Locations": hdb.fetch_player_defensive_locations,
+        }
+        category = st.selectbox(
+            "Category", list(_PLAYER_CATEGORY_FETCHERS.keys()), key="player_stats_category"
+        )
+        tables = _PLAYER_CATEGORY_FETCHERS[category](db, match_id, home_team, away_team)
+
+        st.caption(home_team)
+        if tables["home"].empty:
+            st.info(f"No {category.lower()} saved for {home_team} in this match.")
         else:
-            st.dataframe(player_stats, use_container_width=True, hide_index=True)
+            st.dataframe(tables["home"], use_container_width=False, hide_index=True)
+
+        st.caption(away_team)
+        if tables["away"].empty:
+            st.info(f"No {category.lower()} saved for {away_team} in this match.")
+        else:
+            st.dataframe(tables["away"], use_container_width=False, hide_index=True)
+
+        # Full flattened stat breakdown - every namespace, every player -
+        # still available for anyone who wants more than the 5 category
+        # tables above, same "tuck the old everything-view away" treatment
+        # as the Team Totals tab above.
+        with st.expander("All player stats"):
+            player_stats = hdb.fetch_player_stats_for_match(db, match_id)
+            if player_stats.empty:
+                st.info("No player stats saved for this match.")
+            else:
+                st.dataframe(player_stats, use_container_width=False, hide_index=True)
 
     with mt_shots:
         shots = hdb.fetch_shots(db, match_id=match_id)

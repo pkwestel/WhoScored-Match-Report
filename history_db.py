@@ -722,6 +722,90 @@ def fetch_team_stats_for_match(db: DB, match_id) -> pd.DataFrame:
     return _flatten_extra(rows, ["team", "is_home"])
 
 
+# (display label, fm_totals key) - the key names are exactly what
+# compute_totals() in fotmob_report.py produces, confirmed against a real
+# match. 'Shots on target' is deliberately FotMob's own published stat
+# (lowercase 't'), not the shot-map-derived 'Shots on Target' (capital
+# 'T') that also lives in the same fm_totals dict under a different key -
+# same "prefer FotMob's own published figure" reasoning as 'Total xG' (see
+# compute_totals()'s own docstring), and confirmed to matter in practice:
+# the two disagreed by a wide margin on a real match (13 vs 5).
+_MATCH_SUMMARY_FIELDS = [
+    ("Goals", "Goals"),
+    ("Shots", "Shots"),
+    ("Shots on target", "Shots on target"),
+    ("Shots inside box", "Shots inside box"),
+    ("Possession", "Ball possession"),
+    ("xG", "Total xG"),
+    ("Big Chances", "Big chances"),
+    ("Corners", "Corners"),
+]
+
+
+def _fmt_match_summary_value(value, label):
+    if value is None:
+        return "-"
+    try:
+        if label == "Possession":
+            return f"{float(value):.0f}%"
+        if label == "xG":
+            return f"{float(value):.2f}"
+        if float(value) == int(float(value)):
+            return str(int(float(value)))
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
+    """
+    Compact home-vs-away summary table for the match detail view's Team
+    Totals tab: one row per stat (Goals, Shots, Shots on target, Shots
+    inside box, Possession, xG, Big Chances, Corners), laid out as Home |
+    Metric | Away rather than one row per team - plus a leading 'Team' row
+    showing the two team names themselves, so the table reads top-to-bottom
+    as a single side-by-side comparison instead of needing to cross-
+    reference two separate rows.
+
+    Reads straight from team_match_stats.extra_json's 'fm_totals' namespace
+    (compute_totals()'s own output) by field name, rather than going
+    through fetch_team_stats_for_match()'s generic flattened-everything
+    table - see _MATCH_SUMMARY_FIELDS above for why that distinction
+    matters for 'Shots on target' specifically.
+
+    A stat an older saved match doesn't have (Possession/Big Chances/
+    Corners/Shots inside box/FotMob's own Shots on target weren't captured
+    at all before a fix to where FotMob's stat groups actually live in the
+    raw JSON - see fotmob_report._get_fotmob_stat_groups()) shows as '-'
+    rather than a misleading 0 - re-save that match to backfill it.
+    """
+    cols = ["Home", "Metric", "Away"]
+    matches = fetch_matches(db)
+    match_row = matches[matches["match_id"] == str(match_id)]
+    if match_row.empty:
+        return pd.DataFrame(columns=cols)
+    match_row = match_row.iloc[0]
+    home_team, away_team = match_row["home_team"], match_row["away_team"]
+
+    cur = db.execute("SELECT team, extra_json FROM team_match_stats WHERE match_id = ?", (str(match_id),))
+    fm_totals_by_team = {}
+    for team, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        fm_totals_by_team[team] = extra.get("fm_totals") or {}
+
+    home_stats = fm_totals_by_team.get(home_team, {})
+    away_stats = fm_totals_by_team.get(away_team, {})
+
+    records = [{"Home": home_team, "Metric": "Team", "Away": away_team}]
+    for label, key in _MATCH_SUMMARY_FIELDS:
+        records.append({
+            "Home": _fmt_match_summary_value(home_stats.get(key), label),
+            "Metric": label,
+            "Away": _fmt_match_summary_value(away_stats.get(key), label),
+        })
+    return pd.DataFrame(records, columns=cols)
+
+
 def fetch_player_stats_for_match(db: DB, match_id) -> pd.DataFrame:
     """Every player's stats (flattened from extra_json) for ONE match."""
     cur = db.execute("""
@@ -731,6 +815,175 @@ def fetch_player_stats_for_match(db: DB, match_id) -> pd.DataFrame:
     """, (str(match_id),))
     rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
     return _flatten_extra(rows, ["team", "player"])
+
+
+def _fetch_player_namespaces(db: DB, match_id, namespaces: list) -> pd.DataFrame:
+    """
+    Pulls just the given namespace(s) out of every player_match_stats row
+    for this match - e.g. ['ws_passing', 'fm_line_breaking_passes'] - merged
+    into one 'Team'/'Player' + stat-columns DataFrame, rather than going
+    through fetch_player_stats_for_match()'s everything-flattened table.
+    Used by each of the category-specific fetch_player_*() functions below
+    (Scoring Stats/Possession/Passing/Defensive Actions/Defensive Action
+    Locations) so each only pulls the couple of namespaces it actually
+    needs, and gets back plain field names (no 'namespace.' prefix, no
+    underscores) ready to show as real column headers.
+    """
+    cur = db.execute("""
+        SELECT team, player, extra_json
+        FROM player_match_stats
+        WHERE match_id = ?
+    """, (str(match_id),))
+    records = []
+    for team, player, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        rec = {"Team": team, "Player": player}
+        found_any = False
+        for ns in namespaces:
+            ns_dict = extra.get(ns)
+            if isinstance(ns_dict, dict):
+                found_any = True
+                rec.update(ns_dict)
+        if found_any:
+            records.append(rec)
+    return pd.DataFrame(records)
+
+
+def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: list,
+                            columns: list) -> dict:
+    """
+    Shared plumbing for every Player Stats category table on the match
+    detail view: pulls the given namespace(s) (see _fetch_player_namespaces()
+    above), keeps only the requested columns (in the given order - any
+    column missing from the underlying data for every player, e.g. an older
+    match saved before a newer stat existed, is filled with 0 rather than
+    dropped, so the table shape never depends on which fields happen to be
+    populated), then splits into (home, away) with a 'Team Total' row
+    appended to each summing every numeric column - matching the requested
+    layout (two separate tables, home on top / away below, each with a
+    bottom total row).
+
+    Returns {'home': DataFrame, 'away': DataFrame} - either can be empty if
+    that team has no saved rows for these namespaces yet (e.g. an older
+    match saved before this category existed).
+    """
+    df = _fetch_player_namespaces(db, match_id, namespaces)
+    if df.empty:
+        empty = pd.DataFrame(columns=["Player"] + columns)
+        return {"home": empty, "away": empty}
+
+    for c in columns:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        # xG/xA-style decimal stats keep 2 decimal places; every other
+        # column here is a plain count, shown as a whole number. Decided by
+        # a fixed name list rather than "is every value in this particular
+        # match a whole number" so a column's display type can't flip
+        # between matches depending on what happened to be scored that day.
+        if c in _DECIMAL_STAT_COLUMNS:
+            df[c] = df[c].round(2)
+        else:
+            df[c] = df[c].astype(int)
+
+    def _one(team_name):
+        sub = df[df["Team"] == team_name][["Player"] + columns].reset_index(drop=True)
+        if sub.empty:
+            return sub
+        total = {c: sub[c].sum() for c in columns}
+        total["Player"] = "Team Total"
+        return pd.concat([sub, pd.DataFrame([total])], ignore_index=True)
+
+    return {"home": _one(home_team), "away": _one(away_team)}
+
+
+# Column order for each Player Stats category table - see the docstrings on
+# fetch_player_scoring_stats()/fetch_player_possession()/fetch_player_passing()/
+# fetch_player_defensive_actions()/fetch_player_defensive_locations() below
+# for where each field is sourced from.
+_SCORING_STATS_COLUMNS = ["Minutes Played", "Goals", "Assists", "Shots", "SCA",
+                           "NPxG", "PS-xG", "xA", "PK", "PK Attempted", "Sprints"]
+_DECIMAL_STAT_COLUMNS = {"NPxG", "PS-xG", "xA"}
+_POSSESSION_COLUMNS = ["Total Touches", "Own third", "Middle third", "Final third",
+                        "Attacking Box", "Progressive Carries", "Carries into Final Third",
+                        "Carries into Box", "Passes Received", "Progressive Passes Received"]
+_PASSING_COLUMNS = ["Passes Completed", "Passes Attempted", "Passes Forward", "Headed",
+                     "Crosses Attempted", "Crosses Completed", "Passes into Final 1/3",
+                     "Passes into the Box", "Progressive Passes", "Shot Assists", "SCA",
+                     "Line Breaking Passes"]
+_DEFENSIVE_ACTIONS_COLUMNS = ["Tackles", "Interceptions", "Passes Blocked", "Shots Blocked"]
+_DEFENSIVE_LOCATIONS_COLUMNS = [
+    f"{stat} {third}" for stat in ("Tackles", "Interceptions", "Passes Blocked", "Ball Recoveries")
+    for third in ("Own Third", "Middle Third", "Final Third")
+]
+
+
+def fetch_player_scoring_stats(db: DB, match_id, home_team, away_team) -> dict:
+    """
+    Scoring Stats category: Minutes Played, Goals, Assists, Shots, SCA,
+    NPxG, PS-xG, xA, PK, PK Attempted, Sprints - one row per player, 'Team
+    Total' row at the bottom. Minutes Played/Goals/Assists/Shots/NPxG/PS-xG/
+    xA/PK/PK Attempted/Sprints all come from the 'fm_scoring' namespace
+    (fotmob_report.compute_player_scoring_stats()); SCA is pulled in from
+    'ws_passing' instead of being duplicated into fm_scoring, since it's
+    also the Passing category's own SCA figure (fotmob_report.
+    compute_passing()'s real Shot-Creating-Actions count, not a FotMob
+    proxy) - one real number, shown on both tables.
+    """
+    return _player_category_table(db, match_id, home_team, away_team,
+                                   ["fm_scoring", "ws_passing"], _SCORING_STATS_COLUMNS)
+
+
+def fetch_player_possession(db: DB, match_id, home_team, away_team) -> dict:
+    """
+    Possession category: the same per-player fields as the WhoScored report's
+    own Touches tab (Total Touches, thirds, Attacking Box, Progressive
+    Carries/Carries into Final Third/Box, Passes Received, Progressive
+    Passes Received) - read straight from the 'ws_touches' namespace
+    (whoscored_report.compute_touches()'s player_third table).
+    """
+    return _player_category_table(db, match_id, home_team, away_team,
+                                   ["ws_touches"], _POSSESSION_COLUMNS)
+
+
+def fetch_player_passing(db: DB, match_id, home_team, away_team) -> dict:
+    """
+    Passing category: the same per-player fields as the WhoScored report's
+    own Passing tab (Passes Completed/Attempted/Forward, Headed, Crosses
+    Attempted/Completed, Passes into Final 1/3/the Box, Progressive Passes,
+    Shot Assists, SCA - from the 'ws_passing' namespace, whoscored_report.
+    compute_passing()), plus Line Breaking Passes (FotMob's own figure,
+    'fm_line_breaking_passes' namespace) folded in as an extra column per
+    the request to add it to this tab specifically.
+    """
+    return _player_category_table(db, match_id, home_team, away_team,
+                                   ["ws_passing", "fm_line_breaking_passes"], _PASSING_COLUMNS)
+
+
+def fetch_player_defensive_actions(db: DB, match_id, home_team, away_team) -> dict:
+    """
+    Defensive Actions category: the same per-player fields as the
+    WhoScored report's own Defensive Actions tab (Tackles, Interceptions,
+    Passes Blocked, Shots Blocked) - read straight from the 'ws_defensive'
+    namespace (whoscored_report.compute_defensive_actions()).
+    """
+    return _player_category_table(db, match_id, home_team, away_team,
+                                   ["ws_defensive"], _DEFENSIVE_ACTIONS_COLUMNS)
+
+
+def fetch_player_defensive_locations(db: DB, match_id, home_team, away_team) -> dict:
+    """
+    Defensive Action Locations category: the same per-player fields as the
+    WhoScored report's own Defensive Action Location tab (Tackles/
+    Interceptions/Passes Blocked/Ball Recoveries, each broken down by Own/
+    Middle/Final Third) - read straight from the 'ws_defensive_locations'
+    namespace (whoscored_report.compute_defensive_action_location()). Only
+    populated for matches saved after this namespace was added - an older
+    match saved before then shows an all-zero table rather than raising
+    (see _player_category_table()'s own docstring on missing columns).
+    """
+    return _player_category_table(db, match_id, home_team, away_team,
+                                   ["ws_defensive_locations"], _DEFENSIVE_LOCATIONS_COLUMNS)
 
 
 def fetch_distinct_players(db: DB) -> list:
