@@ -1029,6 +1029,66 @@ def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=cols)
 
 
+# Same column set/order as combined_report.COMBINED_SHOTS_COLUMNS - see
+# fetch_shot_creating_actions() below for why this is reconstructed from
+# the shots table rather than read as one of its own real columns.
+_COMBINED_SHOTS_DISPLAY_COLUMNS = [
+    'Minute', 'Added Time', 'Player', 'Team', 'xG', 'PSxG', 'Outcome', 'Distance (yd)',
+    'Body Part', 'Situation', 'SCA1_Player', 'SCA1_Action', 'SCA2_Player', 'SCA2_Action',
+]
+
+
+def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
+    """
+    The match detail view's Shots tab: reconstructs exactly the table the
+    combined report's own 'Shot Creating Actions' tab shows
+    (combined_report.compute_combined_shots()'s output - WhoScored's shot
+    list, enriched with the SCA1/SCA2 contributing actions, plus FotMob's
+    Minute/Added Time/xG/PSxG/Outcome/Situation attached to each row).
+
+    Every match saved via publish_report() already carries this data -
+    shots_df passed in there is always report['combined_shots'] - but the
+    'shots' table's own fixed columns (see upsert_shots()'s docstring) only
+    cover Team/Player/Minute/Added Time/Situation/Body Part/Outcome/xG/
+    xGOT-or-PSxG; Distance (yd) and the four SCA1/SCA2 fields aren't among
+    those fixed columns, so upsert_shots() stashes them in shots.extra_json
+    instead of dropping them. This just reads that JSON back out and
+    reshapes the result into the exact same column set/order the combined
+    report itself used, rather than the DB's own storage shape - so this is
+    a reformat of already-saved data, not a new computation, and works
+    retroactively for every match saved via the combined report (no
+    re-save needed).
+    """
+    cur = db.execute("""
+        SELECT team, player, minute, added_time, situation, body_part, outcome, xg, xgot, extra_json
+        FROM shots
+        WHERE match_id = ?
+    """, (str(match_id),))
+    records = []
+    for team, player, minute, added_time, situation, body_part, outcome, xg, xgot, extra_json in cur.fetchall():
+        extra = json.loads(extra_json) if extra_json else {}
+        records.append({
+            'Minute': minute,
+            'Added Time': added_time,
+            'Player': player,
+            'Team': team,
+            'xG': xg,
+            'PSxG': xgot,
+            'Outcome': outcome,
+            'Distance (yd)': extra.get('Distance (yd)'),
+            'Body Part': body_part,
+            'Situation': situation,
+            'SCA1_Player': extra.get('SCA1_Player'),
+            'SCA1_Action': extra.get('SCA1_Action'),
+            'SCA2_Player': extra.get('SCA2_Player'),
+            'SCA2_Action': extra.get('SCA2_Action'),
+        })
+    df = pd.DataFrame(records, columns=_COMBINED_SHOTS_DISPLAY_COLUMNS)
+    if df.empty:
+        return df
+    return df.sort_values(['Team', 'Minute', 'Added Time'], na_position='first').reset_index(drop=True)
+
+
 def fetch_season_shot_totals(db: DB):
     """
     Season-cumulative Shots/Goals/Total xG per team, broken down by shot

@@ -542,18 +542,33 @@ def _render_match_detail(db, match_id):
                 st.dataframe(player_stats, use_container_width=False, hide_index=True)
 
     with mt_shots:
-        shots = hdb.fetch_shots(db, match_id=match_id)
+        # Same output as the combined report's own "Shot Creating Actions"
+        # tab (see fetch_shot_creating_actions()'s docstring) - one row per
+        # shot, WhoScored's own shot list (Player/Distance/Body Part/SCA1/
+        # SCA2) with FotMob's Minute/Added Time/xG/PSxG/Outcome/Situation
+        # attached, split by team with a "Top 3 Shots by xG" caption under
+        # each - rather than the DB's own raw shot-table shape.
+        home_team, away_team = row["Home Team"], row["Away Team"]
+        shots = hdb.fetch_shot_creating_actions(db, match_id)
         if shots.empty:
             st.info("No shots saved for this match.")
         else:
-            st.dataframe(shots.drop(columns=["extra_json"], errors="ignore"),
-                         use_container_width=True, hide_index=True)
-            if "xg" in shots.columns:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Shots", len(shots))
-                c2.metric("Total xG", f"{shots['xg'].fillna(0).sum():.2f}")
-                goals = (shots["outcome"] == "Goal").sum() if "outcome" in shots.columns else 0
-                c3.metric("Goals", int(goals))
+            st.write(
+                "One row per shot - WhoScored's own shot list (Player/Distance/Body Part/SCA1/SCA2), "
+                "with FotMob's own Minute/Added Time and xG/PSxG/Outcome/Situation attached to each row."
+            )
+            for t in [home_team, away_team]:
+                st.subheader(t)
+                t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
+                st.dataframe(t_shots, use_container_width=False, hide_index=True)
+
+                top3 = (t_shots[t_shots["Situation"] != "Penalty"][["Minute", "Player", "xG"]]
+                        .dropna(subset=["xG"])
+                        .sort_values("xG", ascending=False)
+                        .head(3)
+                        .reset_index(drop=True))
+                st.caption("Top 3 Shots by xG")
+                st.dataframe(top3, use_container_width=False, hide_index=True)
 
     matches_for_this_match = hdb.fetch_matches(db)
     matches_for_this_match = matches_for_this_match[matches_for_this_match["match_id"] == match_id]
