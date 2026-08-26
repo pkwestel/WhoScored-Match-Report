@@ -460,6 +460,48 @@ def _render_match_touchmap(db, match_id, home_team, away_team):
     plt.close(fig)
 
 
+def _render_team_summary_table(df, home_col, metric_col, away_col,
+                                header_font_size="1.3em", body_font_size="1.15em",
+                                cell_padding="10px 44px", header_padding="14px 44px"):
+    """
+    Shared renderer for every Home/Metric/Away summary table in the app
+    (the Team Totals tab's match summary, and each of the Advanced Stats
+    tab's 5 smaller tables) - a plain HTML table (rather than st.dataframe)
+    to get styling st.dataframe can't do: a blank header cell where the
+    literal word 'Metric' would show, home/away column headers colored in
+    the same red/blue as the page header above, no cell borders at all (so
+    it reads as a clean graphic rather than a spreadsheet grid), centered
+    on the page. font_size/padding are parameterized so the Advanced Stats
+    tab can reuse the exact same look at a smaller scale (per that tab's
+    request to look "the same... but smaller") rather than duplicating this
+    markup with different numbers baked in.
+    """
+    rows_html = "".join(
+        f"""<tr>
+            <td style="padding:{cell_padding}; text-align:center; border:none; font-size:{body_font_size};">{r[home_col]}</td>
+            <td style="padding:{cell_padding}; text-align:center; border:none; font-size:{body_font_size}; color:#666;">{r[metric_col]}</td>
+            <td style="padding:{cell_padding}; text-align:center; border:none; font-size:{body_font_size};">{r[away_col]}</td>
+        </tr>"""
+        for _, r in df.iterrows()
+    )
+    st.markdown(f"""
+    <div style="display:flex; justify-content:center;">
+        <table style="border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{HOME_TEAM_COLOR};">{home_col}</th>
+                    <th style="padding:{header_padding}; border:none;"></th>
+                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{AWAY_TEAM_COLOR};">{away_col}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _split_date_and_kickoff(date_str):
     """
     matches.match_date is either a full 'YYYY-MM-DD HH:MM' kickoff string
@@ -555,8 +597,8 @@ def _render_match_detail(db, match_id):
     </div>
     """, unsafe_allow_html=True)
 
-    mt_totals, mt_players, mt_shots, mt_passmap, mt_passrecv, mt_touchmap = st.tabs(
-        ["Team Totals", "Player Stats", "Shots", "Pass Map", "Passes Received", "Touch Map"]
+    mt_totals, mt_players, mt_shots, mt_advanced, mt_passmap, mt_passrecv, mt_touchmap = st.tabs(
+        ["Team Totals", "Player Stats", "Shots", "Advanced Stats", "Pass Map", "Passes Received", "Touch Map"]
     )
 
     with mt_totals:
@@ -564,41 +606,8 @@ def _render_match_detail(db, match_id):
         if match_summary.empty:
             st.info("No team stats saved for this match.")
         else:
-            # Rendered as a plain HTML table (rather than st.dataframe) to
-            # get styling st.dataframe can't do: a blank header cell where
-            # the literal word 'Metric' used to show, home/away column
-            # headers colored in the same red/blue as the page header
-            # above, no cell borders at all (so it reads as a clean graphic
-            # rather than a spreadsheet grid), and a bigger font, centered
-            # on the page. fetch_match_summary()'s own column names ARE the
-            # team names (see that function's docstring), so they're used
-            # directly here as both the HTML content and the row lookup
-            # keys below.
             home_col, metric_col, away_col = match_summary.columns
-            rows_html = "".join(
-                f"""<tr>
-                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em;">{r[home_col]}</td>
-                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em; color:#666;">{r[metric_col]}</td>
-                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em;">{r[away_col]}</td>
-                </tr>"""
-                for _, r in match_summary.iterrows()
-            )
-            st.markdown(f"""
-            <div style="display:flex; justify-content:center;">
-                <table style="border-collapse:collapse;">
-                    <thead>
-                        <tr>
-                            <th style="padding:14px 44px; border:none; font-size:1.3em; color:{HOME_TEAM_COLOR};">{home_col}</th>
-                            <th style="padding:14px 44px; border:none;"></th>
-                            <th style="padding:14px 44px; border:none; font-size:1.3em; color:{AWAY_TEAM_COLOR};">{away_col}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows_html}
-                    </tbody>
-                </table>
-            </div>
-            """, unsafe_allow_html=True)
+            _render_team_summary_table(match_summary, home_col, metric_col, away_col)
 
         # Full flattened stat breakdown (Possession/Passes/Tackles/Duels/
         # Physical performance/etc.) still available for anyone who wants
@@ -674,6 +683,35 @@ def _render_match_detail(db, match_id):
                 t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
                 st.dataframe(t_shots, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(t_shots))
+
+    with mt_advanced:
+        # 5 small Home/Metric/Away tables (Team Style, Shots, Expected
+        # Goals, Duels, Physical - see history_db._ADVANCED_STATS_TABLES),
+        # each in the same styling as the Team Totals tab's summary table
+        # via the shared _render_team_summary_table() helper, just smaller.
+        # Laid out up to 3 across per row (a second row picks up whatever's
+        # left) rather than one long vertical list.
+        advanced_tables = hdb.fetch_advanced_stats_tables(db, match_id)
+        table_items = list(advanced_tables.items())
+        for start in range(0, len(table_items), 3):
+            row_chunk = table_items[start:start + 3]
+            cols = st.columns(len(row_chunk))
+            for col, (title, tdf) in zip(cols, row_chunk):
+                with col:
+                    st.markdown(
+                        f"<div style='text-align:center; font-weight:bold; "
+                        f"font-size:1.05em; margin-bottom:4px;'>{title}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if tdf.empty:
+                        st.info("No data saved for this match.")
+                    else:
+                        home_col, metric_col, away_col = tdf.columns
+                        _render_team_summary_table(
+                            tdf, home_col, metric_col, away_col,
+                            header_font_size="1.0em", body_font_size="0.9em",
+                            cell_padding="6px 14px", header_padding="8px 14px",
+                        )
 
     matches_for_this_match = hdb.fetch_matches(db)
     matches_for_this_match = matches_for_this_match[matches_for_this_match["match_id"] == match_id]

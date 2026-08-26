@@ -869,6 +869,174 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     return pd.DataFrame(records, columns=cols)
 
 
+def _fmt_adv_plain_int(value):
+    """Formats a plain count (Shots, Duels won, Number of sprints, 10+ Pass
+    Sequences, ...) as a whole number - '-' if genuinely missing rather than
+    a misleading 0, matching _fmt_match_summary_value()'s convention."""
+    if value is None:
+        return "-"
+    try:
+        return str(int(round(float(value))))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_adv_decimal(value, dp=2):
+    """Formats a decimal stat (PPDA, Passes per Sequence, the xG family) to
+    a fixed number of decimal places. Handles FotMob's own xG fields, which
+    are already-formatted STRINGS like '1.01' rather than floats (see
+    fotmob_report._get_fotmob_stat_groups()'s raw JSON shape), just as
+    happily as WhoScored's own float fields."""
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.{dp}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_adv_percent(value, dp=1):
+    """Field Tilt - stored as a plain float (e.g. 62.3), '%' added here."""
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.{dp}f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_adv_metres(value, dp=1):
+    """Defensive Action Height - already stored in metres."""
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.{dp}f}m"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_adv_km_from_m(value, dp=1):
+    """FotMob's own Distance covered/Sprinting distance stats are published
+    in raw METRES (e.g. 118485) - converted to km here for a readable
+    scoreboard-style number ('118.5 km') rather than a 6-digit metre count."""
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value) / 1000:.{dp}f} km"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_adv_passthrough(value):
+    """FotMob already formats some stats as a ready-to-display string
+    ('28 (60%)' for Ground/Aerial duels won and Successful dribbles) -
+    passed straight through rather than reformatted."""
+    return "-" if value is None else str(value)
+
+
+# Each entry: (table title, [(display label, source namespace, source key,
+# formatter function), ...]). 'ws_totals'/'fm_totals' are the two namespaces
+# batch_lib.build_db_stats() saves under team_match_stats.extra_json per
+# team - 'ws_totals' is whoscored_report.compute_totals()'s output (Field
+# Tilt/PPDA/10+ Pass Sequences/Avg Passes per Sequence/Defensive Action
+# Height are WhoScored/Opta-style advanced metrics FotMob doesn't publish
+# at all), 'fm_totals' is fotmob_report.compute_totals()'s output
+# (everything else here is FotMob's own published stat, preferred over
+# recomputing it ourselves wherever FotMob publishes it at all - same
+# "trust FotMob's own number" reasoning as Total xG/Goals there). Backs
+# fetch_advanced_stats_tables() below - the match detail view's Advanced
+# Stats tab.
+_ADVANCED_STATS_TABLES = [
+    ("Team Style", [
+        ("Field Tilt", "ws_totals", "Field Tilt %", _fmt_adv_percent),
+        ("PPDA", "ws_totals", "PPDA", lambda v: _fmt_adv_decimal(v, 2)),
+        ("10+ Pass Sequences", "ws_totals", "10+ Pass Sequences", _fmt_adv_plain_int),
+        ("Passes per Sequence", "ws_totals", "Avg Passes per Sequence", lambda v: _fmt_adv_decimal(v, 2)),
+        ("Def Line Height", "ws_totals", "Defensive Action Height (m)", lambda v: _fmt_adv_metres(v, 1)),
+    ]),
+    ("Shots", [
+        ("Shots", "fm_totals", "Shots", _fmt_adv_plain_int),
+        ("Shots on Target", "fm_totals", "Shots on target", _fmt_adv_plain_int),
+        ("Shots Inside box", "fm_totals", "Shots inside box", _fmt_adv_plain_int),
+        ("Shots outside box", "fm_totals", "Shots outside box", _fmt_adv_plain_int),
+        ("Hit woodwork", "fm_totals", "Hit woodwork", _fmt_adv_plain_int),
+        ("Shots blocked", "fm_totals", "Blocked shots", _fmt_adv_plain_int),
+    ]),
+    ("Expected Goals", [
+        ("Total xG", "fm_totals", "Total xG", lambda v: _fmt_adv_decimal(v, 2)),
+        ("non-penalty xG", "fm_totals", "xG non-penalty", lambda v: _fmt_adv_decimal(v, 2)),
+        ("Post-Shot xG", "fm_totals", "xG on target (xGOT)", lambda v: _fmt_adv_decimal(v, 2)),
+        ("Open Play xG", "fm_totals", "xG open play", lambda v: _fmt_adv_decimal(v, 2)),
+        ("Set Piece xG", "fm_totals", "xG set play", lambda v: _fmt_adv_decimal(v, 2)),
+    ]),
+    ("Duels", [
+        ("Duels won", "fm_totals", "Duels won", _fmt_adv_plain_int),
+        ("Ground duels won", "fm_totals", "Ground duels won", _fmt_adv_passthrough),
+        ("Aerial duels won", "fm_totals", "Aerial duels won", _fmt_adv_passthrough),
+        ("Successful dribbles", "fm_totals", "Successful dribbles", _fmt_adv_passthrough),
+    ]),
+    ("Physical", [
+        ("Number of sprints", "fm_totals", "Number of sprints", _fmt_adv_plain_int),
+        ("Total sprinting distance", "fm_totals", "Sprinting distance", lambda v: _fmt_adv_km_from_m(v, 2)),
+        ("Total distance covered", "fm_totals", "Distance covered", lambda v: _fmt_adv_km_from_m(v, 1)),
+    ]),
+]
+
+
+def fetch_advanced_stats_tables(db: DB, match_id) -> dict:
+    """
+    The match detail view's Advanced Stats tab: five small Home/Metric/Away
+    tables (Team Style, Shots, Expected Goals, Duels, Physical), each shaped
+    exactly like fetch_match_summary()'s Team Totals table (the two team
+    names as the column headers, one row per stat, no separate 'Team' row)
+    so dashboard_app.py can render every one of them with that same shared
+    HTML-table styling helper - just smaller, laid out up to 3 across per
+    row. See _ADVANCED_STATS_TABLES above for the exact field-to-namespace/
+    key mapping and why each field lives where it does.
+
+    Returns an (insertion-ordered) dict of {table title: DataFrame}, always
+    all 5 titles even for a match with zero saved stats (each such
+    DataFrame is then empty) - dashboard_app.py can treat "no rows" as
+    "show an info box" uniformly rather than a missing dict key. A stat
+    this match's save doesn't have (an older save from before that stat was
+    captured, or a competition/match FotMob simply didn't publish it for)
+    shows as '-' per-cell rather than a misleading 0/blank row, same
+    convention as fetch_match_summary().
+    """
+    empty_result = {title: pd.DataFrame(columns=["Home", "Metric", "Away"])
+                     for title, _ in _ADVANCED_STATS_TABLES}
+
+    matches = fetch_matches(db)
+    match_row = matches[matches["match_id"] == str(match_id)]
+    if match_row.empty:
+        return empty_result
+    match_row = match_row.iloc[0]
+    home_team, away_team = match_row["home_team"], match_row["away_team"]
+    cols = [home_team, "Metric", away_team]
+
+    cur = db.execute("SELECT team, extra_json FROM team_match_stats WHERE match_id = ?", (str(match_id),))
+    stats_by_team = {}
+    for team, extra_json in cur.fetchall():
+        stats_by_team[team] = json.loads(extra_json) if extra_json else {}
+
+    home_extra = stats_by_team.get(home_team, {})
+    away_extra = stats_by_team.get(away_team, {})
+
+    result = {}
+    for title, fields in _ADVANCED_STATS_TABLES:
+        records = []
+        for label, namespace, key, fmt in fields:
+            home_val = (home_extra.get(namespace) or {}).get(key)
+            away_val = (away_extra.get(namespace) or {}).get(key)
+            records.append({
+                home_team: fmt(home_val),
+                "Metric": label,
+                away_team: fmt(away_val),
+            })
+        result[title] = pd.DataFrame(records, columns=cols)
+    return result
+
+
 def fetch_player_stats_for_match(db: DB, match_id) -> pd.DataFrame:
     """Every player's stats (flattened from extra_json) for ONE match."""
     cur = db.execute("""
