@@ -1108,8 +1108,32 @@ def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
 # the shots table rather than read as one of its own real columns.
 _COMBINED_SHOTS_DISPLAY_COLUMNS = [
     'Minute', 'Added Time', 'Player', 'Team', 'xG', 'PSxG', 'Outcome', 'Distance (yd)',
-    'Body Part', 'Situation', 'SCA1_Player', 'SCA1_Action', 'SCA2_Player', 'SCA2_Action',
+    'Body Part', 'Situation', 'SCA 1 (Player)', 'SCA 1 (Action)', 'SCA 2 (Player)', 'SCA 2 (Action)',
 ]
+
+
+def _fmt_shots_decimal(value):
+    """
+    Formats a Shots-tab xG/PSxG value to exactly two decimal places (e.g.
+    "0.34", "1.00") for display. A genuinely missing value (None/NaN) is
+    left as None rather than being coerced into a fabricated "0.00" -
+    compute_combined_shots() deliberately leaves a shot's FotMob-sourced
+    fields (including xG/PSxG) blank when that shot couldn't be matched to
+    a FotMob shot (e.g. a shot-count mismatch leaves the extra WhoScored
+    shot(s) without FotMob data), and this formatting step must preserve
+    that "genuinely unknown" signal rather than overwrite it.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return value
 
 
 def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
@@ -1146,16 +1170,16 @@ def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
             'Added Time': added_time,
             'Player': player,
             'Team': team,
-            'xG': xg,
-            'PSxG': xgot,
+            'xG': _fmt_shots_decimal(xg),
+            'PSxG': _fmt_shots_decimal(xgot),
             'Outcome': outcome,
             'Distance (yd)': extra.get('Distance (yd)'),
             'Body Part': body_part,
             'Situation': situation,
-            'SCA1_Player': extra.get('SCA1_Player'),
-            'SCA1_Action': extra.get('SCA1_Action'),
-            'SCA2_Player': extra.get('SCA2_Player'),
-            'SCA2_Action': extra.get('SCA2_Action'),
+            'SCA 1 (Player)': extra.get('SCA1_Player'),
+            'SCA 1 (Action)': extra.get('SCA1_Action'),
+            'SCA 2 (Player)': extra.get('SCA2_Player'),
+            'SCA 2 (Action)': extra.get('SCA2_Action'),
         })
     df = pd.DataFrame(records, columns=_COMBINED_SHOTS_DISPLAY_COLUMNS)
     if df.empty:
