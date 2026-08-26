@@ -25,8 +25,8 @@ Deploying to Streamlit Community Cloud:
        stack just to draw a pitch - that constant is now duplicated
        directly inside pitch_viz.py instead, so this app's dependency list
        stays genuinely minimal. See pitch_viz.py's own docstring for the
-       full story.) pitch_viz.plot_heatmap() (the Season Heat Map tab) needs
-       scipy - make sure requirements.txt includes it.
+       full story.) pitch_viz.plot_touch_map() (the Season Touch Map tab)
+       needs scipy - make sure requirements.txt includes it.
     2. On share.streamlit.io, deploy pointed at this file.
     3. In the app's "Secrets" settings, set:
            DATABASE_URL = "postgresql://user:pass@host:port/dbname"
@@ -55,7 +55,7 @@ import pandas as pd
 import streamlit as st
 
 import history_db as hdb
-from pitch_viz import (plot_pass_map, plot_heatmap, PASS_CATEGORY_COLORS, TITLE_COLOR,
+from pitch_viz import (plot_pass_map, plot_touch_map, PASS_CATEGORY_COLORS, TITLE_COLOR,
                        HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
@@ -247,7 +247,7 @@ def _render_pass_map(db, matches, mode):
                          title_suffix=title_suffix)
 
     png_buf = io.BytesIO()
-    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
     st.image(png_buf, width=420)
 
@@ -352,7 +352,7 @@ def _render_season_pass_map(db, mode):
                          subtitle=f"Season - {n_matches} match(es)")
 
     png_buf = io.BytesIO()
-    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
     st.image(png_buf, width=420)
 
@@ -369,13 +369,14 @@ def _render_season_pass_map(db, mode):
     plt.close(fig)
 
 
-def _render_season_heatmap(db):
+def _render_season_touchmap(db):
     """
-    Touch heat map aggregated across every published match - every touch a
+    Touch map aggregated across every published match - every touch a
     player's had, any event type (see whoscored_report.compute_all_touches()),
-    plotted as a smoothed density over one pitch. Only matches saved AFTER
-    the touches table existed have any rows here (see history_db.py's
-    schema docstring), so older published matches won't contribute.
+    plotted on one pitch, shaded with a smoothed density where there's
+    enough data to support one. Only matches saved AFTER the touches table
+    existed have any rows here (see history_db.py's schema docstring), so
+    older published matches won't contribute.
     """
     all_touches = hdb.fetch_touches(db)
     if all_touches.empty:
@@ -385,13 +386,13 @@ def _render_season_heatmap(db):
         )
         return
 
-    team_filter = _team_filter_picker(all_touches, "team", key="season_heatmap_team")
+    team_filter = _team_filter_picker(all_touches, "team", key="season_touchmap_team")
     scoped = all_touches if team_filter is None else all_touches[all_touches["team"] == team_filter]
     players = sorted(scoped["player"].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    player = st.selectbox("Player", players, key="season_heatmap_player")
+    player = st.selectbox("Player", players, key="season_touchmap_player")
 
     player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
     if player_touches.empty:
@@ -402,11 +403,11 @@ def _render_season_heatmap(db):
     st.metric("Matches", n_matches)
     stat_items = [(f"{len(player_touches)} Touches", TITLE_COLOR), (f"{n_matches} Matches", TITLE_COLOR)]
 
-    fig = plot_heatmap(player_touches, player, subtitle=f"Season - {n_matches} match(es)",
-                        stat_items=stat_items)
+    fig = plot_touch_map(player_touches, player, subtitle=f"Season - {n_matches} match(es)",
+                          stat_items=stat_items)
 
     png_buf = io.BytesIO()
-    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
     st.image(png_buf, width=420)
 
@@ -414,17 +415,17 @@ def _render_season_heatmap(db):
     fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
     download_buf.seek(0)
     st.download_button(
-        label="Download Season Heat Map (PNG)",
+        label="Download Season Touch Map (PNG)",
         data=download_buf,
-        file_name=f"{player.replace(' ', '_')}_season_heatmap.png",
+        file_name=f"{player.replace(' ', '_')}_season_touchmap.png",
         mime="image/png",
-        key="season_heatmap_download",
+        key="season_touchmap_download",
     )
     plt.close(fig)
 
 
-def _render_match_heatmap(db, match_id, home_team, away_team):
-    """Single-match touch heat map - same idea as _render_season_heatmap()
+def _render_match_touchmap(db, match_id, home_team, away_team):
+    """Single-match touch map - same idea as _render_season_touchmap()
     above, scoped to one match_id instead of the whole database."""
     touches = hdb.fetch_touches(db, match_id=match_id)
     if touches.empty:
@@ -437,12 +438,12 @@ def _render_match_heatmap(db, match_id, home_team, away_team):
     if not players:
         st.info("No players found in this match's touch data.")
         return
-    player = st.selectbox("Player", players, key="match_detail_heatmap_player")
+    player = st.selectbox("Player", players, key="match_detail_touchmap_player")
     player_touches = touches[touches["player"] == player]
 
-    fig = plot_heatmap(player_touches, player, home_name=home_team, away_name=away_team)
+    fig = plot_touch_map(player_touches, player, home_name=home_team, away_name=away_team)
     png_buf = io.BytesIO()
-    fig.savefig(png_buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
     st.image(png_buf, width=420)
 
@@ -450,11 +451,11 @@ def _render_match_heatmap(db, match_id, home_team, away_team):
     fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
     download_buf.seek(0)
     st.download_button(
-        label="Download Heat Map (PNG)",
+        label="Download Touch Map (PNG)",
         data=download_buf,
-        file_name=f"{player.replace(' ', '_')}_heatmap.png",
+        file_name=f"{player.replace(' ', '_')}_touchmap.png",
         mime="image/png",
-        key="match_detail_heatmap_download",
+        key="match_detail_touchmap_download",
     )
     plt.close(fig)
 
@@ -483,7 +484,7 @@ def _render_match_detail(db, match_id):
     """
     The 'full uploaded match report' a Fixtures row's link opens - every
     stat already stored for ONE match (team totals, player stats, shots,
-    Pass Map/Passes Received, Heat Map), built entirely from what's already
+    Pass Map/Passes Received, Touch Map), built entirely from what's already
     in the database. There's no original .xlsx workbook kept anywhere (see
     this module's own docstring) - this is a from-scratch render of the
     same underlying data, not a re-download of the file that was uploaded.
@@ -554,8 +555,8 @@ def _render_match_detail(db, match_id):
     </div>
     """, unsafe_allow_html=True)
 
-    mt_totals, mt_players, mt_shots, mt_passmap, mt_passrecv, mt_heatmap = st.tabs(
-        ["Team Totals", "Player Stats", "Shots", "Pass Map", "Passes Received", "Heat Map"]
+    mt_totals, mt_players, mt_shots, mt_passmap, mt_passrecv, mt_touchmap = st.tabs(
+        ["Team Totals", "Player Stats", "Shots", "Pass Map", "Passes Received", "Touch Map"]
     )
 
     with mt_totals:
@@ -668,10 +669,6 @@ def _render_match_detail(db, match_id):
         if shots.empty:
             st.info("No shots saved for this match.")
         else:
-            st.write(
-                "One row per shot - WhoScored's own shot list (Player/Distance/Body Part/SCA1/SCA2), "
-                "with FotMob's own Minute/Added Time and xG/PSxG/Outcome/Situation attached to each row."
-            )
             for t in [home_team, away_team]:
                 st.subheader(t)
                 t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
@@ -687,8 +684,8 @@ def _render_match_detail(db, match_id):
     with mt_passrecv:
         _render_pass_map(db, matches_for_this_match, mode="receiver")
 
-    with mt_heatmap:
-        _render_match_heatmap(db, match_id, row["Home Team"], row["Away Team"])
+    with mt_touchmap:
+        _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"])
 
 
 # ============================================================
@@ -705,16 +702,12 @@ else:
     st.title("Match History Dashboard")
 
     (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv,
-     tab_season_passmap, tab_season_passrecv, tab_season_heatmap) = st.tabs([
+     tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
         "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
-        "Passes Received", "Season Pass Map", "Season Passes Received", "Season Heat Map",
+        "Passes Received", "Season Pass Map", "Season Passes Received", "Season Touch Map",
     ])
 
     with tab_team_totals:
-        st.write(
-            "Season-cumulative team totals across every match saved to the database - this is the "
-            "tab the dashboard opens to by default."
-        )
         league_table = hdb.fetch_league_table(db)
         if league_table.empty:
             st.info(
@@ -868,11 +861,19 @@ else:
                 # displayed column) so it renders as a real clickable link via
                 # LinkColumn below, not a big unreadable URL string.
                 display_df["Report"] = display_df["match_id"].apply(lambda m: f"?match_id={m}")
-                display_df = display_df.drop(columns=["match_id"])
+                # Season is still a filter above, just not its own column here -
+                # with (currently) only one season saved, showing it in every
+                # row is redundant.
+                display_df = display_df.drop(columns=["match_id", "Season"])
+                # use_container_width=False (rather than True) so columns size
+                # to their actual content instead of stretching to fill the
+                # page - same "condense the dead space" fix used elsewhere in
+                # this app (League Table, Team Stats, match report tables).
                 st.dataframe(
                     display_df,
-                    use_container_width=True,
+                    use_container_width=False,
                     hide_index=True,
+                    height=_no_scroll_height(display_df),
                     column_config={
                         "Home xG": st.column_config.NumberColumn("Home xG", format="%.2f"),
                         "Away xG": st.column_config.NumberColumn("Away xG", format="%.2f"),
@@ -935,11 +936,6 @@ else:
                             st.line_chart(chart_df)
 
     with tab_shots:
-        st.write(
-            "Season-cumulative shot totals by situation type, summed across every match saved to the "
-            "database - **For** is a team's own shots, **Against** is shots faced from whichever team "
-            "they played in the same matches."
-        )
         for_df, against_df = hdb.fetch_season_shot_totals(db)
         if for_df.empty and against_df.empty:
             st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
@@ -975,40 +971,16 @@ else:
                 st.dataframe(_team_totals_for(against_df), use_container_width=True, hide_index=True)
 
     with tab_passmap:
-        st.write(
-            "Every pass attempted by one player in a saved match, colored by outcome: **completed**, "
-            "**incomplete**, **progressive**, or **key pass (shot assist)**. Same chart as "
-            "streamlit_app.py's live Pass Map tab, read from whatever's already been published here."
-        )
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
 
     with tab_passrecv:
-        st.write(
-            "Every COMPLETED pass received by one player in a saved match, plotted at the spot they "
-            "received it. Incomplete passes aren't shown - they were never actually received by anyone."
-        )
         _render_pass_map(db, hdb.fetch_matches(db), mode="receiver")
 
     with tab_season_passmap:
-        st.write(
-            "Every pass a player has attempted across EVERY match saved to the database so far, "
-            "plotted on one pitch - the same coloring as the single-match Pass Map, aggregated into a "
-            "season-long shape. Grows automatically as you save more matches."
-        )
         _render_season_pass_map(db, mode="passer")
 
     with tab_season_passrecv:
-        st.write(
-            "Every COMPLETED pass a player has received across every saved match, aggregated the same "
-            "way as the Season Pass Map."
-        )
         _render_season_pass_map(db, mode="receiver")
 
-    with tab_season_heatmap:
-        st.write(
-            "A smoothed density of every touch a player's had on the ball - any event, not just passes "
-            "- across every saved match, showing where on the pitch they're most involved over a "
-            "season. Only matches saved after this feature was added contribute (see the info message "
-            "below if it looks empty)."
-        )
-        _render_season_heatmap(db)
+    with tab_season_touchmap:
+        _render_season_touchmap(db)

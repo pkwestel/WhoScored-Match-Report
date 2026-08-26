@@ -87,18 +87,18 @@ PASS_CATEGORY_STYLE = {
 # of ordinary completed passes overlap them.
 PASS_CATEGORY_DRAW_ORDER = ["Incomplete", "Completed", "Progressive", "Key Pass"]
 
-# Heat map colormap - reuses colors already established elsewhere in this
+# Touch map colormap - reuses colors already established elsewhere in this
 # palette (the Progressive blue and Incomplete orange from PASS_CATEGORY_
 # COLORS, plus the Key Pass purple as the "hottest" end) rather than
 # introducing an unrelated new hue just for this one chart. set_bad() makes
-# masked-out (low-density) cells fully transparent, so the heat map only
-# tints the pitch where touches are actually concentrated - see
-# plot_heatmap()'s masking below for why that matters.
-HEATMAP_CMAP = mcolors.LinearSegmentedColormap.from_list(
+# masked-out (low-density) cells fully transparent, so the density shading
+# only tints the pitch where touches are actually concentrated - see
+# plot_touch_map()'s masking below for why that matters.
+TOUCHMAP_CMAP = mcolors.LinearSegmentedColormap.from_list(
     "kwest_heat", ["#2f9bf0", "#d9754a", "#7b1fa2"]
 )
-HEATMAP_CMAP.set_bad(alpha=0)
-HEATMAP_POINT_COLOR = "#7b1fa2"  # fallback scatter color when there's too little data for a real KDE
+TOUCHMAP_CMAP.set_bad(alpha=0)
+TOUCHMAP_POINT_COLOR = "#7b1fa2"  # fallback scatter color when there's too little data for a real KDE
 
 # Home/away team name colors for the subtitle line under the main title
 # (e.g. "Arsenal vs Chelsea") - per request, so the two team names read as
@@ -160,7 +160,7 @@ def _to_m_y(y):
     vertically with their attack going up - which requires this flip.
     Confirmed against a real match where a player's well-known real-life
     wing (right) was rendering on the wrong side (image-left) before this
-    fix - every Pass Map/Passes Received/Heat Map chart drawn before this
+    fix - every Pass Map/Passes Received/Touch Map chart drawn before this
     was mirrored left-right, for every player, on both teams.
     """
     return (100.0 - y) / 100.0 * PITCH_WID_M
@@ -384,13 +384,14 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     return fig
 
 
-def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
-                  title_suffix="Heat Map", subtitle=None, stat_items=None):
+def plot_touch_map(touches_df, player_name, home_name=None, away_name=None,
+                    title_suffix="Touch Map", subtitle=None, stat_items=None):
     """
-    Touch heat map: a smoothed density estimate (scipy's gaussian_kde,
-    evaluated on a grid and drawn with imshow - the standard way soccer
-    touch heat maps are rendered) over every (x, y) in touches_df, on the
-    same pitch/logo/watermark as plot_pass_map() for visual consistency.
+    Touch map: every (x, y) touch location in touches_df plotted on the
+    pitch, shaded with a smoothed density estimate (scipy's gaussian_kde,
+    evaluated on a grid and drawn with imshow) when there's enough data to
+    support one, on the same pitch/logo/watermark as plot_pass_map() for
+    visual consistency.
     touches_df needs 'x' and 'y' columns, normalized 0-100 (whoscored_
     report.compute_all_touches()'s own output, or history_db.fetch_touches()'s -
     single match or, with rows from several match_ids concatenated
@@ -447,7 +448,7 @@ def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
             kde = gaussian_kde(np.vstack([xs, ys]))
             grid_x, grid_y = np.mgrid[0:width:100j, 0:length:154j]
             density = kde(np.vstack([grid_x.ravel(), grid_y.ravel()])).reshape(grid_x.shape)
-            # Mask out the low end of the density range so the heat map only
+            # Mask out the low end of the density range so the shading only
             # tints the pitch where touches are actually concentrated - a
             # Gaussian KDE's support is technically the whole plane, so
             # without this the entire pitch would show a faint tint even far
@@ -455,12 +456,12 @@ def plot_heatmap(touches_df, player_name, home_name=None, away_name=None,
             threshold = density.max() * 0.12
             density_masked = np.ma.masked_where(density < threshold, density)
             ax.imshow(density_masked.T, origin="lower", extent=[0, width, 0, length],
-                      cmap=HEATMAP_CMAP, alpha=0.85, zorder=1.2, aspect="auto")
+                      cmap=TOUCHMAP_CMAP, alpha=0.85, zorder=1.2, aspect="auto")
             drew_kde = True
         except Exception:
             pass
     if not drew_kde:
-        ax.scatter(xs, ys, s=70, color=HEATMAP_POINT_COLOR, alpha=0.55,
+        ax.scatter(xs, ys, s=70, color=TOUCHMAP_POINT_COLOR, alpha=0.55,
                    edgecolors="white", linewidths=0.8, zorder=2)
 
     fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=20,
