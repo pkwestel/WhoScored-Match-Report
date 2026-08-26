@@ -501,7 +501,8 @@ def _render_match_detail(db, match_id):
         if match_summary.empty:
             st.info("No team stats saved for this match.")
         else:
-            st.dataframe(match_summary, use_container_width=False, hide_index=True)
+            st.dataframe(match_summary, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(match_summary))
 
         # Full flattened stat breakdown (Possession/Passes/Tackles/Duels/
         # Physical performance/etc.) still available for anyone who wants
@@ -512,7 +513,8 @@ def _render_match_detail(db, match_id):
             if team_stats.empty:
                 st.info("No team stats saved for this match.")
             else:
-                st.dataframe(team_stats, use_container_width=False, hide_index=True)
+                st.dataframe(team_stats, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(team_stats))
 
     with mt_players:
         home_team, away_team = row["Home Team"], row["Away Team"]
@@ -537,13 +539,15 @@ def _render_match_detail(db, match_id):
         if tables["home"].empty:
             st.info(f"No {category.lower()} saved for {home_team} in this match.")
         else:
-            st.dataframe(tables["home"], use_container_width=False, hide_index=True)
+            st.dataframe(tables["home"], use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(tables["home"]))
 
         st.caption(away_team)
         if tables["away"].empty:
             st.info(f"No {category.lower()} saved for {away_team} in this match.")
         else:
-            st.dataframe(tables["away"], use_container_width=False, hide_index=True)
+            st.dataframe(tables["away"], use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(tables["away"]))
 
         # Full flattened stat breakdown - every namespace, every player -
         # still available for anyone who wants more than the 5 category
@@ -554,7 +558,8 @@ def _render_match_detail(db, match_id):
             if player_stats.empty:
                 st.info("No player stats saved for this match.")
             else:
-                st.dataframe(player_stats, use_container_width=False, hide_index=True)
+                st.dataframe(player_stats, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(player_stats))
 
     with mt_shots:
         # Same output as the combined report's own "Shot Creating Actions"
@@ -575,15 +580,8 @@ def _render_match_detail(db, match_id):
             for t in [home_team, away_team]:
                 st.subheader(t)
                 t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
-                st.dataframe(t_shots, use_container_width=False, hide_index=True)
-
-                top3 = (t_shots[t_shots["Situation"] != "Penalty"][["Minute", "Player", "xG"]]
-                        .dropna(subset=["xG"])
-                        .sort_values("xG", ascending=False)
-                        .head(3)
-                        .reset_index(drop=True))
-                st.caption("Top 3 Shots by xG")
-                st.dataframe(top3, use_container_width=False, hide_index=True)
+                st.dataframe(t_shots, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(t_shots))
 
     matches_for_this_match = hdb.fetch_matches(db)
     matches_for_this_match = matches_for_this_match[matches_for_this_match["match_id"] == match_id]
