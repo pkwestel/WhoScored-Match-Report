@@ -243,7 +243,9 @@ if report:
         for t in on_off_teams:
             st.subheader(t)
             st.dataframe(
-                on_off[on_off["Team"] == t].drop(columns=["Team"]).reset_index(drop=True),
+                wr.on_off_display_columns(
+                    on_off[on_off["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
+                ),
                 use_container_width=True,
             )
     with tabP:
@@ -262,6 +264,7 @@ if report:
         if options:
             selected_label = st.selectbox("Player", options)
             selected_player = label_to_player[selected_label]
+            selected_player_team = selected_label.split(" — ", 1)[0]
             player_passes = wr.get_player_passes(df, selected_player)
 
             if player_passes.empty:
@@ -283,8 +286,8 @@ if report:
                     (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
                     (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
-                fig = plot_pass_map(player_passes, selected_player, home_name, away_name,
-                                     stat_items, title_suffix="Pass Map")
+                fig = plot_pass_map(player_passes, selected_player, selected_player_team, home_name,
+                                     away_name, stat_items, title_suffix="Pass Map")
 
                 # Rendered as a fixed-width image (rather than st.pyplot's
                 # default full-column-width behavior) so the pitch shows up
@@ -327,6 +330,7 @@ if report:
         if options_pr:
             selected_label_pr = st.selectbox("Player", options_pr, key="passes_received_player")
             selected_player_pr = label_to_player_pr[selected_label_pr]
+            selected_player_pr_team = selected_label_pr.split(" — ", 1)[0]
             passes_received = wr.get_player_passes_received(df, selected_player_pr)
 
             if passes_received.empty:
@@ -345,8 +349,8 @@ if report:
                     (f"{progressive_pr} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
                     (f"{key_passes_pr} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
-                fig_pr = plot_pass_map(passes_received, selected_player_pr, home_name, away_name,
-                                        stat_items_pr, title_suffix="Passes Received")
+                fig_pr = plot_pass_map(passes_received, selected_player_pr, selected_player_pr_team,
+                                        home_name, away_name, stat_items_pr, title_suffix="Passes Received")
 
                 png_buf_pr = io.BytesIO()
                 fig_pr.savefig(png_buf_pr, format="png", dpi=150, facecolor=fig_pr.get_facecolor())

@@ -212,6 +212,10 @@ def _render_pass_map(db, matches, mode):
 
     home_team = matches.loc[matches["match_id"] == match_id, "home_team"].iloc[0]
     away_team = matches.loc[matches["match_id"] == match_id, "away_team"].iloc[0]
+    match_date_raw = matches.loc[matches["match_id"] == match_id, "match_date"].iloc[0]
+    match_date, _ = _split_date_and_kickoff(match_date_raw)
+    player_team = (player_passes["team"].iloc[0]
+                    if "team" in player_passes.columns and not player_passes.empty else None)
 
     total = len(player_passes)
     progressive = int(player_passes["is_progressive"].sum())
@@ -243,8 +247,8 @@ def _render_pass_map(db, matches, mode):
         ]
         title_suffix = "Passes Received"
 
-    fig = plot_pass_map(player_passes, player, home_team, away_team, stat_items,
-                         title_suffix=title_suffix)
+    fig = plot_pass_map(player_passes, player, player_team, home_team, away_team, stat_items,
+                         title_suffix=title_suffix, match_date=match_date)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -348,8 +352,18 @@ def _render_season_pass_map(db, mode):
         ]
         title_suffix = "Season Passes Received"
 
-    fig = plot_pass_map(player_passes, player, None, None, stat_items, title_suffix=title_suffix,
-                         subtitle=f"Season - {n_matches} match(es)")
+    # team_filter is the team this player's data was scoped to, if the
+    # picker above was used - otherwise (a player who's played for more
+    # than one team this season, "All teams" selected) fall back to
+    # whichever team shows up most often in their passes, rather than
+    # leaving the title's '({team})' blank.
+    player_team = team_filter or (
+        player_passes["team"].mode().iloc[0] if "team" in player_passes.columns and not player_passes.empty
+        else None
+    )
+
+    fig = plot_pass_map(player_passes, player, player_team, None, None, stat_items,
+                         title_suffix=title_suffix, subtitle=f"Season - {n_matches} match(es)")
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -403,8 +417,17 @@ def _render_season_touchmap(db):
     st.metric("Matches", n_matches)
     stat_items = [(f"{len(player_touches)} Touches", TITLE_COLOR), (f"{n_matches} Matches", TITLE_COLOR)]
 
-    fig = plot_touch_map(player_touches, player, subtitle=f"Season - {n_matches} match(es)",
-                          stat_items=stat_items)
+    # team_filter is the team this player's data was scoped to, if the
+    # picker above was used - otherwise (a player who's played for more
+    # than one team this season, "All teams" selected) fall back to
+    # whichever team shows up most often in their touches.
+    player_team = team_filter or (
+        player_touches["team"].mode().iloc[0] if "team" in player_touches.columns and not player_touches.empty
+        else None
+    )
+
+    fig = plot_touch_map(player_touches, player, player_team=player_team,
+                          subtitle=f"Season - {n_matches} match(es)", stat_items=stat_items)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -424,7 +447,7 @@ def _render_season_touchmap(db):
     plt.close(fig)
 
 
-def _render_match_touchmap(db, match_id, home_team, away_team):
+def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
     """Single-match touch map - same idea as _render_season_touchmap()
     above, scoped to one match_id instead of the whole database."""
     touches = hdb.fetch_touches(db, match_id=match_id)
@@ -440,8 +463,12 @@ def _render_match_touchmap(db, match_id, home_team, away_team):
         return
     player = st.selectbox("Player", players, key="match_detail_touchmap_player")
     player_touches = touches[touches["player"] == player]
+    player_team = (player_touches["team"].iloc[0]
+                    if "team" in player_touches.columns and not player_touches.empty else None)
+    date_part, _ = _split_date_and_kickoff(match_date)
 
-    fig = plot_touch_map(player_touches, player, home_name=home_team, away_name=away_team)
+    fig = plot_touch_map(player_touches, player, player_team=player_team,
+                          home_name=home_team, away_name=away_team, match_date=date_part)
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
@@ -723,7 +750,7 @@ def _render_match_detail(db, match_id):
         _render_pass_map(db, matches_for_this_match, mode="receiver")
 
     with mt_touchmap:
-        _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"])
+        _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"], row["Date"])
 
 
 # ============================================================

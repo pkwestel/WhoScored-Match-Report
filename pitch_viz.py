@@ -105,6 +105,47 @@ TOUCHMAP_POINT_COLOR = "#7b1fa2"  # fallback scatter color when there's too litt
 # clearly distinct at a glance rather than one flat color.
 HOME_TEAM_COLOR = "#DC143C"  # Crimson
 AWAY_TEAM_COLOR = "#1E90FF"  # Dodger Blue - more saturated/vivid than Cornflower Blue, still pops on white
+ROYAL_BLUE = "#4169E1"  # a deliberately different blue from AWAY_TEAM_COLOR - see _team_name_color() below
+
+# Player-name-line team colors (per request): a short explicit list of
+# clubs get their own distinct color on the Pass Map/Passes Received/Touch
+# Map title's player-name line, instead of the default black. Matched by
+# lowercase SUBSTRING rather than an exact-name lookup, since WhoScored and
+# FotMob don't always agree on a club's exact display name (e.g. "Manchester
+# United" vs "Man Utd" - see combined_report.TEAM_NAME_ALIASES for the
+# canonical version of this same problem elsewhere in the project) - so
+# "Man Utd", "Man United", and "Manchester United" all resolve the same way
+# regardless of which exact spelling this match's saved data happens to use.
+# Deliberately self-contained rather than importing combined_report.py's own
+# canonical_team_name() - that module imports whoscored_report.py (and
+# transitively selenium/fake_useragent), which this module's own docstring
+# above explains dashboard_app.py can never pull in.
+_RED_CLUB_MARKERS = [
+    "arsenal", "liverpool", "brentford", "forest", "sunderland",
+    "man utd", "man united", "manchester united",
+]
+_BLUE_CLUB_MARKERS = [
+    "chelsea", "brighton", "ipswich", "crystal palace", "everton", "coventry",
+    "man city", "manchester city",
+]
+
+
+def _team_name_color(team_name):
+    """
+    Color for the player-name-line's '({team})' text: HOME_TEAM_COLOR (the
+    same red used elsewhere) for Man Utd/Arsenal/Liverpool/Brentford/
+    Nottingham Forest/Sunderland, ROYAL_BLUE for Chelsea/Man City/Brighton/
+    Ipswich/Crystal Palace/Everton/Coventry, and plain TITLE_COLOR (black)
+    for every other club - per request.
+    """
+    if not team_name:
+        return TITLE_COLOR
+    name = team_name.strip().lower()
+    if any(marker in name for marker in _RED_CLUB_MARKERS):
+        return HOME_TEAM_COLOR
+    if any(marker in name for marker in _BLUE_CLUB_MARKERS):
+        return ROYAL_BLUE
+    return TITLE_COLOR
 
 # Title/subtitle/legend font (per request - Arial specifically, not
 # matplotlib's default DejaVu Sans). Assumes Arial is actually installed on
@@ -250,37 +291,73 @@ def draw_pitch(ax):
     watermark_txt.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground=PITCH_DARK)])
 
 
-def _draw_split_subtitle(fig, y, parts, fontsize=14):
-    """
-    Draws one horizontally-centered line of text made of several colored
-    pieces (e.g. the home team's name, then " vs ", then the away team's
-    name, each in its own color) - matplotlib has no built-in way to color
-    parts of a single Text object differently, so each piece gets its own
-    fig.text() call, measured with the figure's renderer and then
-    repositioned side-by-side so the whole line still reads as one
-    centered unit rather than each piece being independently centered.
-    parts is a list of (text, color) tuples; every piece is drawn bold in
-    PASS_MAP_FONT at the given fontsize.
-    """
-    fig.canvas.draw()  # ensures a renderer exists, sized to this exact figure
-    renderer = fig.canvas.get_renderer()
-    texts, widths = [], []
-    for text, color in parts:
-        t = fig.text(0, y, text, color=color, fontsize=fontsize, fontweight="bold",
-                      fontname=PASS_MAP_FONT, ha="left", va="center")
-        bbox = t.get_window_extent(renderer)
-        widths.append(bbox.width / fig.bbox.width)
-        texts.append(t)
-    total_width = sum(widths)
-    cur_x = 0.5 - total_width / 2
-    for t, w in zip(texts, widths):
-        t.set_x(cur_x)
-        cur_x += w
-    return texts
+# Title block layout, in inches from the top of the figure - shared by
+# plot_pass_map() and plot_touch_map() via _draw_title_block() below. Line 3
+# sits noticeably further from Line 2 than Line 2 does from Line 1 (per
+# request to "skip a line" there), and TOP_PAD_IN leaves a little extra
+# clearance below Line 3 so it reads as sitting just above the pitch rather
+# than touching it.
+_TITLE_LINE1_Y_IN = 0.32   # "{Player Name} ({Team})"
+_TITLE_LINE2_Y_IN = 0.66   # "vs {Opponent} (H/A)", or the caller's own subtitle (season views)
+_TITLE_LINE3_Y_IN = 1.28   # title_suffix ("Pass Map" / "Passes Received" / "Touch Map")
+_TITLE_DATE_Y_IN = 0.30    # top-right corner match date, roughly level with Line 1
+_TITLE_TOP_PAD_IN = 1.55   # total reserved top margin - see callers' fig_h calculation
 
 
-def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, title_suffix="Pass Map",
-                   subtitle=None):
+def _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
+                       subtitle, title_suffix, match_date):
+    """
+    Draws the shared 3-line title (plus an optional top-right date) used by
+    both plot_pass_map() and plot_touch_map():
+
+        {Player Name} ({Team})          <- colored per _team_name_color()
+        vs {Opponent} (H/A)             <- smaller, plain TITLE_COLOR
+        [blank line]
+        {title_suffix}                  <- e.g. "Pass Map", just above the pitch
+
+    with the match date (if given) in small text in the figure's top-right
+    corner.
+
+    Line 2 defaults to "vs {opponent} (H/A)" when home_name/away_name are
+    both given AND no explicit subtitle was passed - player_team is matched
+    against home_name/away_name to figure out which one is the opponent and
+    whether this was a home or away match for them. Passing an explicit
+    subtitle (e.g. "Season - 12 match(es)") overrides this entirely, for a
+    season-aggregated view where there's no single opponent/home-or-away to
+    name (see dashboard_app.py's season tabs) - match_date should also be
+    omitted (None) in that case, since there's no one fixture date either.
+    """
+    title_line = f"{player_name} ({player_team})" if player_team else player_name
+    fig.text(0.5, 1 - _TITLE_LINE1_Y_IN / fig_h, title_line, color=_team_name_color(player_team),
+              fontsize=20, fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
+
+    if subtitle is not None:
+        line2 = subtitle
+    elif home_name and away_name:
+        if player_team == home_name:
+            line2 = f"vs {away_name} (H)"
+        elif player_team == away_name:
+            line2 = f"vs {home_name} (A)"
+        else:
+            # Genuine team-name mismatch (player_team matches neither side) -
+            # falls back to the plain "{home} vs {away}" this project has
+            # always shown in that case, rather than guessing wrong.
+            line2 = f"{home_name} vs {away_name}"
+    else:
+        line2 = ""
+    fig.text(0.5, 1 - _TITLE_LINE2_Y_IN / fig_h, line2, color=TITLE_COLOR, fontsize=13,
+              fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
+
+    fig.text(0.5, 1 - _TITLE_LINE3_Y_IN / fig_h, title_suffix, color=TITLE_COLOR, fontsize=15,
+              fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
+
+    if match_date:
+        fig.text(0.97, 1 - _TITLE_DATE_Y_IN / fig_h, match_date, color=TITLE_COLOR, fontsize=9,
+                  fontweight="normal", fontname=PASS_MAP_FONT, ha="right", va="center")
+
+
+def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, stat_items,
+                   title_suffix="Pass Map", subtitle=None, match_date=None):
     """
     Shared drawing code for both the outgoing Pass Map and the Passes
     Received map - same pitch/logo/watermark, same per-category coloring
@@ -291,15 +368,15 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     track the same stats (e.g. "Completion %" doesn't apply to a received-
     passes view, where everything shown is already complete by definition).
 
-    subtitle overrides the default "{home_name} vs {away_name}" subtitle -
-    pass home_name=None, away_name=None, subtitle="Season - N matches" for a
+    Title is 3 lines (see _draw_title_block()'s docstring for the full
+    layout): "{player_name} ({player_team})" colored per _team_name_color(),
+    then "vs {opponent} (H/A)" (or an explicit subtitle override - pass
+    home_name=None, away_name=None, subtitle="Season - N matches" for a
     season-long map aggregated across several matches, where there's no one
-    fixture to name (see dashboard_app.py's season tabs). When the default
-    subtitle IS used (subtitle=None with both team names given), the home
-    team's name is drawn in HOME_TEAM_COLOR (Crimson) and the away team's in
-    AWAY_TEAM_COLOR (Powder Blue) rather than one flat color - an explicit
-    subtitle string is always drawn as plain bold text, since there's no
-    single home/away pair to color in a season-aggregated view.
+    fixture/opponent to name - see dashboard_app.py's season tabs), then
+    title_suffix just above the pitch. match_date (if given) is drawn small
+    in the top-right corner - omit it for season views, which have no
+    single fixture date either.
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
@@ -310,8 +387,7 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     # margins (not a fraction of the whole figure) so there's no dead space
     # between the pitch and any of them.
     pitch_h = 10.0
-    top_pad_in = 0.95   # suptitle + subtitle only (no key, no stat line up here anymore) - bumped
-                        # up from 0.8 to give the now-larger title/subtitle text more headroom
+    top_pad_in = _TITLE_TOP_PAD_IN  # 3-line title block + top-right date - see that constant's comment
     bottom_pad_in = 0.5  # one row of stat-line text, below the pitch (no key anymore)
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
@@ -356,20 +432,8 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
             ax.scatter([x1], [y1], s=38, facecolors="white", edgecolors=color,
                        linewidths=1.3, alpha=alpha, zorder=3)
 
-    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=20,
-                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.28 / fig_h)
-    subtitle_y = 1 - 0.78 / fig_h
-    if subtitle is None and home_name and away_name:
-        # Default case: color the home/away team names distinctly rather
-        # than one flat-colored "{home} vs {away}" string.
-        _draw_split_subtitle(fig, subtitle_y, [
-            (home_name, HOME_TEAM_COLOR), (" vs ", TITLE_COLOR), (away_name, AWAY_TEAM_COLOR),
-        ])
-    else:
-        if subtitle is None:
-            subtitle = f"{home_name} vs {away_name}"
-        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=14, fontweight="bold",
-                  fontname=PASS_MAP_FONT, ha="center")
+    _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
+                       subtitle, title_suffix, match_date)
 
     # Stat line: moved below the pitch (per request - the color key that
     # used to live down here is gone entirely). Caller decides exactly which
@@ -384,8 +448,8 @@ def plot_pass_map(passes_df, player_name, home_name, away_name, stat_items, titl
     return fig
 
 
-def plot_touch_map(touches_df, player_name, home_name=None, away_name=None,
-                    title_suffix="Touch Map", subtitle=None, stat_items=None):
+def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, away_name=None,
+                    title_suffix="Touch Map", subtitle=None, stat_items=None, match_date=None):
     """
     Touch map: every (x, y) touch location in touches_df plotted on the
     pitch, shaded with a smoothed density estimate (scipy's gaussian_kde,
@@ -397,16 +461,19 @@ def plot_touch_map(touches_df, player_name, home_name=None, away_name=None,
     single match or, with rows from several match_ids concatenated
     together, a season-long map over the exact same pitch).
 
-    home_name/away_name build the default "{home} vs {away}" subtitle for
-    a single match; pass subtitle= directly instead for a season view
-    (e.g. "Season - 12 matches"), where there's no one fixture to name.
-    stat_items defaults to a single "N Touches" stat if not given - pass
-    your own list of (text, color) tuples for anything more specific.
+    Title is the same 3-line block as plot_pass_map() (see
+    _draw_title_block()'s docstring) - home_name/away_name build the
+    default "vs {opponent} (H/A)" second line for a single match; pass
+    subtitle= directly instead for a season view (e.g. "Season - 12
+    matches"), where there's no one fixture/opponent to name, and leave
+    match_date=None there too (no single fixture date). stat_items defaults
+    to a single "N Touches" stat if not given - pass your own list of
+    (text, color) tuples for anything more specific.
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
     pitch_h = 10.0
-    top_pad_in = 0.95   # bumped up from 0.8 to give the now-larger title/subtitle text more headroom
+    top_pad_in = _TITLE_TOP_PAD_IN  # 3-line title block + top-right date - see that constant's comment
     bottom_pad_in = 0.5
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
@@ -464,17 +531,8 @@ def plot_touch_map(touches_df, player_name, home_name=None, away_name=None,
         ax.scatter(xs, ys, s=70, color=TOUCHMAP_POINT_COLOR, alpha=0.55,
                    edgecolors="white", linewidths=0.8, zorder=2)
 
-    fig.suptitle(f"{player_name} - {title_suffix}", color=TITLE_COLOR, fontsize=20,
-                 fontweight="bold", fontname=PASS_MAP_FONT, y=1 - 0.28 / fig_h)
-    subtitle_y = 1 - 0.78 / fig_h
-    if subtitle is None and home_name and away_name:
-        _draw_split_subtitle(fig, subtitle_y, [
-            (home_name, HOME_TEAM_COLOR), (" vs ", TITLE_COLOR), (away_name, AWAY_TEAM_COLOR),
-        ])
-    else:
-        subtitle = subtitle if subtitle is not None else ""
-        fig.text(0.5, subtitle_y, subtitle, color=TITLE_COLOR, fontsize=14, fontweight="bold",
-                  fontname=PASS_MAP_FONT, ha="center")
+    _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
+                       subtitle, title_suffix, match_date)
 
     if stat_items is None:
         stat_items = [(f"{len(touches_df)} Touches", TITLE_COLOR)]
