@@ -55,7 +55,8 @@ import pandas as pd
 import streamlit as st
 
 import history_db as hdb
-from pitch_viz import plot_pass_map, plot_heatmap, PASS_CATEGORY_COLORS, TITLE_COLOR
+from pitch_viz import (plot_pass_map, plot_heatmap, PASS_CATEGORY_COLORS, TITLE_COLOR,
+                       HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
 
@@ -458,6 +459,26 @@ def _render_match_heatmap(db, match_id, home_team, away_team):
     plt.close(fig)
 
 
+def _split_date_and_kickoff(date_str):
+    """
+    matches.match_date is either a full 'YYYY-MM-DD HH:MM' kickoff string
+    (UK local time, when FotMob's own kickoff time was available - see
+    save_report_to_db()'s docstring) or just a plain 'YYYY-MM-DD' fallback
+    date. Splits whichever shape it is into (date_part, time_part), with
+    time_part None when there wasn't a real kickoff time to begin with -
+    used by the match report header so the kickoff time only shows up in
+    parentheses when it's actually known, rather than showing a blank
+    '()' for an older/date-only match.
+    """
+    if not date_str:
+        return None, None
+    s = str(date_str).strip()
+    if " " in s:
+        date_part, time_part = s.split(" ", 1)
+        return date_part, time_part
+    return s, None
+
+
 def _render_match_detail(db, match_id):
     """
     The 'full uploaded match report' a Fixtures row's link opens - every
@@ -481,16 +502,57 @@ def _render_match_detail(db, match_id):
         st.query_params.clear()
         st.rerun()
 
+    # Custom centered header (rather than st.title()/st.metric() columns) -
+    # home/away team names bold in the same red/blue used for the pass
+    # maps (pitch_viz.HOME_TEAM_COLOR/AWAY_TEAM_COLOR), score in bold
+    # black between them, each side's xG in parentheses directly below its
+    # own team/goal count in a smaller, non-bold font, then a blank line
+    # before Competition (Matchweek)/Date (kickoff time)/Referee - all
+    # center-aligned, none of that bottom block bold.
+    home_team_name, away_team_name = row["Home Team"], row["Away Team"]
+    score_display = row["Score"] if row["Score"] else "-"
     home_xg = f"{row['Home xG']:.2f}" if pd.notna(row["Home xG"]) else "-"
     away_xg = f"{row['Away xG']:.2f}" if pd.notna(row["Away xG"]) else "-"
-    score = row["Score"] if row["Score"] else "-"
-    st.title(f"{row['Home Team']}  {score}  {row['Away Team']}")
-    meta_cols = st.columns(5)
-    meta_cols[0].metric("Date", row["Date"] or "-")
-    meta_cols[1].metric("Competition", row["Competition"] or "-")
-    meta_cols[2].metric("Home xG", home_xg)
-    meta_cols[3].metric("Away xG", away_xg)
-    meta_cols[4].metric("Referee", row["Referee"] or "-")
+
+    date_part, kickoff_part = _split_date_and_kickoff(row["Date"])
+    competition_line = row["Competition"] or "-"
+    if row["Matchweek"]:
+        competition_line += f" (Matchweek {row['Matchweek']})"
+    date_line = date_part or "-"
+    if kickoff_part:
+        date_line += f" ({kickoff_part})"
+    referee_line = f"Referee: {row['Referee']}" if row["Referee"] else "Referee: -"
+
+    st.markdown(f"""
+    <div style="text-align:center;">
+        <table style="margin:0 auto; border-collapse:collapse;">
+            <tr>
+                <td style="padding:0 18px; text-align:center;">
+                    <span style="font-size:2.1em; font-weight:bold; color:{HOME_TEAM_COLOR};">{home_team_name}</span>
+                </td>
+                <td style="padding:0 18px; text-align:center;">
+                    <span style="font-size:2.1em; font-weight:bold; color:black;">{score_display}</span>
+                </td>
+                <td style="padding:0 18px; text-align:center;">
+                    <span style="font-size:2.1em; font-weight:bold; color:{AWAY_TEAM_COLOR};">{away_team_name}</span>
+                </td>
+            </tr>
+            <tr>
+                <td style="text-align:center;">
+                    <span style="font-size:1.05em; font-weight:normal; color:#555;">({home_xg})</span>
+                </td>
+                <td></td>
+                <td style="text-align:center;">
+                    <span style="font-size:1.05em; font-weight:normal; color:#555;">({away_xg})</span>
+                </td>
+            </tr>
+        </table>
+        <div style="height:0.9em;"></div>
+        <div style="font-weight:normal;">{competition_line}</div>
+        <div style="font-weight:normal;">{date_line}</div>
+        <div style="font-weight:normal;">{referee_line}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     mt_totals, mt_players, mt_shots, mt_passmap, mt_passrecv, mt_heatmap = st.tabs(
         ["Team Totals", "Player Stats", "Shots", "Pass Map", "Passes Received", "Heat Map"]
@@ -501,8 +563,41 @@ def _render_match_detail(db, match_id):
         if match_summary.empty:
             st.info("No team stats saved for this match.")
         else:
-            st.dataframe(match_summary, use_container_width=False, hide_index=True,
-                         height=_no_scroll_height(match_summary))
+            # Rendered as a plain HTML table (rather than st.dataframe) to
+            # get styling st.dataframe can't do: a blank header cell where
+            # the literal word 'Metric' used to show, home/away column
+            # headers colored in the same red/blue as the page header
+            # above, no cell borders at all (so it reads as a clean graphic
+            # rather than a spreadsheet grid), and a bigger font, centered
+            # on the page. fetch_match_summary()'s own column names ARE the
+            # team names (see that function's docstring), so they're used
+            # directly here as both the HTML content and the row lookup
+            # keys below.
+            home_col, metric_col, away_col = match_summary.columns
+            rows_html = "".join(
+                f"""<tr>
+                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em;">{r[home_col]}</td>
+                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em; color:#666;">{r[metric_col]}</td>
+                    <td style="padding:10px 44px; text-align:center; border:none; font-size:1.15em;">{r[away_col]}</td>
+                </tr>"""
+                for _, r in match_summary.iterrows()
+            )
+            st.markdown(f"""
+            <div style="display:flex; justify-content:center;">
+                <table style="border-collapse:collapse;">
+                    <thead>
+                        <tr>
+                            <th style="padding:14px 44px; border:none; font-size:1.3em; color:{HOME_TEAM_COLOR};">{home_col}</th>
+                            <th style="padding:14px 44px; border:none;"></th>
+                            <th style="padding:14px 44px; border:none; font-size:1.3em; color:{AWAY_TEAM_COLOR};">{away_col}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
 
         # Full flattened stat breakdown (Possession/Passes/Tackles/Duels/
         # Physical performance/etc.) still available for anyone who wants
