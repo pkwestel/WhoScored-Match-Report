@@ -799,9 +799,9 @@ _MATCH_SUMMARY_FIELDS = [
     ("Shots on target", "Shots on target"),
     ("Shots inside box", "Shots inside box"),
     ("Possession", "Ball possession"),
-    ("xG", "Total xG"),
     ("Big Chances", "Big chances"),
     ("Corners", "Corners"),
+    ("Fouls", "Fouls committed"),
 ]
 
 
@@ -811,8 +811,6 @@ def _fmt_match_summary_value(value, label):
     try:
         if label == "Possession":
             return f"{float(value):.0f}%"
-        if label == "xG":
-            return f"{float(value):.2f}"
         if float(value) == int(float(value)):
             return str(int(float(value)))
         return f"{float(value):.2f}"
@@ -824,12 +822,13 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     """
     Compact home-vs-away summary table for the match detail view's Team
     Totals tab: one row per stat (Goals, Shots, Shots on target, Shots
-    inside box, Possession, xG, Big Chances, Corners), laid out as
+    inside box, Possession, Big Chances, Corners, Fouls), laid out as
     <home team name> | Metric | <away team name> - the two team names ARE
     the column headers (rather than generic 'Home'/'Away' headers plus a
     separate leading 'Team' data row repeating them), so the table reads
     top-to-bottom as a single side-by-side comparison with no redundant
-    first row.
+    first row. xG deliberately isn't repeated here - it already shows in
+    the page header above this table (see _render_match_detail()).
 
     Reads straight from team_match_stats.extra_json's 'fm_totals' namespace
     (compute_totals()'s own output) by field name, rather than going
