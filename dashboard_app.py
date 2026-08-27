@@ -1210,10 +1210,13 @@ else:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("For")
-                st.dataframe(_team_totals_for(for_df), use_container_width=True, hide_index=True)
+                # Team column linked to that team's Team Page - see the
+                # League Table/Team Stats/Fixtures tables for the same
+                # treatment (_render_data_table_html()/_linkify_team_cell()).
+                _render_data_table_html(_team_totals_for(for_df), link_columns=("Team",))
             with col2:
                 st.subheader("Against")
-                st.dataframe(_team_totals_for(against_df), use_container_width=True, hide_index=True)
+                _render_data_table_html(_team_totals_for(against_df), link_columns=("Team",))
 
     with tab_passmap:
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
