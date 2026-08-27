@@ -157,8 +157,11 @@ PASS_MAP_FONT = "Arial"
 # Small watermark-style logo drawn in the pass map's top-left corner. Kept
 # next to this file (same folder) so a relative path works regardless of
 # the machine's working directory - if it's ever missing, the logo is just
-# skipped rather than crashing the whole Pass Map render.
-LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kwest_thoughts_logo_v2.png")
+# skipped rather than crashing the whole Pass Map render. v3 is the
+# transparent-background circular badge version (soccer-ball dots in the
+# ring text) - same asset app_logo.py uses for every Streamlit page's own
+# top-right corner logo, kept as one shared file rather than two copies.
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kwest_thoughts_logo_v3.png")
 
 
 def _load_logo():
