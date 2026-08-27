@@ -766,11 +766,80 @@ if _match_id_param:
 else:
     st.title("Match History Dashboard")
 
-    (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap, tab_passrecv,
-     tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
-        "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
+    (tab_team_page, tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
+     tab_passrecv, tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
+        "Team Page", "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
         "Passes Received", "Season Pass Map", "Season Passes Received", "Season Touch Map",
     ])
+
+    with tab_team_page:
+        seasons = hdb.fetch_available_seasons(db)
+        if not seasons:
+            st.info("No matches published yet.")
+        else:
+            all_matches = hdb.fetch_matches(db)
+            teams = sorted(set(all_matches["home_team"].dropna()) | set(all_matches["away_team"].dropna()))
+            picker_col1, picker_col2 = st.columns(2)
+            with picker_col1:
+                team_page_team = st.selectbox("Team", teams, key="team_page_team")
+            with picker_col2:
+                # Just one season exists today - still a real dropdown (rather
+                # than hard-coded) so a second season later needs no UI change.
+                team_page_season = st.selectbox("Season", seasons, key="team_page_season")
+
+            stats = hdb.fetch_team_page_stats(db, team_page_team, season=team_page_season)
+            if stats is None:
+                st.info(f"No stats saved yet for {team_page_team} in {team_page_season}.")
+            else:
+                record = f"{stats['w']}-{stats['d']}-{stats['l']}"
+                home = stats["home"]
+                away = stats["away"]
+                home_record = f"{home['w']}-{home['d']}-{home['l']}"
+                away_record = f"{away['w']}-{away['d']}-{away['l']}"
+                rank_ordinal = hdb.ordinal(stats["league_rank"])
+
+                st.markdown(f"""
+                <div>
+                    <div style="font-size:2em; font-weight:bold;">{stats['season']} {stats['team']}</div>
+                    <div style="margin-top:10px; font-size:1.05em;">
+                        <b>Record:</b> {record}, {stats['points']} points ({stats['ppg']:.2f} points per game),
+                        {rank_ordinal} in the {stats['competition']}
+                    </div>
+                    <div style="margin-top:4px; font-size:1.05em;">
+                        <b>Home Record:</b> {home_record}, {home['points']} points
+                        &nbsp;&nbsp;&nbsp;&nbsp;
+                        <b>Away Record:</b> {away_record}, {away['points']} points
+                    </div>
+                    <div style="margin-top:4px; font-size:1.05em;">
+                        <b>Goals:</b> {stats['goals_for']} ({stats['goals_for_pg']:.2f} per game)
+                        &nbsp;&nbsp;&nbsp;&nbsp;
+                        <b>Goals Against:</b> {stats['goals_against']} ({stats['goals_against_pg']:.2f} per game)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown("<div style='height:1.4em;'></div>", unsafe_allow_html=True)
+
+                possession_display = (f"{stats['possession']:.1f}%"
+                                       if stats["possession"] is not None else "-")
+                headline_stats = [
+                    ("Avg Possession", possession_display, stats["possession_rank"]),
+                    ("Shots", f"{stats['shots_pg']:.2f}", stats["shots_rank"]),
+                    ("xG", f"{stats['xg_pg']:.2f}", stats["xg_rank"]),
+                    ("Shots Against", f"{stats['shots_against_pg']:.2f}", stats["shots_against_rank"]),
+                    ("xGA", f"{stats['xga_pg']:.2f}", stats["xga_rank"]),
+                ]
+                headline_cols = st.columns(len(headline_stats))
+                for col, (label, value, rank) in zip(headline_cols, headline_stats):
+                    with col:
+                        rank_display = f"({hdb.ordinal(rank)})" if rank is not None else "-"
+                        st.markdown(f"""
+                        <div style="text-align:center;">
+                            <div style="font-size:1.3em; font-weight:bold;">{label}</div>
+                            <div style="font-size:1.7em; font-weight:bold; margin-top:6px;">{value}</div>
+                            <div style="font-size:0.85em; color:#666; margin-top:2px;">{rank_display}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
 
     with tab_team_totals:
         league_table = hdb.fetch_league_table(db)

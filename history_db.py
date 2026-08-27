@@ -1588,6 +1588,238 @@ def fetch_league_table(db: DB) -> pd.DataFrame:
     return df.sort_values(["Points", "GD", "GF"], ascending=False).reset_index(drop=True)
 
 
+def ordinal(n):
+    """1 -> '1st', 2 -> '2nd', 3 -> '3rd', 4 -> '4th', 11/12/13 -> '11th'/
+    '12th'/'13th' (the standard English-ordinal exception for the teens),
+    21 -> '21st', etc. Returns '-' for None (a rank that couldn't be
+    computed - see fetch_team_page_stats()'s docstring)."""
+    if n is None:
+        return "-"
+    n = int(n)
+    if 11 <= (n % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def fetch_available_seasons(db: DB) -> list:
+    """
+    Every season label (see _season_label()) with at least one saved match,
+    most recent first - backs the Team Page's season dropdown. Just one
+    entry today (this project only has one season's worth of data so far),
+    but the dropdown is wired up now so a second season needs no UI changes
+    later, just more saved matches.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return []
+    seasons = matches["match_date"].apply(_season_label).dropna().unique().tolist()
+    return sorted(seasons, reverse=True)
+
+
+def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
+    """
+    One row per team playing in this exact (season, competition) - the
+    superset of stats the Team Page needs to show ONE of these teams plus
+    rank it against the rest: overall/home/away W-D-L-Points, goals for/
+    against, and the 5 headline subheading stats (Avg Possession, Shots,
+    xG, Shots Against, xGA - all as per-game averages). Same skip-if-
+    incomplete convention as fetch_league_table() (a match missing either
+    side's fm_totals.Goals is left out entirely, rather than guessed at).
+
+    Scoped to one competition (not just one season) because a team can play
+    in more than one competition (league + cup) in the same season - mixing
+    those into one table would rank a team against opponents it isn't
+    really competing against for the league table's own purposes. See
+    fetch_team_page_stats() for how a team's own primary competition this
+    season is chosen.
+    """
+    cols = ["Team", "Played", "W", "D", "L", "GF", "GA", "GD", "Points", "PPG",
+            "GF_PG", "GA_PG", "HPlayed", "HW", "HD", "HL", "HPoints",
+            "APlayed", "AW", "AD", "AL", "APoints",
+            "Possession", "Shots_PG", "ShotsA_PG", "xG_PG", "xGA_PG"]
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=cols)
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    scoped = matches[(matches["season"] == season) & (matches["competition"] == competition)]
+    if scoped.empty:
+        return pd.DataFrame(columns=cols)
+
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    extra_by_match = {}
+    for match_id, team, extra_json in cur.fetchall():
+        extra_by_match.setdefault(match_id, {})[team] = json.loads(extra_json) if extra_json else {}
+
+    stats = {}
+
+    def _row(team):
+        return stats.setdefault(team, {
+            "Played": 0, "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0,
+            "HPlayed": 0, "HW": 0, "HD": 0, "HL": 0,
+            "APlayed": 0, "AW": 0, "AD": 0, "AL": 0,
+            "xG": 0.0, "xGA": 0.0, "Shots": 0, "ShotsA": 0,
+            "PossessionSum": 0.0, "PossessionN": 0,
+        })
+
+    for _, m in scoped.iterrows():
+        team_extras = extra_by_match.get(m["match_id"], {})
+        home_fm = (team_extras.get(m["home_team"]) or {}).get("fm_totals") or {}
+        away_fm = (team_extras.get(m["away_team"]) or {}).get("fm_totals") or {}
+        home_goals, away_goals = home_fm.get("Goals"), away_fm.get("Goals")
+        if home_goals is None or away_goals is None:
+            continue  # incomplete data for this match - don't guess, just skip it
+
+        home_row, away_row = _row(m["home_team"]), _row(m["away_team"])
+        home_row["Played"] += 1
+        away_row["Played"] += 1
+        home_row["HPlayed"] += 1
+        away_row["APlayed"] += 1
+        home_row["GF"] += home_goals
+        home_row["GA"] += away_goals
+        away_row["GF"] += away_goals
+        away_row["GA"] += home_goals
+        home_row["xG"] += home_fm.get("Total xG") or 0.0
+        home_row["xGA"] += away_fm.get("Total xG") or 0.0
+        away_row["xG"] += away_fm.get("Total xG") or 0.0
+        away_row["xGA"] += home_fm.get("Total xG") or 0.0
+        home_row["Shots"] += home_fm.get("Shots") or 0
+        home_row["ShotsA"] += away_fm.get("Shots") or 0
+        away_row["Shots"] += away_fm.get("Shots") or 0
+        away_row["ShotsA"] += home_fm.get("Shots") or 0
+
+        home_poss, away_poss = home_fm.get("Ball possession"), away_fm.get("Ball possession")
+        if home_poss is not None:
+            home_row["PossessionSum"] += float(home_poss)
+            home_row["PossessionN"] += 1
+        if away_poss is not None:
+            away_row["PossessionSum"] += float(away_poss)
+            away_row["PossessionN"] += 1
+
+        if home_goals > away_goals:
+            home_row["W"] += 1
+            home_row["HW"] += 1
+            away_row["L"] += 1
+            away_row["AL"] += 1
+        elif home_goals < away_goals:
+            away_row["W"] += 1
+            away_row["AW"] += 1
+            home_row["L"] += 1
+            home_row["HL"] += 1
+        else:
+            home_row["D"] += 1
+            home_row["HD"] += 1
+            away_row["D"] += 1
+            away_row["AD"] += 1
+
+    records = []
+    for team, s in stats.items():
+        played = s["Played"] or 0
+        points = s["W"] * 3 + s["D"]
+        records.append({
+            "Team": team, "Played": played, "W": s["W"], "D": s["D"], "L": s["L"],
+            "GF": s["GF"], "GA": s["GA"], "GD": s["GF"] - s["GA"], "Points": points,
+            "PPG": round(points / played, 2) if played else 0.0,
+            "GF_PG": round(s["GF"] / played, 2) if played else 0.0,
+            "GA_PG": round(s["GA"] / played, 2) if played else 0.0,
+            "HPlayed": s["HPlayed"], "HW": s["HW"], "HD": s["HD"], "HL": s["HL"],
+            "HPoints": s["HW"] * 3 + s["HD"],
+            "APlayed": s["APlayed"], "AW": s["AW"], "AD": s["AD"], "AL": s["AL"],
+            "APoints": s["AW"] * 3 + s["AD"],
+            "Possession": (round(s["PossessionSum"] / s["PossessionN"], 1)
+                            if s["PossessionN"] else None),
+            "Shots_PG": round(s["Shots"] / played, 2) if played else 0.0,
+            "ShotsA_PG": round(s["ShotsA"] / played, 2) if played else 0.0,
+            "xG_PG": round(s["xG"] / played, 2) if played else 0.0,
+            "xGA_PG": round(s["xGA"] / played, 2) if played else 0.0,
+        })
+    return pd.DataFrame(records, columns=cols)
+
+
+def fetch_team_page_stats(db: DB, team, season=None) -> dict:
+    """
+    Everything the Team Page needs for one team/season: overall/home/away
+    record + points, goals for/against (with per-game rates), league rank,
+    and the 5 headline stats (Avg Possession, Shots, xG, Shots Against,
+    xGA - all per-game) each with this team's rank among every OTHER team
+    in the same competition this season (Possession/Shots/xG ranked highest-
+    first, Shots Against/xGA ranked lowest-first - allowing fewer shots/xG
+    against is the good direction there).
+
+    season defaults to this team's own most recent season if not given.
+    This team's "competition" for ranking purposes is whichever competition
+    value is most common across its matches this season (the main league,
+    for a team that's also played the odd cup match this season) - see
+    _build_team_season_table()'s docstring for why ranking needs to be
+    scoped to one competition, not just one season.
+
+    Returns None if this team has no saved matches at all for the resolved
+    season (an unknown team, or a season with no data yet). A rank that
+    couldn't be computed (this team has no value for that stat at all - an
+    old-enough gap in saved data) comes back as None in the '..._rank'
+    fields - callers should show '-' rather than a fabricated rank.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return None
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[(matches["home_team"] == team) | (matches["away_team"] == team)]
+    if team_matches.empty:
+        return None
+
+    if season is None:
+        available = sorted(team_matches["season"].dropna().unique(), reverse=True)
+        if not available:
+            return None
+        season = available[0]
+    team_matches = team_matches[team_matches["season"] == season]
+    if team_matches.empty:
+        return None
+
+    competition_counts = team_matches["competition"].dropna()
+    if competition_counts.empty:
+        return None
+    competition = competition_counts.mode().iloc[0]
+
+    table = _build_team_season_table(db, season, competition)
+    if table.empty or team not in table["Team"].values:
+        return None
+
+    table = table.sort_values(["Points", "GD", "GF"], ascending=False).reset_index(drop=True)
+    league_rank = int(table.index[table["Team"] == team][0]) + 1
+    row = table[table["Team"] == team].iloc[0]
+
+    def _rank_of(col, ascending):
+        if pd.isna(row[col]):
+            return None
+        ranked = table[col].rank(method="min", ascending=ascending)
+        return int(ranked[table["Team"] == team].iloc[0])
+
+    return {
+        "season": season,
+        "team": team,
+        "competition": competition,
+        "n_teams": len(table),
+        "played": int(row["Played"]), "w": int(row["W"]), "d": int(row["D"]), "l": int(row["L"]),
+        "points": int(row["Points"]), "ppg": row["PPG"], "league_rank": league_rank,
+        "home": {"played": int(row["HPlayed"]), "w": int(row["HW"]), "d": int(row["HD"]),
+                 "l": int(row["HL"]), "points": int(row["HPoints"])},
+        "away": {"played": int(row["APlayed"]), "w": int(row["AW"]), "d": int(row["AD"]),
+                 "l": int(row["AL"]), "points": int(row["APoints"])},
+        "goals_for": int(row["GF"]), "goals_for_pg": row["GF_PG"],
+        "goals_against": int(row["GA"]), "goals_against_pg": row["GA_PG"],
+        "possession": row["Possession"], "possession_rank": _rank_of("Possession", ascending=False),
+        "shots_pg": row["Shots_PG"], "shots_rank": _rank_of("Shots_PG", ascending=False),
+        "xg_pg": row["xG_PG"], "xg_rank": _rank_of("xG_PG", ascending=False),
+        "shots_against_pg": row["ShotsA_PG"],
+        "shots_against_rank": _rank_of("ShotsA_PG", ascending=True),
+        "xga_pg": row["xGA_PG"], "xga_rank": _rank_of("xGA_PG", ascending=True),
+    }
+
+
 def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
     """
     Season-cumulative passing totals per team, summed across every player
