@@ -59,10 +59,10 @@ import streamlit as st
 import history_db as hdb
 from pitch_viz import (plot_pass_map, plot_touch_map, PASS_CATEGORY_COLORS, TITLE_COLOR,
                        HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
-from app_logo import render_logo_top_right
+from app_logo import render_logo_top_left
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
-render_logo_top_right()
+render_logo_top_left()
 
 
 def _database_url():
@@ -360,6 +360,40 @@ def _render_grouped_stats_table(df):
         </table>
     </div>
     """, unsafe_allow_html=True)
+
+
+def _convert_to_per90(df, minutes_by_player):
+    """
+    Converts a Player + stat-columns season-cumulative table (see
+    history_db._fetch_team_season_category_table() - backs the Team Page's
+    Possession/Passing/Defensive Actions/Defensive Action Locations tables)
+    into its Per 90 equivalent: every non-Player column becomes
+    (value / that player's season Minutes) * 90, rounded to 2 decimals -
+    the exact same formula, and the same '-' for a player with 0/unknown
+    minutes, as history_db.fetch_team_season_scoring_stats()'s own Per 90
+    columns (see that function's docstring).
+
+    minutes_by_player is THAT function's own 'Minutes' column turned into a
+    plain Player -> Minutes dict (built once by the caller from the General
+    Stats table already fetched for this page, rather than re-querying the
+    database here) - it already includes a 'Team Total' entry (that
+    function's own team-wide minutes, recomputed from every player's summed
+    minutes), so the Team Total row of whichever table this is called on
+    reuses that same denominator automatically, with no extra special-
+    casing needed here - it's just another dict lookup, same as any real
+    player's row.
+    """
+    if df.empty:
+        return df
+    stat_cols = [c for c in df.columns if c != "Player"]
+    records = []
+    for _, row in df.iterrows():
+        minutes = minutes_by_player.get(row["Player"])
+        rec = {"Player": row["Player"]}
+        for c in stat_cols:
+            rec[c] = round(row[c] / minutes * 90, 2) if minutes and minutes > 0 else "-"
+        records.append(rec)
+    return pd.DataFrame(records, columns=df.columns)
 
 
 def _match_picker(matches, key):
@@ -1116,6 +1150,21 @@ def _render_team_page(db, team, season=None):
     # history_db._fetch_team_season_category_table(). Plain st.dataframe
     # (no merged/grouped header) since none of these were asked to grow
     # extra column groups the way General Stats was.
+    #
+    # One toggle converts all 4 into their Per 90 rate at once, reusing the
+    # 'Minutes' column General Stats already computed above (Player ->
+    # Minutes, including its own 'Team Total' entry) rather than re-deriving
+    # minutes here - see _convert_to_per90()'s own docstring.
+    show_per90 = st.toggle(
+        "Show Per 90",
+        key="team_page_category_per90",
+        help="Converts the totals below into (stat / Minutes) × 90 rates instead "
+             "of season totals.",
+    )
+    minutes_by_player = (
+        dict(zip(scoring_stats["Player"], scoring_stats["Minutes"])) if not scoring_stats.empty else {}
+    )
+
     _SEASON_CATEGORY_FETCHERS = [
         ("Possession", hdb.fetch_team_season_possession),
         ("Passing", hdb.fetch_team_season_passing),
@@ -1129,6 +1178,8 @@ def _render_team_page(db, team, season=None):
         if category_df.empty:
             st.info(f"No {title.lower()} stats saved yet for {team} in {season}.")
         else:
+            if show_per90:
+                category_df = _convert_to_per90(category_df, minutes_by_player)
             st.dataframe(category_df, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(category_df))
 

@@ -70,10 +70,10 @@ import streamlit as st
 import whoscored_report as wr
 import fotmob_report as fr
 import batch_lib
-from app_logo import render_logo_top_right
+from app_logo import render_logo_top_left
 
 st.set_page_config(page_title="Batch Match Runner", layout="wide")
-render_logo_top_right()
+render_logo_top_left()
 st.title("Batch Match Runner")
 st.caption(
     "Run several matches in one sitting instead of pasting URLs into the combined report app "
