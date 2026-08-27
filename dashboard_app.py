@@ -730,14 +730,20 @@ def _render_team_summary_table(df, home_col, metric_col, away_col,
         </tr>"""
         for _, r in df.iterrows()
     )
+    # home_col/away_col are always the two team names in every table this
+    # renders (Team Totals' match summary, each Advanced Stats table) -
+    # linkified back to their Team Page (see _linkify_team_cell()) per
+    # request that every team name shown on the match report link back.
+    # color:inherit (baked into _linkify_team_cell()'s own <a> style) keeps
+    # the existing red/blue coloring on this <th> exactly as before.
     st.markdown(f"""
     <div style="display:flex; justify-content:center;">
         <table style="border-collapse:collapse;">
             <thead>
                 <tr>
-                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{HOME_TEAM_COLOR};">{home_col}</th>
+                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{HOME_TEAM_COLOR};">{_linkify_team_cell(home_col)}</th>
                     <th style="padding:{header_padding}; border:none;"></th>
-                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{AWAY_TEAM_COLOR};">{away_col}</th>
+                    <th style="padding:{header_padding}; border:none; font-size:{header_font_size}; color:{AWAY_TEAM_COLOR};">{_linkify_team_cell(away_col)}</th>
                 </tr>
             </thead>
             <tbody>
@@ -812,18 +818,22 @@ def _render_match_detail(db, match_id):
         date_line += f" ({kickoff_part})"
     referee_line = f"Referee: {row['Referee']}" if row["Referee"] else "Referee: -"
 
+    # home_team_name/away_team_name linkified back to their Team Page (see
+    # _linkify_team_cell()) per request that every team name on the match
+    # report link back - color:inherit (baked into that helper's own <a>
+    # style) keeps the existing red/blue coloring exactly as before.
     st.markdown(f"""
     <div style="text-align:center;">
         <table style="margin:0 auto; border-collapse:collapse;">
             <tr>
                 <td style="padding:0 18px; text-align:center;">
-                    <span style="font-size:2.1em; font-weight:bold; color:{HOME_TEAM_COLOR};">{home_team_name}</span>
+                    <span style="font-size:2.1em; font-weight:bold; color:{HOME_TEAM_COLOR};">{_linkify_team_cell(home_team_name)}</span>
                 </td>
                 <td style="padding:0 18px; text-align:center;">
                     <span style="font-size:2.1em; font-weight:bold; color:black;">{score_display}</span>
                 </td>
                 <td style="padding:0 18px; text-align:center;">
-                    <span style="font-size:2.1em; font-weight:bold; color:{AWAY_TEAM_COLOR};">{away_team_name}</span>
+                    <span style="font-size:2.1em; font-weight:bold; color:{AWAY_TEAM_COLOR};">{_linkify_team_cell(away_team_name)}</span>
                 </td>
             </tr>
             <tr>
@@ -886,14 +896,18 @@ def _render_match_detail(db, match_id):
         )
         tables = _PLAYER_CATEGORY_FETCHERS[category](db, match_id, home_team, away_team)
 
-        st.caption(home_team)
+        # Markdown link syntax (rather than _linkify_team_cell()'s raw <a>
+        # HTML) since st.caption renders through the normal markdown
+        # pipeline, not unsafe_allow_html - this still produces a real,
+        # clickable link back to the Team Page.
+        st.caption(f"[{home_team}]({_team_page_url(home_team)})")
         if tables["home"].empty:
             st.info(f"No {category.lower()} saved for {home_team} in this match.")
         else:
             st.dataframe(tables["home"], use_container_width=False, hide_index=True,
                          height=_no_scroll_height(tables["home"]))
 
-        st.caption(away_team)
+        st.caption(f"[{away_team}]({_team_page_url(away_team)})")
         if tables["away"].empty:
             st.info(f"No {category.lower()} saved for {away_team} in this match.")
         else:
@@ -925,7 +939,11 @@ def _render_match_detail(db, match_id):
             st.info("No shots saved for this match.")
         else:
             for t in [home_team, away_team]:
-                st.subheader(t)
+                # Markdown heading + link (st.subheader itself can't hold a
+                # clickable link) - '###' matches st.subheader's own H3
+                # sizing, per request that every team name on the match
+                # report link back to its Team Page.
+                st.markdown(f"### [{t}]({_team_page_url(t)})")
                 t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
                 st.dataframe(t_shots, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(t_shots))
