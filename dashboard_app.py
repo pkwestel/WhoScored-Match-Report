@@ -59,10 +59,9 @@ import streamlit as st
 import history_db as hdb
 from pitch_viz import (plot_pass_map, plot_touch_map, PASS_CATEGORY_COLORS, TITLE_COLOR,
                        HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
-from app_logo import render_logo_top_left
+from app_logo import logo_img_tag
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
-render_logo_top_left()
 
 
 def _database_url():
@@ -808,6 +807,28 @@ def _split_date_and_kickoff(date_str):
     return s, None
 
 
+def _render_back_to_fixtures_row():
+    """
+    Shared '← Back to Fixtures' button + logo row for the match detail
+    view - used on both the normal match load and the 'match not found'
+    error path, so the two look identical rather than one having the logo
+    and the other not. Logo sits in line with the button per request,
+    pinned to the row's right edge (same flexbox-wrapper trick as the
+    other 2 logo placements on this page) rather than just "somewhere in
+    the right column". Returns whether the button was clicked, exactly
+    like calling st.button() directly - callers act on that the same way.
+    """
+    button_col, logo_col = st.columns([8, 1])
+    with logo_col:
+        st.markdown(
+            f'<div style="display:flex; justify-content:flex-end; align-items:center; '
+            f'height:100%;">{logo_img_tag(50)}</div>',
+            unsafe_allow_html=True,
+        )
+    with button_col:
+        return st.button("← Back to Fixtures")
+
+
 def _render_match_detail(db, match_id):
     """
     The 'full uploaded match report' a Fixtures row's link opens - every
@@ -821,13 +842,13 @@ def _render_match_detail(db, match_id):
     row = fixtures[fixtures["match_id"] == match_id]
     if row.empty:
         st.error("Match not found.")
-        if st.button("← Back to Fixtures"):
+        if _render_back_to_fixtures_row():
             st.query_params.clear()
             st.rerun()
         return
     row = row.iloc[0]
 
-    if st.button("← Back to Fixtures"):
+    if _render_back_to_fixtures_row():
         st.query_params.clear()
         st.rerun()
 
@@ -1055,6 +1076,13 @@ def _render_team_page(db, team, season=None):
             "Season", seasons, index=seasons.index(season),
             key="team_page_season", label_visibility="collapsed",
         )
+        # Logo sits directly under the season dropdown, in this same
+        # narrow right-hand column, per request.
+        st.markdown(
+            f'<div style="display:flex; justify-content:flex-end; margin-top:6px;">'
+            f'{logo_img_tag(60)}</div>',
+            unsafe_allow_html=True,
+        )
 
     stats = hdb.fetch_team_page_stats(db, team, season=season)
     with title_col:
@@ -1207,7 +1235,21 @@ if _match_id_param:
 elif _team_param:
     _render_team_page(db, _team_param)
 else:
-    st.title("Match History Dashboard")
+    # Title and logo share one row (title left, logo pinned to the row's
+    # right edge via the flexbox wrapper) rather than the logo floating
+    # independently of the page - per request, right-aligned specifically,
+    # not just "somewhere in the right column" (a plain st.image() in a
+    # narrow column would sit at THAT column's left edge, not the page's
+    # right edge).
+    title_col, logo_col = st.columns([8, 1])
+    with title_col:
+        st.title("Match History Dashboard")
+    with logo_col:
+        st.markdown(
+            f'<div style="display:flex; justify-content:flex-end; align-items:center; '
+            f'height:100%; padding-top:14px;">{logo_img_tag(60)}</div>',
+            unsafe_allow_html=True,
+        )
 
     (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
      tab_passrecv, tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([

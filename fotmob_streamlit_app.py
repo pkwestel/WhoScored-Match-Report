@@ -45,10 +45,8 @@ import contextlib
 import streamlit as st
 
 import fotmob_report as fr
-from app_logo import render_logo_top_left
 
 st.set_page_config(page_title="FotMob Match Report", layout="wide")
-render_logo_top_left()
 st.title("FotMob Match Report Generator")
 st.write(
     "Paste a FotMob match URL below to generate a Shots/xG report - Totals, Shots, and a "

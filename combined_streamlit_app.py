@@ -57,10 +57,8 @@ import whoscored_report as wr
 import fotmob_report as fr
 import combined_report as cr
 import batch_lib as bl
-from app_logo import render_logo_top_left
 
 st.set_page_config(page_title="Combined Match Report", layout="wide")
-render_logo_top_left()
 st.title("Combined WhoScored + FotMob Match Report Generator")
 st.write(
     "Paste BOTH a WhoScored match-centre URL and a FotMob match URL for the SAME match. This "
