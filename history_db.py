@@ -738,7 +738,31 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
             "Away Team": m["away_team"],
             "Referee": m.get("referee"),
         })
-    return pd.DataFrame(records, columns=cols)
+    # Ascending by Date - oldest match first, newest at the bottom - even
+    # though fetch_matches() itself (used above) is newest-first (that order
+    # suits other callers, e.g. season-cumulative tables that want to short-
+    # circuit on recent matches). A match with no date at all sorts last.
+    return (pd.DataFrame(records, columns=cols)
+            .sort_values("Date", na_position="last")
+            .reset_index(drop=True))
+
+
+def fetch_team_match_log(db: DB, team, season) -> pd.DataFrame:
+    """
+    One team's own slice of fetch_fixtures() - identical columns/row shape,
+    filtered down to just the matches this team played in this season.
+    Powers the Team Page's match log table, which is deliberately built to
+    look exactly like the Fixtures tab's table (same renderer - see
+    dashboard_app._render_fixtures_like_table()). Already in ascending date
+    order since fetch_fixtures() itself is.
+    """
+    fixtures = fetch_fixtures(db)
+    if fixtures.empty:
+        return fixtures
+    return fixtures[
+        ((fixtures["Home Team"] == team) | (fixtures["Away Team"] == team))
+        & (fixtures["Season"] == season)
+    ].reset_index(drop=True)
 
 
 def _flatten_extra(rows, id_cols):

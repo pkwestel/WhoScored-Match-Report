@@ -234,6 +234,39 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=()):
     """, unsafe_allow_html=True)
 
 
+def _render_fixtures_like_table(df):
+    """
+    Shared renderer for any fetch_fixtures()-shaped DataFrame (match_id,
+    Date, Competition, Matchweek, Season, Home Team, Home xG, Score, Away
+    xG, Away Team, Referee) - used by both the Fixtures tab (every match)
+    and the Team Page's own Match Log (one team's matches only), so the two
+    look identical.
+
+    Builds the '?match_id=...' Report link (see _render_data_table_html's
+    raw_html_columns), formats Home/Away xG to 2 decimal places as plain
+    strings ('-' for a match with no saved xG yet, same convention as
+    everywhere else), and links Home Team/Away Team to their own Team
+    Pages. Drops match_id (only needed to build the Report link) and Season
+    (always a filter/context elsewhere already, not its own column here).
+    """
+    display_df = df.copy()
+    display_df["Report"] = display_df["match_id"].apply(
+        lambda m: f'<a href="?match_id={m}">View →</a>'
+    )
+    display_df["Home xG"] = display_df["Home xG"].apply(
+        lambda v: f"{v:.2f}" if pd.notna(v) else None
+    )
+    display_df["Away xG"] = display_df["Away xG"].apply(
+        lambda v: f"{v:.2f}" if pd.notna(v) else None
+    )
+    display_df = display_df.drop(columns=["match_id", "Season"])
+    _render_data_table_html(
+        display_df,
+        link_columns=("Home Team", "Away Team"),
+        raw_html_columns=("Report",),
+    )
+
+
 def _match_picker(matches, key):
     """Shared match dropdown for the Pass Map/Passes Received tabs below."""
     options = {
@@ -936,18 +969,32 @@ def _render_team_page(db, team, season=None):
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
     # Match-report tables, season-cumulative rather than one match's worth -
-    # Scoring Stats is the first of these (per request); more categories
-    # (Possession, Passing, Defensive Actions, ...) land here the same way
-    # later. Column labels are the exact same ones the match report itself
-    # uses (see _SCORING_STATS_COLUMNS) - no 'Total ...' relabeling, even
-    # though every number is now a season sum rather than one match's.
-    st.subheader("Scoring Stats")
+    # General Stats (né "Scoring Stats" - renamed since it now also carries
+    # Age/Appearances/Starts, not just scoring numbers) is the first of
+    # these; more categories (Possession, Passing, Defensive Actions, ...)
+    # land here the same way later. Column labels are the exact same ones
+    # the match report itself uses (see _SCORING_STATS_COLUMNS) - no
+    # 'Total ...' relabeling, even though every number is now a season sum
+    # rather than one match's.
+    st.subheader("General Stats")
     scoring_stats = hdb.fetch_team_season_scoring_stats(db, team, season)
     if scoring_stats.empty:
         st.info(f"No scoring stats saved yet for {team} in {season}.")
     else:
         st.dataframe(scoring_stats, use_container_width=False, hide_index=True,
                      height=_no_scroll_height(scoring_stats))
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+
+    # Match log - this team's own slice of the Fixtures tab's table (same
+    # columns, same renderer - see _render_fixtures_like_table()), oldest
+    # match on top since fetch_team_match_log() is already ascending.
+    st.subheader("Match Log")
+    match_log = hdb.fetch_team_match_log(db, team, season)
+    if match_log.empty:
+        st.info(f"No matches saved yet for {team} in {season}.")
+    else:
+        _render_fixtures_like_table(match_log)
 
 
 # ============================================================
@@ -1110,37 +1157,7 @@ else:
             if scoped.empty:
                 st.info("No matches match this filter.")
             else:
-                display_df = scoped.copy()
-                # A relative link back to this same app with ?match_id=<id> set -
-                # clicking it is what triggers the dispatch above into the
-                # single-match detail view. Built as a ready-made <a> tag (see
-                # _render_data_table_html()'s raw_html_columns) rather than
-                # st.dataframe's own LinkColumn, since this table also needs
-                # Home Team/Away Team to be links to a DIFFERENT page (the
-                # Team Page - see _linkify_team_cell()), and mixing both link
-                # styles is simplest done in one consistent HTML table.
-                display_df["Report"] = display_df["match_id"].apply(
-                    lambda m: f'<a href="?match_id={m}">View →</a>'
-                )
-                # Pre-formatted to 2 decimal places as plain strings (rather
-                # than relying on st.dataframe's own NumberColumn, which this
-                # HTML table has no equivalent of) - '-' for a match with no
-                # saved xG yet, same convention as everywhere else in the app.
-                display_df["Home xG"] = display_df["Home xG"].apply(
-                    lambda v: f"{v:.2f}" if pd.notna(v) else None
-                )
-                display_df["Away xG"] = display_df["Away xG"].apply(
-                    lambda v: f"{v:.2f}" if pd.notna(v) else None
-                )
-                # Season is still a filter above, just not its own column here -
-                # with (currently) only one season saved, showing it in every
-                # row is redundant.
-                display_df = display_df.drop(columns=["match_id", "Season"])
-                _render_data_table_html(
-                    display_df,
-                    link_columns=("Home Team", "Away Team"),
-                    raw_html_columns=("Report",),
-                )
+                _render_fixtures_like_table(scoped)
                 st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
 
     with tab_team:
