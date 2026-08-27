@@ -1844,6 +1844,40 @@ def fetch_team_page_stats(db: DB, team, season=None) -> dict:
     }
 
 
+# Yellow/Red Cards - their own 'fm_cards' namespace (fotmob_report.
+# extract_player_cards(), read from matchFacts.events rather than
+# playerStats like every _SCORING_STATS_COLUMNS field) - kept as a separate
+# list rather than folded into _SCORING_STATS_COLUMNS since that constant
+# also backs the per-match Scoring Stats category table on the match detail
+# view (fetch_player_scoring_stats()), which was NOT asked to grow these
+# columns - only this season-cumulative Team Page table was.
+_CARD_COLUMNS = ["Yellow Cards", "Red Cards"]
+
+# The 6 stats fetch_team_season_scoring_stats() also shows as a Per-90 rate,
+# in the exact order requested. Each name here must be a key already
+# present in that function's per-player totals dict (i.e. in
+# _SCORING_STATS_COLUMNS) - "SCA" is the only one of these NOT sourced from
+# 'fm_scoring' itself (it's summed in alongside the fm_scoring columns from
+# 'ws_passing' instead - see _fetch_player_namespaces()'s docstring), which
+# still works fine since the totals dict doesn't care which namespace a
+# number originally came from.
+_PER90_STATS = ["Goals", "Assists", "Shots", "NPxG", "xA", "SCA"]
+
+
+def _per90(stat_total, minutes_total):
+    """
+    (stat / Minutes Played) * 90, rounded to 2 decimals - the standard
+    "rate as if they'd played a full 90" normalization. Returns '-' (same
+    convention as this table's own Age column) rather than dividing by
+    zero for a player with 0 total minutes (an unused substitute who's
+    only ever been an unused sub) - a per-90 RATE is genuinely undefined
+    there, not zero.
+    """
+    if not minutes_total or minutes_total <= 0:
+        return "-"
+    return round(stat_total / minutes_total * 90, 2)
+
+
 def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     """
     Season-cumulative version of the match report's own Scoring Stats
@@ -1860,6 +1894,27 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     though every number here is a season sum. Only counts what this player
     did while playing for THIS team - a mid-season transfer's stats at
     their previous club aren't included.
+
+    Three column GROUPS, per request - purely a display concern (this
+    function just returns one flat DataFrame; dashboard_app._render_
+    grouped_stats_table() is what actually draws the merged group-header
+    row above them):
+      - Playing Time: Appearances, Starts, Minutes.
+      - Totals: Goals through Red Cards (everything summed as a plain
+        running total across the season - Yellow Cards/Red Cards summed
+        the exact same simple way as Goals/Shots/etc, just from a
+        different source namespace - see _CARD_COLUMNS above).
+      - Per 90: Goals/Assists/Shots/NPxG/xA/SCA, each recomputed as
+        (season total / season Minutes) * 90 - see _per90() above. These
+        columns intentionally reuse the SAME display labels as their
+        Totals-block counterparts (e.g. two separate "Goals" columns) -
+        standard practice on stats sites (FBref etc.) for a totals-vs-per90
+        pair, and disambiguated by which group header they sit under
+        rather than by the column label itself. Internally these are kept
+        as distinctly-named columns ('Goals (Per 90)', etc.) since a plain
+        DataFrame/dict can't hold two columns with the identical name -
+        dashboard_app._render_grouped_stats_table() strips the ' (Per 90)'
+        suffix back off before display.
 
     Age is fundamentally different from every summed column here - FotMob
     only ever reports "this player's age AS OF this match's date", never a
@@ -1878,24 +1933,36 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     Starts counts matches FotMob's own lineup marked this player as part of
     the starting XI (fm_lineup's 'Started' flag) regardless of how long
     they were on the pitch. 'Team Total' sums Appearances/Starts/every
-    other numeric column the same way the match report's own Team Total
-    row does; Age has no sensible team total, so it shows '-' there.
+    other Totals-block column the same way the match report's own Team
+    Total row does; Age has no sensible team total, so it shows '-' there,
+    same as every individual player row with no Age reading at all. The
+    Team Total row's OWN Per-90 figures are recomputed from the team's
+    SUMMED totals (its own summed Goals / its own summed Minutes * 90),
+    never by averaging each player's individual per-90 rate - same
+    "recompute the rate from summed raw counts, don't average rates"
+    principle as fetch_season_passing_totals()'s Pass Completion %, which
+    avoids wrongly weighting a 5-minute cameo's rate the same as a full 90.
 
-    A match missing 'fm_scoring'/'ws_passing'/'fm_lineup' entirely (an
-    older save from before those namespaces existed) simply doesn't
-    contribute to that player's numbers for that match - there's no clean
-    per-cell way to flag "an early match's data is missing from this
+    A match missing 'fm_scoring'/'ws_passing'/'fm_lineup'/'fm_cards'
+    entirely (an older save from before those namespaces existed) simply
+    doesn't contribute to that player's numbers for that match - there's no
+    clean per-cell way to flag "an early match's data is missing from this
     total" the way a single match's '-' convention works, so every summed
     number here is always a real (if potentially undercounted for very old
-    data) total, never '-'.
+    data) total, never '-'. (Yellow Cards/Red Cards specifically default to
+    0 for a match with no fm_cards namespace, exactly like a match where a
+    player genuinely wasn't carded - there's no way to tell those two cases
+    apart from this data alone.)
 
     Sorted by Minutes, descending (most-used players first). Returns an
     empty DataFrame if this team has no matches saved for this season.
     """
-    sum_cols = _SCORING_STATS_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
-    out_cols = ["Player", "Age", "Appearances", "Starts"] + [
-        "Minutes" if c == "Minutes Played" else c for c in sum_cols
-    ]
+    sum_cols = _SCORING_STATS_COLUMNS + _CARD_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
+    out_cols = (
+        ["Player", "Age", "Appearances", "Starts"]
+        + ["Minutes" if c == "Minutes Played" else c for c in sum_cols]
+        + [f"{stat} (Per 90)" for stat in _PER90_STATS]
+    )
 
     matches = fetch_matches(db)
     if matches.empty:
@@ -1911,7 +1978,9 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
 
     sums, appearances, starts, ages = {}, {}, {}, {}
     for match_id in team_matches["match_id"]:
-        df = _fetch_player_namespaces(db, match_id, ["fm_scoring", "ws_passing", "fm_lineup"])
+        df = _fetch_player_namespaces(
+            db, match_id, ["fm_scoring", "ws_passing", "fm_lineup", "fm_cards"]
+        )
         if df.empty:
             continue
         sub = df[df["Team"] == team]
@@ -1952,6 +2021,8 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
             v = totals[c]
             out_name = "Minutes" if c == "Minutes Played" else c
             rec[out_name] = round(v, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(v))
+        for stat in _PER90_STATS:
+            rec[f"{stat} (Per 90)"] = _per90(totals[stat], totals["Minutes Played"])
         records.append(rec)
 
     out = (pd.DataFrame(records, columns=out_cols)
@@ -1960,10 +2031,13 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
 
     team_total = {"Player": "Team Total", "Age": "-"}
     for c in out_cols:
-        if c in ("Player", "Age"):
+        if c in ("Player", "Age") or c.endswith("(Per 90)"):
             continue
         s = out[c].sum()
         team_total[c] = round(s, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(s))
+    for stat in _PER90_STATS:
+        team_total[f"{stat} (Per 90)"] = _per90(team_total[stat], team_total["Minutes"])
+
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 

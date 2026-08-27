@@ -1381,6 +1381,90 @@ def extract_player_age_and_start(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+def extract_player_cards(match_json):
+    """
+    Per-player Yellow/Red card counts for this match - read from
+    content.matchFacts.events.events[], each a match-timeline entry shaped
+    {'type': 'Card', 'card': 'Yellow'|'Red'|'YellowRed', 'player': {'name':
+    ...}, 'isHome': bool, ...}. CONFIRMED against two real live match_json
+    dumps: fotmob_raw_5795364.json (three ordinary 'Yellow' entries, no
+    reds) and fotmob_raw_4813662.json, which has a genuine 'YellowRed' entry
+    for Jacob Ramsey - his SECOND yellow of the match, which sends him off.
+    That 'YellowRed' value counts toward BOTH Yellow Cards and Red Cards -
+    matching how every football stats site reports a two-yellows sending
+    off ('2 yellow, 1 red', not just '1 red'); a straight 'Red' (never seen
+    in a real sample, but presumably the same event 'type') counts only
+    toward Red Cards. Like extract_player_age_and_start(), falls back to a
+    top-level 'events' key, then a generic _search_for_key(), since API
+    response shape has been observed to shift.
+
+    Team comes from extract_team_names() (home/away, matched to each
+    event's own 'isHome' flag) rather than the event's own player dict,
+    which carries no team name of its own - same reconciliation path as
+    every other FotMob-sourced namespace (see batch_lib.build_db_stats()'s
+    docstring on _to_ws_name()).
+
+    Returns one row per player carded at least once - an uncarded player
+    simply never appears here (batch_lib.build_db_stats() defaults both
+    counts to 0 for everyone else). Returns an empty DataFrame (never
+    raises) if there's no matchFacts.events data at all - not every
+    competition/coverage level publishes a match timeline. Returns columns:
+    Team, Player, Yellow Cards, Red Cards.
+    """
+    columns = ['Team', 'Player', 'Yellow Cards', 'Red Cards']
+    events = None
+    content = match_json.get('content') if isinstance(match_json, dict) else None
+    if isinstance(content, dict):
+        match_facts = content.get('matchFacts')
+        if isinstance(match_facts, dict):
+            events_obj = match_facts.get('events')
+            if isinstance(events_obj, dict):
+                events = events_obj.get('events')
+    if not isinstance(events, list):
+        found = match_json.get('events') if isinstance(match_json, dict) else None
+        if isinstance(found, dict):
+            found = found.get('events')
+        if isinstance(found, list):
+            events = found
+    if not isinstance(events, list):
+        found = _search_for_key(match_json, {'events'})
+        if isinstance(found, dict):
+            found = found.get('events')
+        if isinstance(found, list):
+            events = found
+    if not isinstance(events, list):
+        return pd.DataFrame(columns=columns)
+
+    home_name, away_name = extract_team_names(match_json)
+
+    counts = {}  # (team, player) -> [yellow, red]
+    for e in events:
+        if not isinstance(e, dict) or e.get('type') != 'Card':
+            continue
+        card = e.get('card')
+        if card not in ('Yellow', 'Red', 'YellowRed'):
+            continue
+        player_info = e.get('player') if isinstance(e.get('player'), dict) else {}
+        name = player_info.get('name') or e.get('nameStr') or e.get('fullName')
+        if not name:
+            continue
+        team = home_name if e.get('isHome') else away_name
+        if not team:
+            continue
+        yellow, red = counts.setdefault((team, name), [0, 0])
+        if card in ('Yellow', 'YellowRed'):
+            yellow += 1
+        if card in ('Red', 'YellowRed'):
+            red += 1
+        counts[(team, name)] = [yellow, red]
+
+    rows = [
+        {'Team': t, 'Player': p, 'Yellow Cards': y, 'Red Cards': r}
+        for (t, p), (y, r) in counts.items()
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
 def extract_player_minutes(match_json):
     """
     Per-player minutes played for this match - FotMob's own figure, read the

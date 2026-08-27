@@ -151,6 +151,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     player_sprints = fr.extract_player_sprints(fm_match_json)
     player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
     player_lineup = fr.extract_player_age_and_start(fm_match_json)
+    player_cards = fr.extract_player_cards(fm_match_json)
     shot_breakdowns = fr.compute_shot_breakdowns(
         shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
     player_scoring = fr.compute_player_scoring_stats(
@@ -206,6 +207,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "fm_totals_df": fm_totals_df,
         "player_scoring": player_scoring,
         "player_lineup": player_lineup,
+        "player_cards": player_cards,
         "xg_breakdown": xg_breakdown,
         "shot_breakdowns": shot_breakdowns,
         "plus_minus": plus_minus,
@@ -373,6 +375,26 @@ def build_db_stats(report):
             key = (team, row["Player"])
             player_stats.setdefault(key, {})["fm_lineup"] = {
                 "Age": int(row["Age"]), "Started": bool(row["Started"])
+            }
+
+    # extract_player_cards()'s per-player Yellow/Red card counts for THIS
+    # match - its own 'fm_cards' namespace, read from yet another different
+    # part of FotMob's payload (content.matchFacts.events rather than
+    # playerStats or lineup - see that function's own docstring). Backs the
+    # Team Page's season General Stats table (history_db.fetch_team_season_
+    # scoring_stats()'s Totals block). Only players carded at least once
+    # appear in player_cards at all - everyone else simply never gets a
+    # 'fm_cards' entry here, which that fetch function's summing loop
+    # already treats as 0 (see its own docstring). Team names here are
+    # FotMob's own, same _to_ws_name() reconciliation as fm_scoring/
+    # fm_lineup above.
+    player_cards = report.get("player_cards")
+    if player_cards is not None and not player_cards.empty:
+        for _, row in player_cards.iterrows():
+            team = _to_ws_name(row["Team"])
+            key = (team, row["Player"])
+            player_stats.setdefault(key, {})["fm_cards"] = {
+                "Yellow Cards": int(row["Yellow Cards"]), "Red Cards": int(row["Red Cards"])
             }
 
     return team_stats, player_stats

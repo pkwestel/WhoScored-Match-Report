@@ -57,8 +57,10 @@ import whoscored_report as wr
 import fotmob_report as fr
 import combined_report as cr
 import batch_lib as bl
+from app_logo import render_logo_top_right
 
 st.set_page_config(page_title="Combined Match Report", layout="wide")
+render_logo_top_right()
 st.title("Combined WhoScored + FotMob Match Report Generator")
 st.write(
     "Paste BOTH a WhoScored match-centre URL and a FotMob match URL for the SAME match. This "
@@ -151,6 +153,7 @@ if st.button("Generate Combined Report", type="primary"):
                 player_sprints = fr.extract_player_sprints(fm_match_json)
                 player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
                 player_lineup = fr.extract_player_age_and_start(fm_match_json)
+                player_cards = fr.extract_player_cards(fm_match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(
                     shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
                 player_scoring = fr.compute_player_scoring_stats(
@@ -203,6 +206,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "fm_totals_df": fm_totals_df,
                 "player_scoring": player_scoring,
                 "player_lineup": player_lineup,
+                "player_cards": player_cards,
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
                 "plus_minus": plus_minus,

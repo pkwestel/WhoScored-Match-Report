@@ -16,8 +16,8 @@ Local use:
     streamlit run dashboard_app.py
 
 Deploying to Streamlit Community Cloud:
-    1. Push this file, history_db.py, pitch_viz.py, and
-       kwest_thoughts_logo_v2.png to the GitHub repo - that's it, it does
+    1. Push this file, history_db.py, pitch_viz.py, app_logo.py, and
+       kwest_thoughts_logo_v3.png to the GitHub repo - that's it, it does
        NOT need whoscored_report.py, fotmob_report.py, selenium, or any of
        the scraping dependencies. (pitch_viz.py used to import
        whoscored_report.py just to read two float constants, which
@@ -59,8 +59,10 @@ import streamlit as st
 import history_db as hdb
 from pitch_viz import (plot_pass_map, plot_touch_map, PASS_CATEGORY_COLORS, TITLE_COLOR,
                        HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
+from app_logo import render_logo_top_right
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
+render_logo_top_right()
 
 
 def _database_url():
@@ -265,6 +267,99 @@ def _render_fixtures_like_table(df):
         link_columns=("Home Team", "Away Team"),
         raw_html_columns=("Report",),
     )
+
+
+def _render_grouped_stats_table(df):
+    """
+    Custom two-row-header HTML table, purpose-built for the Team Page's
+    General Stats table (see history_db.fetch_team_season_scoring_stats())
+    - a merged group-header row (colspan) sitting above the real per-column
+    labels, which neither st.dataframe nor _render_data_table_html above
+    (both single flat header rows) can do. Column GROUPING here must stay
+    in sync with that fetch function's own column order/names:
+      - Player, Age: no group label above them (each spans both header
+        rows via rowspan, per request).
+      - 'Playing Time': Appearances, Starts, Minutes.
+      - 'Totals': every remaining non-Per-90 column (Goals through Red
+        Cards, in whatever order fetch_team_season_scoring_stats() already
+        returns them - not hard-coded here, so a future column added to
+        that function's Totals block shows up here automatically).
+      - 'Per 90': every '<Stat> (Per 90)' column - the ' (Per 90)' suffix
+        is stripped back off for the SECOND header row's displayed label
+        (so e.g. Totals' 'Goals' and Per 90's 'Goals' columns show the
+        identical text 'Goals', disambiguated only by which group header
+        sits above them - the exact layout requested, and standard
+        practice on stats sites like FBref for a totals-vs-per90 pair).
+
+    NPxG/PS-xG/xA and every Per 90 column are shown to 2 decimal places
+    (0.00) - a plain '-' (this table's convention for "no value", e.g. Age
+    with no reading, or a Per 90 rate for a player with 0 minutes) is left
+    as-is rather than forced into that format.
+    """
+    if df.empty:
+        return
+
+    ungrouped = [c for c in ("Player", "Age") if c in df.columns]
+    playing_time_cols = [c for c in ("Appearances", "Starts", "Minutes") if c in df.columns]
+    per90_cols = [c for c in df.columns if c.endswith(" (Per 90)")]
+    totals_cols = [c for c in df.columns if c not in ungrouped + playing_time_cols + per90_cols]
+    ordered_cols = ungrouped + playing_time_cols + totals_cols + per90_cols
+    decimal_cols = {"NPxG", "PS-xG", "xA"} | set(per90_cols)
+
+    def _label(col):
+        return col[: -len(" (Per 90)")] if col.endswith(" (Per 90)") else col
+
+    def _th(text, extra=""):
+        return (f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+                f'white-space:nowrap;{extra}">{html.escape(str(text))}</th>')
+
+    row1_cells = [
+        f'<th rowspan="2" style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        f'text-align:left; white-space:nowrap;">{html.escape(col)}</th>'
+        for col in ungrouped
+    ]
+    for label, cols in (("Playing Time", playing_time_cols), ("Totals", totals_cols),
+                         ("Per 90", per90_cols)):
+        if cols:
+            row1_cells.append(
+                f'<th colspan="{len(cols)}" style="padding:6px 14px; border:1px solid #ddd; '
+                f'background:#e2e5ea; text-align:center; white-space:nowrap;">'
+                f'{html.escape(label)}</th>'
+            )
+
+    row2_cells = [
+        _th(_label(col), " text-align:right;") for col in playing_time_cols + totals_cols + per90_cols
+    ]
+
+    body_rows = []
+    for _, r in df.iterrows():
+        cells = []
+        for col in ordered_cols:
+            val = r[col]
+            align = "left" if col == "Player" else "right"
+            if pd.isna(val):
+                cell_html = "-"
+            elif col in decimal_cols and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.2f}"
+            else:
+                cell_html = html.escape(str(val))
+            cells.append(
+                f'<td style="padding:6px 14px; border:1px solid #ddd; text-align:{align}; '
+                f'white-space:nowrap;">{cell_html}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(f"""
+    <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead>
+                <tr>{"".join(row1_cells)}</tr>
+                <tr>{"".join(row2_cells)}</tr>
+            </thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def _match_picker(matches, key):
@@ -981,8 +1076,7 @@ def _render_team_page(db, team, season=None):
     if scoring_stats.empty:
         st.info(f"No scoring stats saved yet for {team} in {season}.")
     else:
-        st.dataframe(scoring_stats, use_container_width=False, hide_index=True,
-                     height=_no_scroll_height(scoring_stats))
+        _render_grouped_stats_table(scoring_stats)
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
