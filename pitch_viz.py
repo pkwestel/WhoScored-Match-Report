@@ -302,9 +302,13 @@ def draw_pitch(ax):
 # than touching it.
 _TITLE_LINE1_Y_IN = 0.32   # "{Player Name} ({Team})"
 _TITLE_LINE2_Y_IN = 0.66   # "vs {Opponent} (H/A)", or the caller's own subtitle (season views)
-_TITLE_LINE3_Y_IN = 1.28   # title_suffix ("Pass Map" / "Passes Received" / "Touch Map")
+_TITLE_LINE3_Y_IN = 0.98   # title_suffix ("Pass Map" / "All Passes" / "All Touches" / ...) -
+                           # tightened up from Line 2 (was 1.28, a wide "skipped line" gap -
+                           # shrunk per request so the map title sits closer to the line above it)
 _TITLE_DATE_Y_IN = 0.30    # top-right corner match date, roughly level with Line 1
-_TITLE_TOP_PAD_IN = 1.55   # total reserved top margin - see callers' fig_h calculation
+_TITLE_TOP_PAD_IN = 1.12   # total reserved top margin - see callers' fig_h calculation. Distance
+                           # from Line 3 down to the pitch itself is (this - _TITLE_LINE3_Y_IN),
+                           # also tightened (was 1.55, a 0.27in gap below Line 3) per request
 
 
 def _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,

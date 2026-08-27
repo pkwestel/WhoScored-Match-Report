@@ -566,6 +566,44 @@ def _team_filter_picker(df, team_col, key):
     return None if choice == "All teams" else choice
 
 
+def _current_season_and_league(db, match_ids):
+    """
+    Builds the season Pass Map/Passes Received/Touch Map's title Line 2 -
+    "{current season} {league}" (e.g. "2026-27 Premier League") - from the
+    actual matches these plotted passes/touches came from (match_ids),
+    rather than a fixed/guessed value.
+
+    'Current season' is the most recent season (by hdb._season_label(),
+    which returns 'YYYY/YY' - shown here with a dash instead, '2026-27',
+    to match the requested title format) among these match_ids. 'League'
+    is whichever competition value is most common among THAT season's
+    matches specifically (so an odd cup match this season doesn't
+    override the player's main league in the title).
+
+    Returns None if it can't be determined (no match_ids, no matching
+    rows, or no season/competition data on them) - callers should fall
+    back to a plain subtitle in that case.
+    """
+    if not match_ids:
+        return None
+    matches = hdb.fetch_matches(db)
+    if matches.empty:
+        return None
+    matches = matches[matches["match_id"].isin(set(match_ids))].copy()
+    if matches.empty:
+        return None
+    matches["season"] = matches["match_date"].apply(hdb._season_label)
+    seasons = matches["season"].dropna()
+    if seasons.empty:
+        return None
+    current_season = sorted(seasons.unique())[-1]
+    competitions = matches.loc[matches["season"] == current_season, "competition"].dropna()
+    if competitions.empty:
+        return None
+    league = competitions.mode().iloc[0]
+    return f"{current_season.replace('/', '-')} {league}"
+
+
 def _render_season_pass_map(db, mode):
     """
     Same chart as _render_pass_map() above, but aggregated across EVERY
@@ -623,7 +661,7 @@ def _render_season_pass_map(db, mode):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
-        title_suffix = "Season Pass Map"
+        title_suffix = "All Passes"
     else:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Matches", n_matches)
@@ -635,7 +673,7 @@ def _render_season_pass_map(db, mode):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
-        title_suffix = "Season Passes Received"
+        title_suffix = "All Passes Received"
 
     # team_filter is the team this player's data was scoped to, if the
     # picker above was used - otherwise (a player who's played for more
@@ -647,8 +685,16 @@ def _render_season_pass_map(db, mode):
         else None
     )
 
+    # Line 2 of the title: "{current season} {league}" (e.g. "2026-27
+    # Premier League") derived from these actual matches - see
+    # _current_season_and_league()'s own docstring. Falls back to the
+    # plain match-count subtitle if that can't be determined (e.g. no
+    # competition saved on these matches yet).
+    subtitle = (_current_season_and_league(db, player_passes["match_id"].unique().tolist())
+                or f"Season - {n_matches} match(es)")
+
     fig = plot_pass_map(player_passes, player, player_team, None, None, stat_items,
-                         title_suffix=title_suffix, subtitle=f"Season - {n_matches} match(es)")
+                         title_suffix=title_suffix, subtitle=subtitle)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -711,8 +757,14 @@ def _render_season_touchmap(db):
         else None
     )
 
+    # Line 2 of the title: "{current season} {league}" - see
+    # _current_season_and_league()'s own docstring; falls back to the
+    # plain match-count subtitle if that can't be determined.
+    subtitle = (_current_season_and_league(db, player_touches["match_id"].unique().tolist())
+                or f"Season - {n_matches} match(es)")
+
     fig = plot_touch_map(player_touches, player, player_team=player_team,
-                          subtitle=f"Season - {n_matches} match(es)", stat_items=stat_items)
+                          subtitle=subtitle, title_suffix="All Touches", stat_items=stat_items)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
