@@ -150,6 +150,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     player_minutes = fr.extract_player_minutes(fm_match_json)
     player_sprints = fr.extract_player_sprints(fm_match_json)
     player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
+    player_lineup = fr.extract_player_age_and_start(fm_match_json)
     shot_breakdowns = fr.compute_shot_breakdowns(
         shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
     player_scoring = fr.compute_player_scoring_stats(
@@ -204,6 +205,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "fm_match_id": fm_match_id,
         "fm_totals_df": fm_totals_df,
         "player_scoring": player_scoring,
+        "player_lineup": player_lineup,
         "xg_breakdown": xg_breakdown,
         "shot_breakdowns": shot_breakdowns,
         "plus_minus": plus_minus,
@@ -352,6 +354,25 @@ def build_db_stats(report):
             key = (team, row["Player"])
             player_stats.setdefault(key, {})["fm_line_breaking_passes"] = {
                 "Line Breaking Passes": int(row["Line Breaking Passes"])
+            }
+
+    # extract_player_age_and_start()'s per-player Age/Started (starting XI
+    # vs substitute) for THIS match - its own namespace, 'fm_lineup', read
+    # from a different part of FotMob's payload than every other fm_*
+    # namespace here (content.lineup rather than content.playerStats - see
+    # that function's own docstring). Backs the Team Page's season Scoring
+    # Stats table (history_db.fetch_team_season_scoring_stats()) - Age
+    # specifically is "age as of this match", not a birthdate, which is why
+    # that function picks one match's reading rather than summing/averaging
+    # across matches the way every other column there does. Team names here
+    # are FotMob's own, same _to_ws_name() reconciliation as fm_scoring.
+    player_lineup = report.get("player_lineup")
+    if player_lineup is not None and not player_lineup.empty:
+        for _, row in player_lineup.iterrows():
+            team = _to_ws_name(row["Team"])
+            key = (team, row["Player"])
+            player_stats.setdefault(key, {})["fm_lineup"] = {
+                "Age": int(row["Age"]), "Started": bool(row["Started"])
             }
 
     return team_stats, player_stats

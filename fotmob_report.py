@@ -1317,6 +1317,70 @@ def extract_player_line_breaking_passes(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+def extract_player_age_and_start(match_json):
+    """
+    Per-player age (FotMob's own figure, as of THIS match's date - not a
+    birthdate) and starter-vs-substitute status - read from a COMPLETELY
+    different part of the payload than every other per-player extractor in
+    this module (those all read content.playerStats, keyed by playerId;
+    this reads content.lineup.homeTeam/awayTeam.starters/subs instead,
+    CONFIRMED against a real live match_json dump, fotmob_raw_5795364.json:
+    each entry there is {'id', 'age', 'name', ...}, with starters/subs as
+    two SEPARATE lists rather than one list with a role flag - Started is
+    True for every entry under 'starters', False for every entry under
+    'subs'). Falls back to a top-level 'lineup' key, then a generic
+    _search_for_key() - same defensive-lookup chain extract_team_id_map()
+    uses for this same structure, since API response shape has been
+    observed to shift.
+
+    Team name comes from lineup.homeTeam/awayTeam's own 'name' field
+    (individual player entries here carry no teamId of their own to look
+    up) - the exact same field extract_team_names() itself falls back to
+    for this same 'lineup' structure, so it reconciles against WhoScored's
+    own team name the same way as every other FotMob-sourced stat (see
+    batch_lib.build_db_stats()'s docstring).
+
+    Used by history_db.fetch_team_season_scoring_stats()'s Age/Starts
+    columns - Age specifically only makes sense as "age at a known date",
+    so that function picks whichever match is earliest in the season for a
+    given player rather than overwriting/averaging across matches (see its
+    own docstring for why). A match with no lineup data at all (not every
+    competition/coverage level publishes one) returns an empty DataFrame
+    rather than raising. Returns columns: Team, Player, Age, Started.
+    """
+    columns = ['Team', 'Player', 'Age', 'Started']
+    lineup = None
+    content = match_json.get('content') if isinstance(match_json, dict) else None
+    if isinstance(content, dict) and isinstance(content.get('lineup'), dict):
+        lineup = content['lineup']
+    elif isinstance(match_json, dict) and isinstance(match_json.get('lineup'), dict):
+        lineup = match_json['lineup']
+    else:
+        found = _search_for_key(match_json, {'lineup'})
+        if isinstance(found, dict):
+            lineup = found
+    if not isinstance(lineup, dict):
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for side in ('homeTeam', 'awayTeam'):
+        team_data = lineup.get(side)
+        if not isinstance(team_data, dict):
+            continue
+        team_name = team_data.get('name')
+        if not team_name:
+            continue
+        for started, list_key in [(True, 'starters'), (False, 'subs')]:
+            for p in team_data.get(list_key) or []:
+                if not isinstance(p, dict):
+                    continue
+                age, name = p.get('age'), p.get('name')
+                if age is None or not name:
+                    continue
+                rows.append({'Team': team_name, 'Player': name, 'Age': int(age), 'Started': started})
+    return pd.DataFrame(rows, columns=columns)
+
+
 def extract_player_minutes(match_json):
     """
     Per-player minutes played for this match - FotMob's own figure, read the

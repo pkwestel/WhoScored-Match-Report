@@ -1825,77 +1825,122 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     Season-cumulative version of the match report's own Scoring Stats
     category table (see fetch_player_scoring_stats()) for the Team Page:
     every player who's appeared for this team in this season, with their
-    Minutes Played/Goals/Assists/Shots/SCA/NPxG/PS-xG/xA/PK/PK Attempted/
-    Sprints SUMMED across every one of this team's matches this season,
-    rather than shown for just one match. Same column set/order and
-    decimal-vs-whole-number convention as the match report's version (see
-    _SCORING_STATS_COLUMNS/_DECIMAL_STAT_COLUMNS) - column labels are left
-    exactly as-is (no 'Total ...' relabeling) even though every number here
-    is a season sum, per request. Only counts what this player did while
-    playing for THIS team - a mid-season transfer's stats at their previous
-    club aren't included.
+    Goals/Assists/Shots/SCA/NPxG/PS-xG/xA/PK/PK Attempted/Sprints/Minutes
+    (FotMob's own 'Minutes Played', relabeled 'Minutes' here per request)
+    SUMMED across every one of this team's matches this season, rather than
+    shown for just one match - plus three columns the match report doesn't
+    have at all: Age, Appearances, Starts (in that order, right after
+    Player - Age specifically per request; Appearances/Starts because they
+    only make sense season-wide, not per-match). Column labels otherwise
+    match the match report's own exactly (no 'Total ...' relabeling) even
+    though every number here is a season sum. Only counts what this player
+    did while playing for THIS team - a mid-season transfer's stats at
+    their previous club aren't included.
 
-    A match missing 'fm_scoring'/'ws_passing' entirely (an older save from
-    before those namespaces existed) simply doesn't contribute to that
-    player's sum for that match - there's no clean per-cell way to flag "an
-    early match's data is missing from this total" the way a single match's
-    '-' convention works, so every number here is always a real (if
-    potentially undercounted for very old data) sum, never '-'.
+    Age is fundamentally different from every summed column here - FotMob
+    only ever reports "this player's age AS OF this match's date", never a
+    real birthdate (see fotmob_report.extract_player_age_and_start()), so
+    it can't be summed/averaged the way Goals or Minutes can, and it WOULD
+    silently increment mid-season if simply re-read from each new match
+    (a real birthday can fall between two of this team's matches). Per
+    request that this column "shouldn't change during the season", this
+    uses whichever of this team's saved matches is EARLIEST in the season
+    for a given player and freezes that reading for the rest of the season,
+    regardless of how many later matches get saved afterward - the first
+    real match of a season and "the first day of the season" are close
+    enough in practice that this is normally exact, and it's guaranteed
+    stable either way. Appearances counts matches with Minutes Played > 0
+    (the standard definition - being an unused substitute doesn't count);
+    Starts counts matches FotMob's own lineup marked this player as part of
+    the starting XI (fm_lineup's 'Started' flag) regardless of how long
+    they were on the pitch. 'Team Total' sums Appearances/Starts/every
+    other numeric column the same way the match report's own Team Total
+    row does; Age has no sensible team total, so it shows '-' there.
 
-    'Team Total' row at the bottom sums every player's numbers, matching
-    the match report's own bottom-row convention. Sorted by Minutes Played,
-    descending (most-used players first). Returns an empty DataFrame if
-    this team has no matches saved for this season at all.
+    A match missing 'fm_scoring'/'ws_passing'/'fm_lineup' entirely (an
+    older save from before those namespaces existed) simply doesn't
+    contribute to that player's numbers for that match - there's no clean
+    per-cell way to flag "an early match's data is missing from this
+    total" the way a single match's '-' convention works, so every summed
+    number here is always a real (if potentially undercounted for very old
+    data) total, never '-'.
+
+    Sorted by Minutes, descending (most-used players first). Returns an
+    empty DataFrame if this team has no matches saved for this season.
     """
-    cols = ["Player"] + _SCORING_STATS_COLUMNS
+    sum_cols = _SCORING_STATS_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
+    out_cols = ["Player", "Age", "Appearances", "Starts"] + [
+        "Minutes" if c == "Minutes Played" else c for c in sum_cols
+    ]
+
     matches = fetch_matches(db)
     if matches.empty:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=out_cols)
     matches = matches.copy()
     matches["season"] = matches["match_date"].apply(_season_label)
     team_matches = matches[
         ((matches["home_team"] == team) | (matches["away_team"] == team))
         & (matches["season"] == season)
-    ]
+    ].sort_values("match_date")  # chronological - "earliest match with an Age reading" needs this order
     if team_matches.empty:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=out_cols)
 
-    totals_by_player = {}
+    sums, appearances, starts, ages = {}, {}, {}, {}
     for match_id in team_matches["match_id"]:
-        df = _fetch_player_namespaces(db, match_id, ["fm_scoring", "ws_passing"])
+        df = _fetch_player_namespaces(db, match_id, ["fm_scoring", "ws_passing", "fm_lineup"])
         if df.empty:
             continue
         sub = df[df["Team"] == team]
         if sub.empty:
             continue
-        present_cols = [c for c in _SCORING_STATS_COLUMNS if c in sub.columns]
+        present_cols = [c for c in sum_cols if c in sub.columns]
         for _, r in sub.iterrows():
             player = r["Player"]
-            row_totals = totals_by_player.setdefault(player, {c: 0.0 for c in _SCORING_STATS_COLUMNS})
+            row_totals = sums.setdefault(player, {c: 0.0 for c in sum_cols})
             for c in present_cols:
                 v = pd.to_numeric(r[c], errors="coerce")
                 row_totals[c] += 0.0 if pd.isna(v) else float(v)
 
-    if not totals_by_player:
-        return pd.DataFrame(columns=cols)
+            minutes = pd.to_numeric(r.get("Minutes Played"), errors="coerce")
+            if pd.notna(minutes) and minutes > 0:
+                appearances[player] = appearances.get(player, 0) + 1
+
+            if r.get("Started") is True:
+                starts[player] = starts.get(player, 0) + 1
+
+            if player not in ages:
+                age_val = r.get("Age")
+                if pd.notna(age_val):
+                    ages[player] = int(age_val)
+
+    if not sums:
+        return pd.DataFrame(columns=out_cols)
 
     records = []
-    for player, totals in totals_by_player.items():
-        rec = {"Player": player}
-        for c in _SCORING_STATS_COLUMNS:
+    for player, totals in sums.items():
+        rec = {
+            "Player": player,
+            "Age": ages.get(player, "-"),
+            "Appearances": appearances.get(player, 0),
+            "Starts": starts.get(player, 0),
+        }
+        for c in sum_cols:
             v = totals[c]
-            rec[c] = round(v, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(v))
+            out_name = "Minutes" if c == "Minutes Played" else c
+            rec[out_name] = round(v, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(v))
         records.append(rec)
 
-    out = (pd.DataFrame(records, columns=cols)
-           .sort_values("Minutes Played", ascending=False)
+    out = (pd.DataFrame(records, columns=out_cols)
+           .sort_values("Minutes", ascending=False)
            .reset_index(drop=True))
 
-    team_total = {"Player": "Team Total"}
-    for c in _SCORING_STATS_COLUMNS:
+    team_total = {"Player": "Team Total", "Age": "-"}
+    for c in out_cols:
+        if c in ("Player", "Age"):
+            continue
         s = out[c].sum()
         team_total[c] = round(s, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(s))
-    return pd.concat([out, pd.DataFrame([team_total])], ignore_index=True)
+    return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
 def fetch_season_passing_totals(db: DB) -> pd.DataFrame:

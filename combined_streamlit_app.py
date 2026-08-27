@@ -150,6 +150,7 @@ if st.button("Generate Combined Report", type="primary"):
                 player_minutes = fr.extract_player_minutes(fm_match_json)
                 player_sprints = fr.extract_player_sprints(fm_match_json)
                 player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
+                player_lineup = fr.extract_player_age_and_start(fm_match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(
                     shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
                 player_scoring = fr.compute_player_scoring_stats(
@@ -201,6 +202,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "fm_match_id": fm_match_id,
                 "fm_totals_df": fm_totals_df,
                 "player_scoring": player_scoring,
+                "player_lineup": player_lineup,
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
                 "plus_minus": plus_minus,
