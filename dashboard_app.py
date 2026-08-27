@@ -46,9 +46,11 @@ dashboard is replaced by _render_match_detail()'s single-match view instead
 where both are visible at once.
 """
 
+import html
 import io
 import os
 import re
+from urllib.parse import quote
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -141,6 +143,95 @@ def _no_scroll_height(df) -> int:
     a few px of border padding on top.
     """
     return int(len(df) + 1) * 35 + 3
+
+
+def _team_page_url(team_name):
+    """
+    Relative '?team=<url-encoded name>' link to a team's Team Page (see
+    _render_team_page()'s own dispatch at the bottom of this module - same
+    'no multipage app, swap the page via a query param' pattern as
+    _render_match_detail()'s '?match_id=<id>'). Works for ANY team name,
+    including one that's never been seen before (a brand new fixture's
+    team) - there's no separate registry of "known" teams to keep in sync,
+    the link is just built from whatever string is already in the table
+    being rendered. Returns None for a missing/blank name.
+    """
+    if not team_name or (isinstance(team_name, float) and pd.isna(team_name)):
+        return None
+    return f"?team={quote(str(team_name))}"
+
+
+def _linkify_team_cell(team_name):
+    """
+    HTML for one team-name table cell: a real '<a href="?team=...">' link
+    with the clean, human-readable team name as its own display text -
+    deliberately NOT built with st.dataframe's own column_config.LinkColumn
+    (used elsewhere in this app for the Fixtures 'Report' column), since
+    LinkColumn's display text is either one fixed string for every row or
+    extracted via regex straight from the URL - the latter would show the
+    url-encoded name itself (e.g. 'Manchester%20United') rather than a
+    normal-looking team name. A blank/missing name renders as plain empty
+    text rather than a dead link.
+    """
+    if not team_name or (isinstance(team_name, float) and pd.isna(team_name)):
+        return ""
+    url = _team_page_url(team_name)
+    return f'<a href="{url}" style="color:inherit; text-decoration:underline;">{html.escape(str(team_name))}</a>'
+
+
+def _render_data_table_html(df, link_columns=(), raw_html_columns=()):
+    """
+    Renders df as a plain HTML table via st.markdown (bordered cells, bold
+    light-grey header row - a reasonably close match to st.dataframe's own
+    look) instead of st.dataframe, specifically so any column named in
+    link_columns can be rendered as real team-name links (see
+    _linkify_team_cell()) rather than plain text. Used for the League
+    Table, the 5 season Team Stats category tables, and the Fixtures table
+    - all previously plain st.dataframe calls before team-name links were
+    added. Numeric columns are shown right-aligned, link_columns/
+    raw_html_columns left-aligned, matching st.dataframe's own default
+    alignment convention.
+
+    raw_html_columns is for a column whose cell values are ALREADY a
+    ready-to-insert HTML snippet (e.g. Fixtures' 'Report' column, a
+    '<a href="?match_id=...">View →</a>' link to the match detail view,
+    built by the caller before this function ever sees it) - inserted as-is
+    rather than html-escaped, unlike every other column.
+    """
+    if df.empty:
+        return
+    left_columns = set(link_columns) | set(raw_html_columns)
+    header_cells = "".join(
+        f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        f'text-align:{"left" if col in left_columns else "right"}; white-space:nowrap;">'
+        f'{html.escape(str(col))}</th>'
+        for col in df.columns
+    )
+    body_rows = []
+    for _, r in df.iterrows():
+        cells = []
+        for col in df.columns:
+            val = r[col]
+            if col in link_columns:
+                cell_html, align = _linkify_team_cell(val), "left"
+            elif col in raw_html_columns:
+                cell_html, align = ("" if pd.isna(val) else str(val)), "left"
+            else:
+                cell_html = "-" if pd.isna(val) else html.escape(str(val))
+                align = "right"
+            cells.append(
+                f'<td style="padding:6px 14px; border:1px solid #ddd; text-align:{align}; '
+                f'white-space:nowrap;">{cell_html}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+    st.markdown(f"""
+    <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead><tr>{header_cells}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def _match_picker(matches, key):
@@ -753,93 +844,119 @@ def _render_match_detail(db, match_id):
         _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"], row["Date"])
 
 
+def _render_team_page(db, team, season=None):
+    """
+    The '?team=<name>' Team Page a League Table/Team Stats/Fixtures row's
+    team-name link opens (see _linkify_team_cell()) - same "no multipage
+    app, swap the whole page via a query param" pattern as
+    _render_match_detail()'s '?match_id=<id>' (see this module's own
+    docstring). There's no Team dropdown here - the link itself IS the team
+    picker - just a small Season dropdown next to the title, for whenever
+    more than one season's worth of data exists (today there's only one).
+
+    season is whatever _team_page_url() baked into the link (currently
+    always None, since that link never sets a season) - falls back to this
+    team's most recent season if not given/not a real season.
+    """
+    seasons = hdb.fetch_available_seasons(db)
+    if not seasons:
+        st.info("No matches published yet.")
+        return
+    if season not in seasons:
+        season = seasons[0]
+
+    # Season dropdown rendered FIRST (even though it visually sits in the
+    # right-hand column, to the title's right) so its current value is
+    # known before the title text below is built - st.columns() controls
+    # visual position, not code order, so this is safe.
+    title_col, season_col = st.columns([6, 1])
+    with season_col:
+        season = st.selectbox(
+            "Season", seasons, index=seasons.index(season),
+            key="team_page_season", label_visibility="collapsed",
+        )
+
+    stats = hdb.fetch_team_page_stats(db, team, season=season)
+    with title_col:
+        title_season = stats["season"] if stats else season
+        st.markdown(f'<div style="font-size:2em; font-weight:bold;">{title_season} {team}</div>',
+                    unsafe_allow_html=True)
+
+    if stats is None:
+        st.info(f"No stats saved yet for {team} in {season}.")
+        return
+
+    record = f"{stats['w']}-{stats['d']}-{stats['l']}"
+    home, away = stats["home"], stats["away"]
+    home_record = f"{home['w']}-{home['d']}-{home['l']}"
+    away_record = f"{away['w']}-{away['d']}-{away['l']}"
+    rank_ordinal = hdb.ordinal(stats["league_rank"])
+
+    st.markdown(f"""
+    <div>
+        <div style="margin-top:10px; font-size:1.05em;">
+            <b>Record:</b> {record}, {stats['points']} points ({stats['ppg']:.2f} points per game),
+            {rank_ordinal} in the {stats['competition']}
+        </div>
+        <div style="margin-top:4px; font-size:1.05em;">
+            <b>Home Record:</b> {home_record}, {home['points']} points
+            &nbsp;&nbsp;&nbsp;&nbsp;
+            <b>Away Record:</b> {away_record}, {away['points']} points
+        </div>
+        <div style="margin-top:4px; font-size:1.05em;">
+            <b>Goals:</b> {stats['goals_for']} ({stats['goals_for_pg']:.2f} per game)
+            &nbsp;&nbsp;&nbsp;&nbsp;
+            <b>Goals Against:</b> {stats['goals_against']} ({stats['goals_against_pg']:.2f} per game)
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:1.4em;'></div>", unsafe_allow_html=True)
+
+    possession_display = f"{stats['possession']:.1f}%" if stats["possession"] is not None else "-"
+    headline_stats = [
+        ("Avg Possession", possession_display, stats["possession_rank"]),
+        ("Shots", f"{stats['shots_pg']:.2f}", stats["shots_rank"]),
+        ("xG", f"{stats['xg_pg']:.2f}", stats["xg_rank"]),
+        ("Shots Against", f"{stats['shots_against_pg']:.2f}", stats["shots_against_rank"]),
+        ("xGA", f"{stats['xga_pg']:.2f}", stats["xga_rank"]),
+    ]
+    headline_cols = st.columns(len(headline_stats))
+    for col, (label, value, rank) in zip(headline_cols, headline_stats):
+        with col:
+            rank_display = f"({hdb.ordinal(rank)})" if rank is not None else "-"
+            st.markdown(f"""
+            <div style="text-align:center;">
+                <div style="font-size:1.3em; font-weight:bold;">{label}</div>
+                <div style="font-size:1.7em; font-weight:bold; margin-top:6px;">{value}</div>
+                <div style="font-size:0.85em; color:#666; margin-top:2px;">{rank_display}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's
-# "Report" link) swaps the WHOLE page over to the single-match detail view
-# instead of the normal tabbed dashboard - see this module's own docstring
-# for why a query param rather than a real second page.
+# "Report" link) swaps the WHOLE page over to the single-match detail view,
+# and a "?team=..." query param (set by clicking any team-name link - see
+# _linkify_team_cell()) swaps it over to that team's Team Page instead -
+# both instead of the normal tabbed dashboard. See this module's own
+# docstring for why a query param rather than a real second page.
 # ============================================================
 _match_id_param = st.query_params.get("match_id")
+_team_param = st.query_params.get("team")
 
 if _match_id_param:
     _render_match_detail(db, _match_id_param)
+elif _team_param:
+    _render_team_page(db, _team_param)
 else:
     st.title("Match History Dashboard")
 
-    (tab_team_page, tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
+    (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
      tab_passrecv, tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
-        "Team Page", "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
+        "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
         "Passes Received", "Season Pass Map", "Season Passes Received", "Season Touch Map",
     ])
-
-    with tab_team_page:
-        seasons = hdb.fetch_available_seasons(db)
-        if not seasons:
-            st.info("No matches published yet.")
-        else:
-            all_matches = hdb.fetch_matches(db)
-            teams = sorted(set(all_matches["home_team"].dropna()) | set(all_matches["away_team"].dropna()))
-            picker_col1, picker_col2 = st.columns(2)
-            with picker_col1:
-                team_page_team = st.selectbox("Team", teams, key="team_page_team")
-            with picker_col2:
-                # Just one season exists today - still a real dropdown (rather
-                # than hard-coded) so a second season later needs no UI change.
-                team_page_season = st.selectbox("Season", seasons, key="team_page_season")
-
-            stats = hdb.fetch_team_page_stats(db, team_page_team, season=team_page_season)
-            if stats is None:
-                st.info(f"No stats saved yet for {team_page_team} in {team_page_season}.")
-            else:
-                record = f"{stats['w']}-{stats['d']}-{stats['l']}"
-                home = stats["home"]
-                away = stats["away"]
-                home_record = f"{home['w']}-{home['d']}-{home['l']}"
-                away_record = f"{away['w']}-{away['d']}-{away['l']}"
-                rank_ordinal = hdb.ordinal(stats["league_rank"])
-
-                st.markdown(f"""
-                <div>
-                    <div style="font-size:2em; font-weight:bold;">{stats['season']} {stats['team']}</div>
-                    <div style="margin-top:10px; font-size:1.05em;">
-                        <b>Record:</b> {record}, {stats['points']} points ({stats['ppg']:.2f} points per game),
-                        {rank_ordinal} in the {stats['competition']}
-                    </div>
-                    <div style="margin-top:4px; font-size:1.05em;">
-                        <b>Home Record:</b> {home_record}, {home['points']} points
-                        &nbsp;&nbsp;&nbsp;&nbsp;
-                        <b>Away Record:</b> {away_record}, {away['points']} points
-                    </div>
-                    <div style="margin-top:4px; font-size:1.05em;">
-                        <b>Goals:</b> {stats['goals_for']} ({stats['goals_for_pg']:.2f} per game)
-                        &nbsp;&nbsp;&nbsp;&nbsp;
-                        <b>Goals Against:</b> {stats['goals_against']} ({stats['goals_against_pg']:.2f} per game)
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.markdown("<div style='height:1.4em;'></div>", unsafe_allow_html=True)
-
-                possession_display = (f"{stats['possession']:.1f}%"
-                                       if stats["possession"] is not None else "-")
-                headline_stats = [
-                    ("Avg Possession", possession_display, stats["possession_rank"]),
-                    ("Shots", f"{stats['shots_pg']:.2f}", stats["shots_rank"]),
-                    ("xG", f"{stats['xg_pg']:.2f}", stats["xg_rank"]),
-                    ("Shots Against", f"{stats['shots_against_pg']:.2f}", stats["shots_against_rank"]),
-                    ("xGA", f"{stats['xga_pg']:.2f}", stats["xga_rank"]),
-                ]
-                headline_cols = st.columns(len(headline_stats))
-                for col, (label, value, rank) in zip(headline_cols, headline_stats):
-                    with col:
-                        rank_display = f"({hdb.ordinal(rank)})" if rank is not None else "-"
-                        st.markdown(f"""
-                        <div style="text-align:center;">
-                            <div style="font-size:1.3em; font-weight:bold;">{label}</div>
-                            <div style="font-size:1.7em; font-weight:bold; margin-top:6px;">{value}</div>
-                            <div style="font-size:0.85em; color:#666; margin-top:2px;">{rank_display}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
 
     with tab_team_totals:
         league_table = hdb.fetch_league_table(db)
@@ -850,17 +967,13 @@ else:
             )
         else:
             st.subheader("League Table")
-            # use_container_width=False (rather than the True used almost
-            # everywhere else in this app) is deliberate here - a stretched-
-            # to-fill table with only ~12 mostly single/double-digit columns
-            # (W/D/L/GF/GA/...) ends up with huge padding per cell on a wide
-            # screen. False lets Streamlit size each column to its actual
-            # content instead, which is far more compact for a table this
-            # narrow in substance. height=_no_scroll_height(...) sizes the
-            # table to fit every team's row with no internal scrollbar - the
-            # page scrolls instead, if needed.
-            st.dataframe(league_table, use_container_width=False, hide_index=True,
-                         height=_no_scroll_height(league_table))
+            # Rendered via _render_data_table_html() (rather than
+            # st.dataframe) so the Team column can be a real link to that
+            # team's Team Page (see _linkify_team_cell()) - st.dataframe's
+            # own LinkColumn can't show a clean, human-readable team name as
+            # the link text (only a fixed string or a regex pulled straight
+            # from the url-encoded URL itself).
+            _render_data_table_html(league_table, link_columns=("Team",))
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
@@ -890,20 +1003,16 @@ else:
                     if c != "Team":
                         shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
                 shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
-                # use_container_width=False here and on the other Team Stats
-                # tables below - same reasoning as the League Table above,
-                # sized to actual content rather than stretched full-width -
-                # and height=_no_scroll_height(...) so none of these tables
-                # scroll internally either.
-                st.dataframe(shot_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(shot_totals))
+                # Team column linked to that team's Team Page - see the
+                # League Table above for why this uses _render_data_table_html()
+                # rather than st.dataframe.
+                _render_data_table_html(shot_totals, link_columns=("Team",))
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(db)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
-                st.dataframe(passing_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(passing_totals))
+                _render_data_table_html(passing_totals, link_columns=("Team",))
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(db)
             if touches_totals.empty:
@@ -913,8 +1022,7 @@ else:
                     "backfill it."
                 )
             else:
-                st.dataframe(touches_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(touches_totals))
+                _render_data_table_html(touches_totals, link_columns=("Team",))
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -929,8 +1037,7 @@ else:
                     "first."
                 )
             else:
-                st.dataframe(defensive_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(defensive_totals))
+                _render_data_table_html(defensive_totals, link_columns=("Team",))
         elif totals_category == "Defensive Action Location":
             defensive_location_totals = hdb.fetch_season_defensive_location_totals(db)
             if defensive_location_totals.empty:
@@ -940,8 +1047,7 @@ else:
                     "report app to backfill it."
                 )
             else:
-                st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(defensive_location_totals))
+                _render_data_table_html(defensive_location_totals, link_columns=("Team",))
 
     with tab_fixtures:
         fixtures = hdb.fetch_fixtures(db)
@@ -991,28 +1097,33 @@ else:
                 display_df = scoped.copy()
                 # A relative link back to this same app with ?match_id=<id> set -
                 # clicking it is what triggers the dispatch above into the
-                # single-match detail view. Built here (rather than as a plain
-                # displayed column) so it renders as a real clickable link via
-                # LinkColumn below, not a big unreadable URL string.
-                display_df["Report"] = display_df["match_id"].apply(lambda m: f"?match_id={m}")
+                # single-match detail view. Built as a ready-made <a> tag (see
+                # _render_data_table_html()'s raw_html_columns) rather than
+                # st.dataframe's own LinkColumn, since this table also needs
+                # Home Team/Away Team to be links to a DIFFERENT page (the
+                # Team Page - see _linkify_team_cell()), and mixing both link
+                # styles is simplest done in one consistent HTML table.
+                display_df["Report"] = display_df["match_id"].apply(
+                    lambda m: f'<a href="?match_id={m}">View →</a>'
+                )
+                # Pre-formatted to 2 decimal places as plain strings (rather
+                # than relying on st.dataframe's own NumberColumn, which this
+                # HTML table has no equivalent of) - '-' for a match with no
+                # saved xG yet, same convention as everywhere else in the app.
+                display_df["Home xG"] = display_df["Home xG"].apply(
+                    lambda v: f"{v:.2f}" if pd.notna(v) else None
+                )
+                display_df["Away xG"] = display_df["Away xG"].apply(
+                    lambda v: f"{v:.2f}" if pd.notna(v) else None
+                )
                 # Season is still a filter above, just not its own column here -
                 # with (currently) only one season saved, showing it in every
                 # row is redundant.
                 display_df = display_df.drop(columns=["match_id", "Season"])
-                # use_container_width=False (rather than True) so columns size
-                # to their actual content instead of stretching to fill the
-                # page - same "condense the dead space" fix used elsewhere in
-                # this app (League Table, Team Stats, match report tables).
-                st.dataframe(
+                _render_data_table_html(
                     display_df,
-                    use_container_width=False,
-                    hide_index=True,
-                    height=_no_scroll_height(display_df),
-                    column_config={
-                        "Home xG": st.column_config.NumberColumn("Home xG", format="%.2f"),
-                        "Away xG": st.column_config.NumberColumn("Away xG", format="%.2f"),
-                        "Report": st.column_config.LinkColumn("Report", display_text="View →"),
-                    },
+                    link_columns=("Home Team", "Away Team"),
+                    raw_html_columns=("Report",),
                 )
                 st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
 
