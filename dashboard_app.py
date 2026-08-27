@@ -933,6 +933,22 @@ def _render_team_page(db, team, season=None):
             </div>
             """, unsafe_allow_html=True)
 
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+
+    # Match-report tables, season-cumulative rather than one match's worth -
+    # Scoring Stats is the first of these (per request); more categories
+    # (Possession, Passing, Defensive Actions, ...) land here the same way
+    # later. Column labels are the exact same ones the match report itself
+    # uses (see _SCORING_STATS_COLUMNS) - no 'Total ...' relabeling, even
+    # though every number is now a season sum rather than one match's.
+    st.subheader("Scoring Stats")
+    scoring_stats = hdb.fetch_team_season_scoring_stats(db, team, season)
+    if scoring_stats.empty:
+        st.info(f"No scoring stats saved yet for {team} in {season}.")
+    else:
+        st.dataframe(scoring_stats, use_container_width=False, hide_index=True,
+                     height=_no_scroll_height(scoring_stats))
+
 
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's

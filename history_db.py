@@ -1820,6 +1820,84 @@ def fetch_team_page_stats(db: DB, team, season=None) -> dict:
     }
 
 
+def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
+    """
+    Season-cumulative version of the match report's own Scoring Stats
+    category table (see fetch_player_scoring_stats()) for the Team Page:
+    every player who's appeared for this team in this season, with their
+    Minutes Played/Goals/Assists/Shots/SCA/NPxG/PS-xG/xA/PK/PK Attempted/
+    Sprints SUMMED across every one of this team's matches this season,
+    rather than shown for just one match. Same column set/order and
+    decimal-vs-whole-number convention as the match report's version (see
+    _SCORING_STATS_COLUMNS/_DECIMAL_STAT_COLUMNS) - column labels are left
+    exactly as-is (no 'Total ...' relabeling) even though every number here
+    is a season sum, per request. Only counts what this player did while
+    playing for THIS team - a mid-season transfer's stats at their previous
+    club aren't included.
+
+    A match missing 'fm_scoring'/'ws_passing' entirely (an older save from
+    before those namespaces existed) simply doesn't contribute to that
+    player's sum for that match - there's no clean per-cell way to flag "an
+    early match's data is missing from this total" the way a single match's
+    '-' convention works, so every number here is always a real (if
+    potentially undercounted for very old data) sum, never '-'.
+
+    'Team Total' row at the bottom sums every player's numbers, matching
+    the match report's own bottom-row convention. Sorted by Minutes Played,
+    descending (most-used players first). Returns an empty DataFrame if
+    this team has no matches saved for this season at all.
+    """
+    cols = ["Player"] + _SCORING_STATS_COLUMNS
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=cols)
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+        & (matches["season"] == season)
+    ]
+    if team_matches.empty:
+        return pd.DataFrame(columns=cols)
+
+    totals_by_player = {}
+    for match_id in team_matches["match_id"]:
+        df = _fetch_player_namespaces(db, match_id, ["fm_scoring", "ws_passing"])
+        if df.empty:
+            continue
+        sub = df[df["Team"] == team]
+        if sub.empty:
+            continue
+        present_cols = [c for c in _SCORING_STATS_COLUMNS if c in sub.columns]
+        for _, r in sub.iterrows():
+            player = r["Player"]
+            row_totals = totals_by_player.setdefault(player, {c: 0.0 for c in _SCORING_STATS_COLUMNS})
+            for c in present_cols:
+                v = pd.to_numeric(r[c], errors="coerce")
+                row_totals[c] += 0.0 if pd.isna(v) else float(v)
+
+    if not totals_by_player:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for player, totals in totals_by_player.items():
+        rec = {"Player": player}
+        for c in _SCORING_STATS_COLUMNS:
+            v = totals[c]
+            rec[c] = round(v, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(v))
+        records.append(rec)
+
+    out = (pd.DataFrame(records, columns=cols)
+           .sort_values("Minutes Played", ascending=False)
+           .reset_index(drop=True))
+
+    team_total = {"Player": "Team Total"}
+    for c in _SCORING_STATS_COLUMNS:
+        s = out[c].sum()
+        team_total[c] = round(s, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(s))
+    return pd.concat([out, pd.DataFrame([team_total])], ignore_index=True)
+
+
 def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
     """
     Season-cumulative passing totals per team, summed across every player
