@@ -1151,16 +1151,14 @@ def _render_team_page(db, team, season=None):
     # (no merged/grouped header) since none of these were asked to grow
     # extra column groups the way General Stats was.
     #
-    # One toggle converts all 4 into their Per 90 rate at once, reusing the
-    # 'Minutes' column General Stats already computed above (Player ->
-    # Minutes, including its own 'Team Total' entry) rather than re-deriving
-    # minutes here - see _convert_to_per90()'s own docstring.
-    show_per90 = st.toggle(
-        "Show Per 90",
-        key="team_page_category_per90",
-        help="Converts the totals below into (stat / Minutes) × 90 rates instead "
-             "of season totals.",
-    )
+    # Each table gets its OWN independent Per 90 toggle (rather than one
+    # shared toggle for all 4) - a separate widget key per category means
+    # Streamlit tracks each one's on/off state completely separately, so
+    # switching e.g. Passing to Per 90 has no effect on Possession's own
+    # toggle. All 4 share the same 'Minutes' column General Stats already
+    # computed above (Player -> Minutes, including its own 'Team Total'
+    # entry) rather than re-deriving minutes per table - see
+    # _convert_to_per90()'s own docstring.
     minutes_by_player = (
         dict(zip(scoring_stats["Player"], scoring_stats["Minutes"])) if not scoring_stats.empty else {}
     )
@@ -1173,7 +1171,16 @@ def _render_team_page(db, team, season=None):
     ]
     for title, fetcher in _SEASON_CATEGORY_FETCHERS:
         st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
-        st.subheader(title)
+        header_col, toggle_col = st.columns([5, 1])
+        with header_col:
+            st.subheader(title)
+        with toggle_col:
+            show_per90 = st.toggle(
+                "Per 90",
+                key=f"team_page_per90_{title}",
+                help=f"Converts the {title} table into (stat / Minutes) × 90 rates "
+                     "instead of season totals.",
+            )
         category_df = fetcher(db, team, season)
         if category_df.empty:
             st.info(f"No {title.lower()} stats saved yet for {team} in {season}.")
