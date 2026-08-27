@@ -1108,6 +1108,30 @@ def _render_team_page(db, team, season=None):
     else:
         _render_fixtures_like_table(match_log)
 
+    # The remaining match-report Player Stats categories (see the match
+    # detail view's own mt_players tab), season-cumulative the same way
+    # General Stats above is - one table per category (not a home/away
+    # split, since this whole page is already scoped to one team), each
+    # simply summed across every match this team's played this season via
+    # history_db._fetch_team_season_category_table(). Plain st.dataframe
+    # (no merged/grouped header) since none of these were asked to grow
+    # extra column groups the way General Stats was.
+    _SEASON_CATEGORY_FETCHERS = [
+        ("Possession", hdb.fetch_team_season_possession),
+        ("Passing", hdb.fetch_team_season_passing),
+        ("Defensive Actions", hdb.fetch_team_season_defensive_actions),
+        ("Defensive Action Locations", hdb.fetch_team_season_defensive_locations),
+    ]
+    for title, fetcher in _SEASON_CATEGORY_FETCHERS:
+        st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+        st.subheader(title)
+        category_df = fetcher(db, team, season)
+        if category_df.empty:
+            st.info(f"No {title.lower()} stats saved yet for {team} in {season}.")
+        else:
+            st.dataframe(category_df, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(category_df))
+
 
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's

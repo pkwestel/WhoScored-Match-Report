@@ -2041,6 +2041,115 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
+def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, columns: list) -> pd.DataFrame:
+    """
+    Season-cumulative version of _player_category_table() above (the match
+    detail view's per-match Player Stats category tables): every player
+    who's appeared for TEAM in SEASON, with each of `columns` SUMMED across
+    every one of the team's saved matches this season rather than shown for
+    just one match, plus a 'Team Total' row at the bottom summing every
+    column the same way. Backs the Team Page's season Possession/Passing/
+    Defensive Actions/Defensive Action Locations tables - see
+    fetch_team_season_possession()/fetch_team_season_passing()/
+    fetch_team_season_defensive_actions()/fetch_team_season_defensive_
+    locations() below for which namespace/columns each one uses (the exact
+    same ones their per-match fetch_player_*() counterpart already reads).
+
+    Unlike fetch_team_season_scoring_stats() (which this deliberately
+    doesn't share code with, despite the similar shape), there's no Age/
+    Appearances/Starts/Per-90/card-count special-casing here - every column
+    across these 4 categories is a plain running count, so this stays a
+    much simpler "sum everything, sort by the first column" helper. Sorted
+    descending by whichever column is FIRST in `columns` (each category's
+    own natural "most involved player first" metric - Total Touches for
+    Possession, Passes Completed for Passing, etc.) rather than one shared
+    sort key like Minutes, since these 4 tables don't all share a column.
+
+    A match missing one of `namespaces` entirely (an older save from before
+    that namespace existed) simply doesn't contribute to that player's
+    numbers for that match - same reasoning as fetch_team_season_scoring_
+    stats()'s own docstring on why summed season totals can't cleanly show
+    '-' for "some underlying match's data is missing" the way a single
+    match's _player_category_table() can. Returns an empty DataFrame if
+    this team has no matches saved for this season.
+    """
+    out_cols = ["Player"] + columns
+
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=out_cols)
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+        & (matches["season"] == season)
+    ]
+    if team_matches.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    sums = {}
+    for match_id in team_matches["match_id"]:
+        df = _fetch_player_namespaces(db, match_id, namespaces)
+        if df.empty:
+            continue
+        sub = df[df["Team"] == team]
+        if sub.empty:
+            continue
+        present_cols = [c for c in columns if c in sub.columns]
+        for _, r in sub.iterrows():
+            player = r["Player"]
+            row_totals = sums.setdefault(player, {c: 0.0 for c in columns})
+            for c in present_cols:
+                v = pd.to_numeric(r[c], errors="coerce")
+                row_totals[c] += 0.0 if pd.isna(v) else float(v)
+
+    if not sums:
+        return pd.DataFrame(columns=out_cols)
+
+    records = []
+    for player, totals in sums.items():
+        rec = {"Player": player}
+        for c in columns:
+            rec[c] = int(round(totals[c]))
+        records.append(rec)
+
+    out = (pd.DataFrame(records, columns=out_cols)
+           .sort_values(columns[0], ascending=False)
+           .reset_index(drop=True))
+
+    team_total = {"Player": "Team Total"}
+    for c in columns:
+        team_total[c] = int(round(out[c].sum()))
+
+    return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
+
+
+def fetch_team_season_possession(db: DB, team, season) -> pd.DataFrame:
+    """Season-cumulative version of fetch_player_possession() for the Team Page."""
+    return _fetch_team_season_category_table(db, team, season, ["ws_touches"], _POSSESSION_COLUMNS)
+
+
+def fetch_team_season_passing(db: DB, team, season) -> pd.DataFrame:
+    """Season-cumulative version of fetch_player_passing() for the Team Page."""
+    return _fetch_team_season_category_table(
+        db, team, season, ["ws_passing", "fm_line_breaking_passes"], _PASSING_COLUMNS
+    )
+
+
+def fetch_team_season_defensive_actions(db: DB, team, season) -> pd.DataFrame:
+    """Season-cumulative version of fetch_player_defensive_actions() for the Team Page."""
+    return _fetch_team_season_category_table(
+        db, team, season, ["ws_defensive"], _DEFENSIVE_ACTIONS_COLUMNS
+    )
+
+
+def fetch_team_season_defensive_locations(db: DB, team, season) -> pd.DataFrame:
+    """Season-cumulative version of fetch_player_defensive_locations() for the Team Page."""
+    return _fetch_team_season_category_table(
+        db, team, season, ["ws_defensive_locations"], _DEFENSIVE_LOCATIONS_COLUMNS
+    )
+
+
 def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
     """
     Season-cumulative passing totals per team, summed across every player
