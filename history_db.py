@@ -2041,6 +2041,131 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
+# The 8 stats fetch_team_season_plus_minus() shows, in the order requested
+# (Goal Difference/xG Difference slotted in right after their own For/
+# Against pair) - also the exact list it shows a Per 90 rate for.
+_PLUS_MINUS_STATS = ["Goals For", "Goals Against", "Goal Difference", "Shots", "Shots Against",
+                      "xG", "xG Against", "xG Difference"]
+_PLUS_MINUS_DECIMAL_COLUMNS = {"xG", "xG Against", "xG Difference"}
+
+
+def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
+    """
+    Season-cumulative version of the match report's own FM Plus/Minus
+    table (fotmob_report.compute_plus_minus() - Goals For/Against, Shots/
+    Against, xG/Against, each totaled ONLY across the minutes a player was
+    actually on the pitch for, not the match's grand total - see that
+    function's own docstring) for the Team Page's 'Playing Time' table.
+    Every player who's appeared for this team this season, with each of
+    compute_plus_minus()'s own numbers SUMMED across every match, plus two
+    derived columns - Goal Difference (Goals For - Goals Against) and xG
+    Difference (xG - xG Against) - and a Per 90 rate for every one of
+    those 8 stats.
+
+    Same '(stat / Minutes) * 90' formula, '-' for a player with 0 total
+    minutes, and Team-Total-row-recomputed-from-summed-totals (rather than
+    averaging individual players' own rates) principle as
+    fetch_team_season_scoring_stats()'s own Per 90 columns - see that
+    function's docstring and _per90() above for the full reasoning; this
+    reuses that exact same _per90() helper.
+
+    Goal Difference/xG Difference are computed from the ALREADY-SUMMED
+    Goals For/Against and xG/xG Against (sum-then-subtract) - mathemat-
+    ically identical to subtracting each match's own difference and then
+    summing those (subtraction is linear), so there's exactly one 'true'
+    season Goal Difference/xG Difference per player here, not an
+    approximation of one.
+
+    Two-row merged-header display (a 'Totals' group for every summed
+    column, a 'Per 90' group for the 8 rate columns) is purely a display
+    concern, same as fetch_team_season_scoring_stats() - this function
+    just returns one flat DataFrame; dashboard_app._render_playing_time_
+    table() is what actually draws the merged group-header row.
+
+    Sorted by Minutes, descending, same convention as General Stats.
+    Returns an empty DataFrame if this team has no matches saved for this
+    season.
+    """
+    sum_cols = ["Minutes Played", "Goals For", "Goals Against", "Shots", "Shots Against", "xG", "xG Against"]
+    out_cols = (
+        ["Player", "Minutes", "Goals For", "Goals Against", "Goal Difference",
+         "Shots", "Shots Against", "xG", "xG Against", "xG Difference"]
+        + [f"{stat} (Per 90)" for stat in _PLUS_MINUS_STATS]
+    )
+
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=out_cols)
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+        & (matches["season"] == season)
+    ]
+    if team_matches.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    sums = {}
+    for match_id in team_matches["match_id"]:
+        df = _fetch_player_namespaces(db, match_id, ["fm_plus_minus"])
+        if df.empty:
+            continue
+        sub = df[df["Team"] == team]
+        if sub.empty:
+            continue
+        present_cols = [c for c in sum_cols if c in sub.columns]
+        for _, r in sub.iterrows():
+            player = r["Player"]
+            row_totals = sums.setdefault(player, {c: 0.0 for c in sum_cols})
+            for c in present_cols:
+                v = pd.to_numeric(r[c], errors="coerce")
+                row_totals[c] += 0.0 if pd.isna(v) else float(v)
+
+    if not sums:
+        return pd.DataFrame(columns=out_cols)
+
+    records = []
+    for player, totals in sums.items():
+        minutes = totals["Minutes Played"]
+        goal_diff = totals["Goals For"] - totals["Goals Against"]
+        xg_diff = totals["xG"] - totals["xG Against"]
+        rec = {
+            "Player": player,
+            "Minutes": int(round(minutes)),
+            "Goals For": int(round(totals["Goals For"])),
+            "Goals Against": int(round(totals["Goals Against"])),
+            "Goal Difference": int(round(goal_diff)),
+            "Shots": int(round(totals["Shots"])),
+            "Shots Against": int(round(totals["Shots Against"])),
+            "xG": round(totals["xG"], 2),
+            "xG Against": round(totals["xG Against"], 2),
+            "xG Difference": round(xg_diff, 2),
+        }
+        stat_values = {
+            "Goals For": totals["Goals For"], "Goals Against": totals["Goals Against"],
+            "Goal Difference": goal_diff, "Shots": totals["Shots"],
+            "Shots Against": totals["Shots Against"], "xG": totals["xG"],
+            "xG Against": totals["xG Against"], "xG Difference": xg_diff,
+        }
+        for stat in _PLUS_MINUS_STATS:
+            rec[f"{stat} (Per 90)"] = _per90(stat_values[stat], minutes)
+        records.append(rec)
+
+    out = (pd.DataFrame(records, columns=out_cols)
+           .sort_values("Minutes", ascending=False)
+           .reset_index(drop=True))
+
+    team_total = {"Player": "Team Total"}
+    for c in ["Minutes", "Goals For", "Goals Against", "Goal Difference", "Shots",
+              "Shots Against", "xG", "xG Against", "xG Difference"]:
+        s = out[c].sum()
+        team_total[c] = round(s, 2) if c in _PLUS_MINUS_DECIMAL_COLUMNS else int(round(s))
+    for stat in _PLUS_MINUS_STATS:
+        team_total[f"{stat} (Per 90)"] = _per90(team_total[stat], team_total["Minutes"])
+
+    return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
+
+
 def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, columns: list) -> pd.DataFrame:
     """
     Season-cumulative version of _player_category_table() above (the match

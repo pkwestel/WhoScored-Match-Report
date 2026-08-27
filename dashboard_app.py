@@ -268,42 +268,40 @@ def _render_fixtures_like_table(df):
     )
 
 
-def _render_grouped_stats_table(df):
+def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=()):
     """
-    Custom two-row-header HTML table, purpose-built for the Team Page's
-    General Stats table (see history_db.fetch_team_season_scoring_stats())
-    - a merged group-header row (colspan) sitting above the real per-column
-    labels, which neither st.dataframe nor _render_data_table_html above
-    (both single flat header rows) can do. Column GROUPING here must stay
-    in sync with that fetch function's own column order/names:
-      - Player, Age: no group label above them (each spans both header
-        rows via rowspan, per request).
-      - 'Playing Time': Appearances, Starts, Minutes.
-      - 'Totals': every remaining non-Per-90 column (Goals through Red
-        Cards, in whatever order fetch_team_season_scoring_stats() already
-        returns them - not hard-coded here, so a future column added to
-        that function's Totals block shows up here automatically).
-      - 'Per 90': every '<Stat> (Per 90)' column - the ' (Per 90)' suffix
-        is stripped back off for the SECOND header row's displayed label
-        (so e.g. Totals' 'Goals' and Per 90's 'Goals' columns show the
-        identical text 'Goals', disambiguated only by which group header
-        sits above them - the exact layout requested, and standard
-        practice on stats sites like FBref for a totals-vs-per90 pair).
+    Generic two-row-header HTML table: a merged group-header row (colspan,
+    one per (label, [cols]) in `groups`) sitting above the real per-column
+    labels - what powers both the Team Page's General Stats table (see
+    _render_general_stats_table()) and its Playing Time table (see
+    _render_playing_time_table()). Neither st.dataframe nor
+    _render_data_table_html above (both single flat header rows) can do a
+    merged group header.
 
-    NPxG/PS-xG/xA and every Per 90 column are shown to 2 decimal places
-    (0.00) - a plain '-' (this table's convention for "no value", e.g. Age
-    with no reading, or a Per 90 rate for a player with 0 minutes) is left
-    as-is rather than forced into that format.
+    ungrouped: column names shown with NO group label above them (e.g.
+    'Player', 'Age') - each spans both header rows via rowspan.
+    groups: ordered [(label, [col names]), ...] - each becomes one colspan
+    cell in the top header row (a group with an empty column list is
+    skipped, rather than drawing a zero-width header cell).
+    decimal_cols: column names (besides every '<Stat> (Per 90)' column,
+    which always gets this regardless) shown to 2 decimal places (0.00). A
+    plain '-' (this table's convention for "no value") is left as-is
+    rather than forced into that format.
+
+    A '<Stat> (Per 90)' column's SECOND header row label has its
+    ' (Per 90)' suffix stripped back off - so e.g. a Totals-block 'Goals'
+    and a Per-90-block 'Goals' column show the identical text 'Goals',
+    disambiguated only by which group header sits above them (standard
+    practice on stats sites like FBref for a totals-vs-per90 pair).
     """
     if df.empty:
         return
 
-    ungrouped = [c for c in ("Player", "Age") if c in df.columns]
-    playing_time_cols = [c for c in ("Appearances", "Starts", "Minutes") if c in df.columns]
     per90_cols = [c for c in df.columns if c.endswith(" (Per 90)")]
-    totals_cols = [c for c in df.columns if c not in ungrouped + playing_time_cols + per90_cols]
-    ordered_cols = ungrouped + playing_time_cols + totals_cols + per90_cols
-    decimal_cols = {"NPxG", "PS-xG", "xA"} | set(per90_cols)
+    all_decimal_cols = set(decimal_cols) | set(per90_cols)
+    ordered_cols = list(ungrouped)
+    for _, cols in groups:
+        ordered_cols += cols
 
     def _label(col):
         return col[: -len(" (Per 90)")] if col.endswith(" (Per 90)") else col
@@ -317,8 +315,7 @@ def _render_grouped_stats_table(df):
         f'text-align:left; white-space:nowrap;">{html.escape(col)}</th>'
         for col in ungrouped
     ]
-    for label, cols in (("Playing Time", playing_time_cols), ("Totals", totals_cols),
-                         ("Per 90", per90_cols)):
+    for label, cols in groups:
         if cols:
             row1_cells.append(
                 f'<th colspan="{len(cols)}" style="padding:6px 14px; border:1px solid #ddd; '
@@ -326,9 +323,7 @@ def _render_grouped_stats_table(df):
                 f'{html.escape(label)}</th>'
             )
 
-    row2_cells = [
-        _th(_label(col), " text-align:right;") for col in playing_time_cols + totals_cols + per90_cols
-    ]
+    row2_cells = [_th(_label(col), " text-align:right;") for _, cols in groups for col in cols]
 
     body_rows = []
     for _, r in df.iterrows():
@@ -338,7 +333,7 @@ def _render_grouped_stats_table(df):
             align = "left" if col == "Player" else "right"
             if pd.isna(val):
                 cell_html = "-"
-            elif col in decimal_cols and isinstance(val, (int, float)) and not isinstance(val, bool):
+            elif col in all_decimal_cols and isinstance(val, (int, float)) and not isinstance(val, bool):
                 cell_html = f"{val:.2f}"
             else:
                 cell_html = html.escape(str(val))
@@ -359,6 +354,44 @@ def _render_grouped_stats_table(df):
         </table>
     </div>
     """, unsafe_allow_html=True)
+
+
+def _render_general_stats_table(scoring_stats):
+    """
+    _render_grouped_stats_table() wrapper for the General Stats table -
+    see history_db.fetch_team_season_scoring_stats() for exactly which
+    columns belong to each group: Player/Age ungrouped, 'Playing Time'
+    (Appearances/Starts/Minutes), 'Totals' (everything else non-Per-90),
+    'Per 90' (every '<Stat> (Per 90)' column).
+    """
+    ungrouped = [c for c in ("Player", "Age") if c in scoring_stats.columns]
+    playing_time_cols = [c for c in ("Appearances", "Starts", "Minutes") if c in scoring_stats.columns]
+    per90_cols = [c for c in scoring_stats.columns if c.endswith(" (Per 90)")]
+    totals_cols = [c for c in scoring_stats.columns if c not in ungrouped + playing_time_cols + per90_cols]
+    _render_grouped_stats_table(
+        scoring_stats, ungrouped,
+        [("Playing Time", playing_time_cols), ("Totals", totals_cols), ("Per 90", per90_cols)],
+        decimal_cols={"NPxG", "PS-xG", "xA"},
+    )
+
+
+def _render_playing_time_table(plus_minus_df):
+    """
+    _render_grouped_stats_table() wrapper for the Team Page's Playing Time
+    table (the season-cumulative FM Plus/Minus table - see history_db.
+    fetch_team_season_plus_minus()) - just Player ungrouped, then a
+    'Totals' group for every summed column and a 'Per 90' group for the 8
+    '<Stat> (Per 90)' rate columns (no separate 'Playing Time' column-group
+    the way General Stats has, since Minutes itself is just one of this
+    table's own Totals columns here, not split out).
+    """
+    per90_cols = [c for c in plus_minus_df.columns if c.endswith(" (Per 90)")]
+    totals_cols = [c for c in plus_minus_df.columns if c != "Player" and c not in per90_cols]
+    _render_grouped_stats_table(
+        plus_minus_df, ["Player"],
+        [("Totals", totals_cols), ("Per 90", per90_cols)],
+        decimal_cols={"xG", "xG Against", "xG Difference"},
+    )
 
 
 def _convert_to_per90(df, minutes_by_player):
@@ -1156,7 +1189,20 @@ def _render_team_page(db, team, season=None):
     if scoring_stats.empty:
         st.info(f"No scoring stats saved yet for {team} in {season}.")
     else:
-        _render_grouped_stats_table(scoring_stats)
+        _render_general_stats_table(scoring_stats)
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+
+    # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
+    # xG For and Against, totaled for exactly the minutes each player was on
+    # the pitch, plus derived Goal Difference/xG Difference columns and
+    # their Per-90 versions) - see history_db.fetch_team_season_plus_minus().
+    st.subheader("Playing Time")
+    plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season)
+    if plus_minus_stats.empty:
+        st.info(f"No plus/minus stats saved yet for {team} in {season}.")
+    else:
+        _render_playing_time_table(plus_minus_stats)
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
