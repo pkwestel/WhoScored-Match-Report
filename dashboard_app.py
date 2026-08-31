@@ -50,7 +50,7 @@ import html
 import io
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -180,18 +180,92 @@ def _linkify_team_cell(team_name):
     return f'<a href="{url}" style="color:inherit; text-decoration:underline;">{html.escape(str(team_name))}</a>'
 
 
-def _render_data_table_html(df, link_columns=(), raw_html_columns=()):
+def _sort_query_param(sort_key):
+    return f"sort_{sort_key}"
+
+
+def _build_sort_href(sort_key, column, direction):
+    """
+    A same-page link href that sets THIS table's own sort_{sort_key} query
+    param to "{column}:{direction}" (see _apply_sort() below) while
+    preserving every OTHER currently-set query param - so clicking a
+    header on one sortable table doesn't reset a different sortable
+    table's own sort state when more than one is on the page at once (the
+    League Table sitting above a Team Stats category table, or the Shots
+    tab's separate For/Against tables).
+    """
+    params = dict(st.query_params)
+    params[_sort_query_param(sort_key)] = f"{column}:{direction}"
+    return "?" + urlencode(params)
+
+
+def _apply_sort(df, sort_key, link_columns):
+    """
+    Reads this table's current sort_{sort_key} query param (set by
+    clicking a column header - see _build_sort_href()/_render_data_table_
+    html()'s sort_key parameter) and returns (sorted_df, active_column,
+    active_direction). active_column is None (df returned in whatever
+    order the caller already gave it, e.g. the League Table's own Points/
+    GD/GF default) if no sort has been chosen yet, or the query param
+    names a column this df doesn't have (a stale link from a different
+    table shape).
+
+    A column sorts numerically if EVERY one of its non-null values parses
+    as a number (covers every plain numeric column these season-cumulative
+    tables have); otherwise it sorts alphabetically, case-insensitively, on
+    the plain string form (covers link_columns like 'Team', whose cell
+    value at this point is still just the team name - _linkify_team_cell()
+    wraps it in an <a> tag afterward, in the per-row loop below).
+    """
+    raw = st.query_params.get(_sort_query_param(sort_key))
+    if not raw or ":" not in raw:
+        return df, None, None
+    column, direction = raw.split(":", 1)
+    if column not in df.columns or direction not in ("asc", "desc"):
+        return df, None, None
+    ascending = direction == "asc"
+    numeric = pd.to_numeric(df[column], errors="coerce")
+    if numeric.notna().sum() == df[column].notna().sum():
+        sort_series = numeric
+    else:
+        sort_series = df[column].astype(str).str.lower()
+    sorted_df = (
+        df.assign(_sort_val=sort_series)
+          .sort_values("_sort_val", ascending=ascending, na_position="last", kind="mergesort")
+          .drop(columns="_sort_val")
+          .reset_index(drop=True)
+    )
+    return sorted_df, column, direction
+
+
+def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None):
     """
     Renders df as a plain HTML table via st.markdown (bordered cells, bold
     light-grey header row - a reasonably close match to st.dataframe's own
     look) instead of st.dataframe, specifically so any column named in
     link_columns can be rendered as real team-name links (see
     _linkify_team_cell()) rather than plain text. Used for the League
-    Table, the 5 season Team Stats category tables, and the Fixtures table
-    - all previously plain st.dataframe calls before team-name links were
-    added. Numeric columns are shown right-aligned, link_columns/
-    raw_html_columns left-aligned, matching st.dataframe's own default
-    alignment convention.
+    Table, the 5 season Team Stats category tables, the season-wide Shots
+    tab's For/Against tables, and the Fixtures table - all previously plain
+    st.dataframe calls before team-name links were added. Numeric columns
+    are shown right-aligned, link_columns/raw_html_columns left-aligned,
+    matching st.dataframe's own default alignment convention.
+
+    sort_key, when given, makes every column header a clickable link that
+    re-sorts the table by that column (see _apply_sort()) - a repeat click
+    on the same header toggles ascending/descending; a fresh column
+    defaults to descending for a numeric column (biggest values first -
+    most useful for a stat like Points or xG) or ascending for a text/link
+    column like Team (A-Z first). This is a real page navigation (a plain
+    '<a href="?...">', the same mechanism _linkify_team_cell()'s team
+    links already use), not JS - Streamlit's own markdown renderer strips
+    <script> tags outright, so a click-sort that actually works has to be
+    done this way rather than client-side. sort_key must be a value unique
+    to THIS particular table on the page (e.g. 'league_table', or the
+    current category name for the Team Stats tables) so two sortable
+    tables shown together don't share/clobber each other's sort state -
+    see _build_sort_href(). Leave sort_key=None (the default) for a table
+    that shouldn't be sortable at all (Fixtures, Team Page's Match Log).
 
     raw_html_columns is for a column whose cell values are ALREADY a
     ready-to-insert HTML snippet (e.g. Fixtures' 'Report' column, a
@@ -201,13 +275,39 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=()):
     """
     if df.empty:
         return
+    active_column, active_direction = None, None
+    if sort_key is not None:
+        df, active_column, active_direction = _apply_sort(df, sort_key, link_columns)
+
     left_columns = set(link_columns) | set(raw_html_columns)
-    header_cells = "".join(
-        f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
-        f'text-align:{"left" if col in left_columns else "right"}; white-space:nowrap;">'
-        f'{html.escape(str(col))}</th>'
-        for col in df.columns
-    )
+
+    def _default_direction(col):
+        if col in left_columns:
+            return "asc"
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        return "desc" if numeric.notna().sum() == df[col].notna().sum() else "asc"
+
+    def _header_cell(col):
+        align = "left" if col in left_columns else "right"
+        base_style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+                      f'text-align:{align}; white-space:nowrap;')
+        label = html.escape(str(col))
+        if sort_key is None:
+            return f'<th style="{base_style}">{label}</th>'
+        if col == active_column:
+            next_dir = "asc" if active_direction == "desc" else "desc"
+            arrow = " ▲" if active_direction == "asc" else " ▼"
+        else:
+            next_dir = _default_direction(col)
+            arrow = ""
+        href = _build_sort_href(sort_key, col, next_dir)
+        return (
+            f'<th style="{base_style} cursor:pointer;">'
+            f'<a href="{href}" style="color:inherit; text-decoration:none; display:block;">'
+            f'{label}{arrow}</a></th>'
+        )
+
+    header_cells = "".join(_header_cell(col) for col in df.columns)
     body_rows = []
     for _, r in df.iterrows():
         cells = []
@@ -1245,19 +1345,6 @@ def _render_team_page(db, team, season=None):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
-    # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
-    # xG For and Against, totaled for exactly the minutes each player was on
-    # the pitch, plus derived Goal Difference/xG Difference columns and
-    # their Per-90 versions) - see history_db.fetch_team_season_plus_minus().
-    st.subheader("Playing Time")
-    plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season)
-    if plus_minus_stats.empty:
-        st.info(f"No plus/minus stats saved yet for {team} in {season}.")
-    else:
-        _render_playing_time_table(plus_minus_stats)
-
-    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
-
     # Match log - this team's own slice of the Fixtures tab's table (same
     # columns, same renderer - see _render_fixtures_like_table()), oldest
     # match on top since fetch_team_match_log() is already ascending.
@@ -1316,6 +1403,20 @@ def _render_team_page(db, team, season=None):
             st.dataframe(category_df, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(category_df))
 
+    # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
+    # xG For and Against, totaled for exactly the minutes each player was on
+    # the pitch, plus derived Goal Difference/xG Difference columns and
+    # their Per-90 versions) - see history_db.fetch_team_season_plus_minus().
+    # Placed last (after Defensive Action Locations) per request, rather
+    # than alongside General Stats near the top.
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    st.subheader("Playing Time")
+    plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season)
+    if plus_minus_stats.empty:
+        st.info(f"No plus/minus stats saved yet for {team} in {season}.")
+    else:
+        _render_playing_time_table(plus_minus_stats)
+
 
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's
@@ -1351,12 +1452,30 @@ else:
 
     (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
      tab_passrecv, tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
-        "Team Totals", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
+        "League Overview", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
         "Passes Received", "Season Pass Map", "Season Passes Received", "Season Touch Map",
     ])
 
     with tab_team_totals:
-        league_table = hdb.fetch_league_table(db)
+        # League dropdown - scopes the League Table + every Team Stats
+        # category table below to one competition (matches.competition).
+        # Only one league exists today ('Premier League', the free-text
+        # default on the "Save to Database" form), so this has just one
+        # option for now, but every fetch call below already takes this
+        # selection - a second competition needs no further code changes,
+        # just matches saved under a different Competition value.
+        available_leagues = hdb.fetch_available_competitions(db)
+        if available_leagues:
+            league_col, _spacer = st.columns([1, 3])
+            with league_col:
+                selected_league = st.selectbox(
+                    "League", available_leagues,
+                    index=0, key="league_overview_league",
+                )
+        else:
+            selected_league = None
+
+        league_table = hdb.fetch_league_table(db, competition=selected_league)
         if league_table.empty:
             st.info(
                 "No completed match results saved yet - publish at least one match with 'Save to "
@@ -1370,7 +1489,7 @@ else:
             # own LinkColumn can't show a clean, human-readable team name as
             # the link text (only a fixed string or a regex pulled straight
             # from the url-encoded URL itself).
-            _render_data_table_html(league_table, link_columns=("Team",))
+            _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table")
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
@@ -1379,7 +1498,7 @@ else:
             key="team_totals_category"
         )
         if totals_category == "Shots":
-            shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(db)
+            shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(db, competition=selected_league)
             if shot_for_df.empty and shot_against_df.empty:
                 st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
             else:
@@ -1403,15 +1522,17 @@ else:
                 # Team column linked to that team's Team Page - see the
                 # League Table above for why this uses _render_data_table_html()
                 # rather than st.dataframe.
-                _render_data_table_html(shot_totals, link_columns=("Team",))
+                _render_data_table_html(shot_totals, link_columns=("Team",),
+                                         sort_key="teamstats_shots")
         elif totals_category == "Passing":
-            passing_totals = hdb.fetch_season_passing_totals(db)
+            passing_totals = hdb.fetch_season_passing_totals(db, competition=selected_league)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
-                _render_data_table_html(passing_totals, link_columns=("Team",))
+                _render_data_table_html(passing_totals, link_columns=("Team",),
+                                         sort_key="teamstats_passing")
         elif totals_category == "Touches":
-            touches_totals = hdb.fetch_season_touches_totals(db)
+            touches_totals = hdb.fetch_season_touches_totals(db, competition=selected_league)
             if touches_totals.empty:
                 st.info(
                     "No touch data saved yet. This needs matches saved AFTER the touches table was "
@@ -1419,7 +1540,8 @@ else:
                     "backfill it."
                 )
             else:
-                _render_data_table_html(touches_totals, link_columns=("Team",))
+                _render_data_table_html(touches_totals, link_columns=("Team",),
+                                         sort_key="teamstats_touches")
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -1427,16 +1549,18 @@ else:
                     "unaffected and cover every match with saved touch data."
                 )
         elif totals_category == "Defensive Actions":
-            defensive_totals = hdb.fetch_season_defensive_totals(db)
+            defensive_totals = hdb.fetch_season_defensive_totals(db, competition=selected_league)
             if defensive_totals.empty:
                 st.info(
                     "No defensive stats saved yet - publish at least one match with 'Save to Database' "
                     "first."
                 )
             else:
-                _render_data_table_html(defensive_totals, link_columns=("Team",))
+                _render_data_table_html(defensive_totals, link_columns=("Team",),
+                                         sort_key="teamstats_defensive")
         elif totals_category == "Defensive Action Location":
-            defensive_location_totals = hdb.fetch_season_defensive_location_totals(db)
+            defensive_location_totals = hdb.fetch_season_defensive_location_totals(
+                db, competition=selected_league)
             if defensive_location_totals.empty:
                 st.info(
                     "No defensive action location data saved yet. This namespace was added partway "
@@ -1444,7 +1568,8 @@ else:
                     "report app to backfill it."
                 )
             else:
-                _render_data_table_html(defensive_location_totals, link_columns=("Team",))
+                _render_data_table_html(defensive_location_totals, link_columns=("Team",),
+                                         sort_key="teamstats_defensive_location")
 
     with tab_fixtures:
         fixtures = hdb.fetch_fixtures(db)
@@ -1462,7 +1587,13 @@ else:
             # matchweek() - so needs a re-save to backfill; Season is
             # derived from match_date, which every match already has, so it
             # never needs backfilling).
-            filter_cols = st.columns(3)
+            # Narrow columns for each dropdown (rather than 3 equal thirds),
+            # sized roughly to their longest option's actual text width - a
+            # full-width selectbox left a lot of empty space next to short
+            # values like a two-digit matchweek number. The trailing big
+            # spacer column just soaks up the rest of the row rather than
+            # stretching any dropdown to fill it.
+            filter_cols = st.columns([2, 2, 1, 5])
 
             def _matchweek_sort_key(w):
                 try:
@@ -1580,10 +1711,12 @@ else:
                 # Team column linked to that team's Team Page - see the
                 # League Table/Team Stats/Fixtures tables for the same
                 # treatment (_render_data_table_html()/_linkify_team_cell()).
-                _render_data_table_html(_team_totals_for(for_df), link_columns=("Team",))
+                _render_data_table_html(_team_totals_for(for_df), link_columns=("Team",),
+                                         sort_key="shots_for")
             with col2:
                 st.subheader("Against")
-                _render_data_table_html(_team_totals_for(against_df), link_columns=("Team",))
+                _render_data_table_html(_team_totals_for(against_df), link_columns=("Team",),
+                                         sort_key="shots_against")
 
     with tab_passmap:
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
