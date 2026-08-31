@@ -80,6 +80,8 @@ TEAM_NAME_ALIASES = {
     'Aston Villa': ['Villa'],
     'Southampton': ['Saints'],
     'Luton Town': ['Luton'],
+    'Hull City': ['Hull'],
+    'Coventry City': ['Coventry'],
 }
 
 
