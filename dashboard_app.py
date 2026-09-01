@@ -1007,7 +1007,7 @@ def _render_back_to_fixtures_row():
     with logo_col:
         st.markdown(
             f'<div style="display:flex; justify-content:flex-end; align-items:center; '
-            f'height:100%;">{logo_img_tag(50)}</div>',
+            f'height:100%;">{logo_img_tag(75)}</div>',
             unsafe_allow_html=True,
         )
     with button_col:
@@ -1265,7 +1265,7 @@ def _render_team_page(db, team, season=None):
         # narrow right-hand column, per request.
         st.markdown(
             f'<div style="display:flex; justify-content:flex-end; margin-top:6px;">'
-            f'{logo_img_tag(60)}</div>',
+            f'{logo_img_tag(90)}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1446,7 +1446,7 @@ else:
     with logo_col:
         st.markdown(
             f'<div style="display:flex; justify-content:flex-end; align-items:center; '
-            f'height:100%; padding-top:14px;">{logo_img_tag(60)}</div>',
+            f'height:100%; padding-top:14px;">{logo_img_tag(90)}</div>',
             unsafe_allow_html=True,
         )
 
