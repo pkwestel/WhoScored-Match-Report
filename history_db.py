@@ -1379,7 +1379,7 @@ def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
     return df.sort_values(['Team', 'Minute', 'Added Time'], na_position='first').reset_index(drop=True)
 
 
-def fetch_season_shot_totals(db: DB):
+def fetch_season_shot_totals(db: DB, competition=None):
     """
     Season-cumulative Shots/Goals/Total xG per team, broken down by shot
     'situation' (FotMob's own vocabulary - Open Play, Set Piece, Corner,
@@ -1389,6 +1389,10 @@ def fetch_season_shot_totals(db: DB):
     they played in each match). Powers dashboard_app.py's season-wide Shots
     tab, which shows two small leaderboard tables (For/Against) rather than
     a per-match shot log.
+
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
 
     'against' isn't a real column anywhere - a row in the shots table only
     knows which team took the shot, not who it was against - so this is
@@ -1424,8 +1428,15 @@ def fetch_season_shot_totals(db: DB):
     )
     shots["situation"] = shots["situation"].fillna("Unknown")
 
-    matches = fetch_matches(db)[["match_id", "home_team", "away_team"]]
-    merged = shots.merge(matches, on="match_id", how="left")
+    matches = fetch_matches(db)[["match_id", "home_team", "away_team", "competition"]]
+    if competition is not None:
+        matches = matches[matches["competition"] == competition]
+    # Inner join (rather than the previous left join against every match)
+    # so a competition filter actually drops shots from other competitions'
+    # matches, not just leaves their home_team/away_team blank - every real
+    # shot's match_id has a matching row in the (possibly filtered) matches
+    # table, so this changes nothing when competition=None.
+    merged = shots.merge(matches, on="match_id", how="inner")
 
     def _agg(df, team_col):
         if df.empty:
@@ -1530,7 +1541,7 @@ def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame
 # ============================================================
 # Season-cumulative TEAM totals (dashboard_app.py's default "Team Totals" tab)
 # ============================================================
-def fetch_league_table(db: DB) -> pd.DataFrame:
+def fetch_league_table(db: DB, competition=None) -> pd.DataFrame:
     """
     Season standings: one row per team, with the standard league table
     columns (Played, W, D, L, GF, GA, GD, Points) plus this project's own
@@ -1540,6 +1551,11 @@ def fetch_league_table(db: DB) -> pd.DataFrame:
     build_db_stats()'s docstring in batch_lib.py) automatically, since
     matches.home_team/away_team and team_match_stats' team keys are already
     one consistent (WhoScored's) name per team.
+
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition, same as before this parameter
+    existed.
 
     A match missing fm_totals.Goals for EITHER side (not yet saved with
     FotMob data, or a genuinely unresolved team-name mismatch) is skipped
@@ -1554,6 +1570,10 @@ def fetch_league_table(db: DB) -> pd.DataFrame:
     matches = fetch_matches(db)
     if matches.empty:
         return pd.DataFrame(columns=cols)
+    if competition is not None:
+        matches = matches[matches["competition"] == competition]
+        if matches.empty:
+            return pd.DataFrame(columns=cols)
 
     cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
     fm_totals_by_match = {}
@@ -1640,6 +1660,43 @@ def fetch_available_seasons(db: DB) -> list:
         return []
     seasons = matches["match_date"].apply(_season_label).dropna().unique().tolist()
     return sorted(seasons, reverse=True)
+
+
+def fetch_available_competitions(db: DB) -> list:
+    """
+    Every distinct matches.competition value with at least one saved match,
+    alphabetically - backs the League Overview tab's league dropdown (see
+    dashboard_app.py). Just one entry today ('Premier League' - the free-
+    text value the 'Save to Database' form defaults to), but the dropdown
+    and every season-cumulative fetch function it feeds (fetch_league_
+    table(), fetch_season_shot_totals(), etc. - all take an optional
+    competition= filter now) are wired up so a second competition needs no
+    further code changes later, just matches saved under a different
+    Competition value.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return []
+    return sorted(matches["competition"].dropna().unique().tolist())
+
+
+def _match_ids_for_competition(db: DB, competition) -> set:
+    """
+    The set of match_id strings belonging to one matches.competition value
+    (exact string match) - shared plumbing for scoping any season-
+    cumulative fetch function (League Table, Team Stats' category tables)
+    to one league via the League Overview tab's dropdown. Returns None
+    (meaning "no filter, include every match") when competition is None -
+    every caller below treats that as leave-everything-in, so passing
+    competition=None preserves each function's original all-matches
+    behavior exactly.
+    """
+    if competition is None:
+        return None
+    matches = fetch_matches(db)
+    if matches.empty:
+        return set()
+    return set(matches.loc[matches["competition"] == competition, "match_id"].astype(str))
 
 
 def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
@@ -2275,7 +2332,7 @@ def fetch_team_season_defensive_locations(db: DB, team, season) -> pd.DataFrame:
     )
 
 
-def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
+def fetch_season_passing_totals(db: DB, competition=None) -> pd.DataFrame:
     """
     Season-cumulative passing totals per team, summed across every player
     and match - the team-level rollup of the WhoScored Passing tab
@@ -2287,14 +2344,21 @@ def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
     SUMMED raw counts (SUM(Completed)/SUM(Attempted)*100) rather than
     averaging each match's own percentage, since a flat average would
     wrongly weight a 10-attempt match the same as a 500-attempt match.
+
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
     """
     cols = ["Team", "Passes Completed", "Passes Attempted", "Pass Completion %",
             "Passes Forward", "Headed", "Crosses Attempted", "Crosses Completed",
             "Cross Completion %", "Passes into Final 1/3", "Passes into the Box",
             "Progressive Passes", "Shot Assists", "SCA"]
-    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    valid_ids = _match_ids_for_competition(db, competition)
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
     sums = {}
-    for team, extra_json in cur.fetchall():
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
         extra = json.loads(extra_json) if extra_json else {}
         passing = extra.get("ws_passing")
         if not passing:
@@ -2333,18 +2397,25 @@ def fetch_season_passing_totals(db: DB) -> pd.DataFrame:
         "Passes Attempted", ascending=False).reset_index(drop=True)
 
 
-def fetch_season_defensive_totals(db: DB) -> pd.DataFrame:
+def fetch_season_defensive_totals(db: DB, competition=None) -> pd.DataFrame:
     """
     Season-cumulative defensive totals per team, summed across every player
     and match - the team-level rollup of the WhoScored Defensive Actions
     tab (compute_defensive_actions()'s per-player stats, saved under the
     'ws_defensive' key). All four columns there are plain counts (no
     rates), so summing is exact.
+
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
     """
     cols = ["Team", "Tackles", "Interceptions", "Passes Blocked", "Shots Blocked"]
-    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    valid_ids = _match_ids_for_competition(db, competition)
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
     sums = {}
-    for team, extra_json in cur.fetchall():
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
         extra = json.loads(extra_json) if extra_json else {}
         defensive = extra.get("ws_defensive")
         if not defensive:
@@ -2368,7 +2439,7 @@ def fetch_season_defensive_totals(db: DB) -> pd.DataFrame:
         "Tackles", ascending=False).reset_index(drop=True)
 
 
-def fetch_season_defensive_location_totals(db: DB) -> pd.DataFrame:
+def fetch_season_defensive_location_totals(db: DB, competition=None) -> pd.DataFrame:
     """
     Season-cumulative defensive-action-by-pitch-third totals per team,
     summed across every player and match - the team-level rollup of the
@@ -2376,14 +2447,21 @@ def fetch_season_defensive_location_totals(db: DB) -> pd.DataFrame:
     location()'s per-player stats, saved under the 'ws_defensive_locations'
     key). All twelve columns are plain counts, so summing is exact.
 
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
+
     This namespace was only added partway through this project, so a match
     saved before then contributes nothing here even if it has other
     defensive stats - re-save it in the combined report app to backfill.
     """
     cols = ["Team"] + _DEFENSIVE_LOCATIONS_COLUMNS
-    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
+    valid_ids = _match_ids_for_competition(db, competition)
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
     sums = {}
-    for team, extra_json in cur.fetchall():
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
         extra = json.loads(extra_json) if extra_json else {}
         locations = extra.get("ws_defensive_locations")
         if not locations:
@@ -2441,8 +2519,12 @@ def _in_attacking_box(x, y):
     return _BOX_X_MIN <= x_yd and _BOX_Y_MIN <= y_yd <= _BOX_Y_MAX
 
 
-def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
+def fetch_season_touches_totals(db: DB, competition=None) -> pd.DataFrame:
     """
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
+
     Season-cumulative touch totals per team, bucketed into pitch thirds and
     the attacking box, PLUS Progressive Carries/Carries into Final Third/
     Carries into Box/Passes Received/Progressive Passes Received - the full
@@ -2476,9 +2558,14 @@ def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
             "Passes Received", "Progressive Passes Received",
             "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %"]
 
+    valid_ids = _match_ids_for_competition(db, competition)
     touches = fetch_touches(db)
     if touches.empty:
         return pd.DataFrame(columns=cols)
+    if valid_ids is not None:
+        touches = touches[touches["match_id"].astype(str).isin(valid_ids)]
+        if touches.empty:
+            return pd.DataFrame(columns=cols)
 
     touches = touches.copy()
     touches["_third"] = touches["x"].apply(_pitch_third)
@@ -2488,8 +2575,10 @@ def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
     # Final Third/Carries into Box, summed across every match a team appears
     # in (0 for a match saved before this key existed).
     team_carry_totals = {}
-    cur = db.execute("SELECT team, extra_json FROM team_match_stats")
-    for team, extra_json in cur.fetchall():
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
         extra = json.loads(extra_json) if extra_json else {}
         ws_touches = extra.get("ws_touches")
         if not ws_touches:
@@ -2505,8 +2594,10 @@ def fetch_season_touches_totals(db: DB) -> pd.DataFrame:
     # player_match_stats' 'ws_touches' -> Passes Received/Progressive Passes
     # Received, summed across every player on a team across every match.
     player_received_totals = {}
-    cur = db.execute("SELECT team, extra_json FROM player_match_stats")
-    for team, extra_json in cur.fetchall():
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
         extra = json.loads(extra_json) if extra_json else {}
         ws_touches = extra.get("ws_touches")
         if not ws_touches:
