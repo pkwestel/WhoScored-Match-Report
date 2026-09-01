@@ -368,7 +368,22 @@ def scrape_match(match_centre_url):
     and the home/away team names, using the same Selenium approach as
     whoscored/whoscored_events_data.py in this repo, extended to also
     read team names directly from the match JSON (rather than guessing).
+
+    Accepts either the "/live/" match centre URL or the "/show/" head-to-
+    head/summary URL for the same match - WhoScored's own nav links you to
+    "/show/" by default (e.g. the "Head to Head" tab), and pasting THAT
+    URL by mistake is an easy, understandable slip since both look like a
+    normal match page. Only "/live/" actually embeds matchCentreData, so
+    a "/show/" URL is silently rewritten to its "/live/" equivalent here -
+    the same normalization get_fixture_urls() already applies for the
+    batch runner - rather than surfacing a confusing "no matchCentreData"
+    error for what's really just a wrong-tab URL.
     """
+    match_centre_url = re.sub(
+        r"^(https?://www\.whoscored\.com/matches/\d+)/show/",
+        r"\1/live/",
+        match_centre_url.strip(),
+    )
     print(f"Opening {match_centre_url} ...")
     with get_driver() as driver:
         driver.get(match_centre_url)
@@ -746,6 +761,32 @@ def compute_all_passes(df):
     work = work.rename(columns={'playerName': 'passer'})
 
     return work[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
+
+
+def compute_all_touches(df):
+    """
+    Every touch on the ball in the match (any player, any event where
+    isTouch is True - passes, shots, tackles, dribbles, clearances, etc.
+    all count as a touch, same definition compute_touches() above already
+    uses for its per-third breakdown), with each touch's own pitch
+    location kept - unlike compute_touches(), which only keeps aggregate
+    counts per third and therefore can't reconstruct WHERE on the pitch
+    those touches actually happened.
+
+    This is what backs a touch heat map (single-match or, once enough
+    matches are published, season-long): a kernel density / 2D histogram
+    over every (x, y) a player touched the ball at, which needs the raw
+    points, not a third-level count. Computed once for the whole match
+    (same reasoning as compute_all_passes()) so publishing every player's
+    touches to the history database doesn't mean re-filtering the full
+    event stream once per player.
+    """
+    out_cols = ['minute', 'second', 'team', 'player', 'x', 'y']
+    touches = df[df['isTouch'] == True].copy()
+    if touches.empty:
+        return pd.DataFrame(columns=out_cols)
+    touches = touches.rename(columns={'playerName': 'player'})
+    return touches[out_cols].sort_values(['minute', 'second']).reset_index(drop=True)
 
 
 # ============================================================

@@ -75,9 +75,7 @@ class DriverContext:
         options.add_argument(
             "--disable-images"
         )  # Don't load images for faster page loading
-        options.add_argument(
-            "--disable-javascript"
-        )  # Disable JavaScript execution (remove if JS is needed)
+
 
         # Add random user agent using fake-useragent library
         ua = UserAgent()
