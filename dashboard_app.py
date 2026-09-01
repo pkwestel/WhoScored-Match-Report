@@ -346,7 +346,7 @@ def _render_fixtures_like_table(df):
     )
 
 
-def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=()):
+def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None):
     """
     Generic two-row-header HTML table: a merged group-header row (colspan,
     one per (label, [cols]) in `groups`) sitting above the real per-column
@@ -366,6 +366,17 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=()):
     plain '-' (this table's convention for "no value") is left as-is
     rather than forced into that format.
 
+    sort_key, when given, draws a "Sort by" dropdown above the table (see
+    _render_sort_control(), the same one _render_data_table_html() uses)
+    letting you pick any column, in either direction, to sort by. The
+    'Team Total' row (if this table has one - see _player_category_table()/
+    fetch_team_season_scoring_stats()/fetch_team_season_plus_minus()) is
+    pulled out before sorting and always re-appended at the very bottom
+    afterward, regardless of what's selected - it's a summary row, not a
+    player, so it should never shuffle into the middle of a sorted column.
+    Leave sort_key=None (the default) for a table that shouldn't be
+    sortable.
+
     A '<Stat> (Per 90)' column's SECOND header row label has its
     ' (Per 90)' suffix stripped back off - so e.g. a Totals-block 'Goals'
     and a Per-90-block 'Goals' column show the identical text 'Goals',
@@ -374,6 +385,15 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=()):
     """
     if df.empty:
         return
+
+    if sort_key is not None:
+        is_total_row = df["Player"] == "Team Total" if "Player" in df.columns else None
+        if is_total_row is not None and is_total_row.any():
+            total_row, sortable_rows = df[is_total_row], df[~is_total_row]
+            sortable_rows = _render_sort_control(sortable_rows, sort_key, link_columns=())
+            df = pd.concat([sortable_rows, total_row], ignore_index=True)
+        else:
+            df = _render_sort_control(df, sort_key, link_columns=())
 
     per90_cols = [c for c in df.columns if c.endswith(" (Per 90)")]
     all_decimal_cols = set(decimal_cols) | set(per90_cols)
@@ -388,15 +408,20 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=()):
         return (f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
                 f'white-space:nowrap;{extra}">{html.escape(str(text))}</th>')
 
+    # Top (group-header) row uses a visibly darker border than the rest of
+    # the table (#888 vs #ddd everywhere else) - per request, so it's clear
+    # where e.g. 'Playing Time' ends and 'Totals' begins, which the same
+    # light #ddd border every other cell uses made hard to see against the
+    # header's own grey background.
     row1_cells = [
-        f'<th rowspan="2" style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        f'<th rowspan="2" style="padding:6px 14px; border:1px solid #888; background:#f0f2f6; '
         f'text-align:left; white-space:nowrap;">{html.escape(col)}</th>'
         for col in ungrouped
     ]
     for label, cols in groups:
         if cols:
             row1_cells.append(
-                f'<th colspan="{len(cols)}" style="padding:6px 14px; border:1px solid #ddd; '
+                f'<th colspan="{len(cols)}" style="padding:6px 14px; border:1px solid #888; '
                 f'background:#e2e5ea; text-align:center; white-space:nowrap;">'
                 f'{html.escape(label)}</th>'
             )
@@ -450,6 +475,7 @@ def _render_general_stats_table(scoring_stats):
         scoring_stats, ungrouped,
         [("Playing Time", playing_time_cols), ("Totals", totals_cols), ("Per 90", per90_cols)],
         decimal_cols={"NPxG", "PS-xG", "xA"},
+        sort_key="general_stats",
     )
 
 
