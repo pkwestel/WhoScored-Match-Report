@@ -50,7 +50,7 @@ import html
 import io
 import os
 import re
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -180,62 +180,68 @@ def _linkify_team_cell(team_name):
     return f'<a href="{url}" style="color:inherit; text-decoration:underline;">{html.escape(str(team_name))}</a>'
 
 
-def _sort_query_param(sort_key):
-    return f"sort_{sort_key}"
-
-
-def _build_sort_href(sort_key, column, direction):
+def _sort_options_and_map(df, link_columns):
     """
-    A same-page link href that sets THIS table's own sort_{sort_key} query
-    param to "{column}:{direction}" (see _apply_sort() below) while
-    preserving every OTHER currently-set query param - so clicking a
-    header on one sortable table doesn't reset a different sortable
-    table's own sort state when more than one is on the page at once (the
-    League Table sitting above a Team Stats category table, or the Shots
-    tab's separate For/Against tables).
+    Builds the option list (and a lookup back to (column, ascending, is_
+    numeric)) for a sortable table's "Sort by" dropdown - two entries per
+    column ('xG (High to Low)'/'xG (Low to High)' for a numeric column,
+    'Team (A-Z)'/'Team (Z-A)' for a text/link column), plus a leading
+    'Default order' entry that means "don't touch the caller's own row
+    order" (e.g. the League Table's already-sensible Points/GD/GF sort).
+
+    A column counts as numeric here if EVERY one of its non-null values
+    parses as a number - covers every plain numeric column these season-
+    cumulative tables have; a link_columns entry like 'Team' is always
+    treated as text even if it happened to parse as numeric, since its
+    real per-row value is a team name.
     """
-    params = dict(st.query_params)
-    params[_sort_query_param(sort_key)] = f"{column}:{direction}"
-    return "?" + urlencode(params)
+    options = ["Default order"]
+    option_map = {}
+    for col in df.columns:
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        is_numeric = col not in link_columns and numeric.notna().sum() == df[col].notna().sum()
+        if is_numeric:
+            pairs = [(f"{col} (High to Low)", False), (f"{col} (Low to High)", True)]
+        else:
+            pairs = [(f"{col} (A-Z)", True), (f"{col} (Z-A)", False)]
+        for label, ascending in pairs:
+            options.append(label)
+            option_map[label] = (col, ascending, is_numeric)
+    return options, option_map
 
 
-def _apply_sort(df, sort_key, link_columns):
+def _render_sort_control(df, sort_key, link_columns):
     """
-    Reads this table's current sort_{sort_key} query param (set by
-    clicking a column header - see _build_sort_href()/_render_data_table_
-    html()'s sort_key parameter) and returns (sorted_df, active_column,
-    active_direction). active_column is None (df returned in whatever
-    order the caller already gave it, e.g. the League Table's own Points/
-    GD/GF default) if no sort has been chosen yet, or the query param
-    names a column this df doesn't have (a stale link from a different
-    table shape).
+    Draws the "Sort by" dropdown for one sortable table (see
+    _render_data_table_html()'s sort_key parameter) and returns df sorted
+    per whatever's currently selected (or df unchanged if "Default order"
+    is selected). A plain st.selectbox - a REAL Streamlit widget, so
+    picking an option triggers an ordinary rerun, not a browser navigation.
 
-    A column sorts numerically if EVERY one of its non-null values parses
-    as a number (covers every plain numeric column these season-cumulative
-    tables have); otherwise it sorts alphabetically, case-insensitively, on
-    the plain string form (covers link_columns like 'Team', whose cell
-    value at this point is still just the team name - _linkify_team_cell()
-    wraps it in an <a> tag afterward, in the per-row loop below).
+    An EARLIER version of this made each column header a clickable
+    '<a href="?sort_...">' link instead. That caused a full browser page
+    load on every click, which broke two things in practice: any
+    st.tabs() the sortable table lived inside (this dashboard's top-level
+    tabs, including the very "Shots" tab this control now lives on)
+    isn't addressable via the URL, so a fresh page load always snapped
+    back to the FIRST tab regardless of which one was showing; and at
+    least one browser opened that navigation in a brand new tab instead of
+    the current one. A real widget rerun can't trigger either problem -
+    the whole page state (which tab is open, etc.) stays exactly as it
+    was, only this one table's row order changes.
     """
-    raw = st.query_params.get(_sort_query_param(sort_key))
-    if not raw or ":" not in raw:
-        return df, None, None
-    column, direction = raw.split(":", 1)
-    if column not in df.columns or direction not in ("asc", "desc"):
-        return df, None, None
-    ascending = direction == "asc"
-    numeric = pd.to_numeric(df[column], errors="coerce")
-    if numeric.notna().sum() == df[column].notna().sum():
-        sort_series = numeric
-    else:
-        sort_series = df[column].astype(str).str.lower()
-    sorted_df = (
+    options, option_map = _sort_options_and_map(df, link_columns)
+    choice = st.selectbox("Sort by", options, key=f"sort_choice_{sort_key}")
+    if choice == "Default order":
+        return df
+    column, ascending, is_numeric = option_map[choice]
+    sort_series = pd.to_numeric(df[column], errors="coerce") if is_numeric else df[column].astype(str).str.lower()
+    return (
         df.assign(_sort_val=sort_series)
           .sort_values("_sort_val", ascending=ascending, na_position="last", kind="mergesort")
           .drop(columns="_sort_val")
           .reset_index(drop=True)
     )
-    return sorted_df, column, direction
 
 
 def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None):
@@ -251,21 +257,16 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     are shown right-aligned, link_columns/raw_html_columns left-aligned,
     matching st.dataframe's own default alignment convention.
 
-    sort_key, when given, makes every column header a clickable link that
-    re-sorts the table by that column (see _apply_sort()) - a repeat click
-    on the same header toggles ascending/descending; a fresh column
-    defaults to descending for a numeric column (biggest values first -
-    most useful for a stat like Points or xG) or ascending for a text/link
-    column like Team (A-Z first). This is a real page navigation (a plain
-    '<a href="?...">', the same mechanism _linkify_team_cell()'s team
-    links already use), not JS - Streamlit's own markdown renderer strips
-    <script> tags outright, so a click-sort that actually works has to be
-    done this way rather than client-side. sort_key must be a value unique
-    to THIS particular table on the page (e.g. 'league_table', or the
-    current category name for the Team Stats tables) so two sortable
-    tables shown together don't share/clobber each other's sort state -
-    see _build_sort_href(). Leave sort_key=None (the default) for a table
-    that shouldn't be sortable at all (Fixtures, Team Page's Match Log).
+    sort_key, when given, draws a "Sort by" dropdown above the table (see
+    _render_sort_control()) letting you pick any column, in either
+    direction, to sort the table by - a real widget, not a clickable
+    header link (see that function's own docstring for why the header-
+    link version of this was replaced). sort_key must be a value unique to
+    THIS particular table on the page (e.g. 'league_table', or the current
+    category name for the Team Stats tables) so two sortable tables shown
+    together get their own independent dropdown/sort state rather than
+    sharing one. Leave sort_key=None (the default) for a table that
+    shouldn't be sortable at all (Fixtures, Team Page's Match Log).
 
     raw_html_columns is for a column whose cell values are ALREADY a
     ready-to-insert HTML snippet (e.g. Fixtures' 'Report' column, a
@@ -275,39 +276,16 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     """
     if df.empty:
         return
-    active_column, active_direction = None, None
     if sort_key is not None:
-        df, active_column, active_direction = _apply_sort(df, sort_key, link_columns)
+        df = _render_sort_control(df, sort_key, link_columns)
 
     left_columns = set(link_columns) | set(raw_html_columns)
-
-    def _default_direction(col):
-        if col in left_columns:
-            return "asc"
-        numeric = pd.to_numeric(df[col], errors="coerce")
-        return "desc" if numeric.notna().sum() == df[col].notna().sum() else "asc"
-
-    def _header_cell(col):
-        align = "left" if col in left_columns else "right"
-        base_style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
-                      f'text-align:{align}; white-space:nowrap;')
-        label = html.escape(str(col))
-        if sort_key is None:
-            return f'<th style="{base_style}">{label}</th>'
-        if col == active_column:
-            next_dir = "asc" if active_direction == "desc" else "desc"
-            arrow = " ▲" if active_direction == "asc" else " ▼"
-        else:
-            next_dir = _default_direction(col)
-            arrow = ""
-        href = _build_sort_href(sort_key, col, next_dir)
-        return (
-            f'<th style="{base_style} cursor:pointer;">'
-            f'<a href="{href}" style="color:inherit; text-decoration:none; display:block;">'
-            f'{label}{arrow}</a></th>'
-        )
-
-    header_cells = "".join(_header_cell(col) for col in df.columns)
+    header_cells = "".join(
+        f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        f'text-align:{"left" if col in left_columns else "right"}; white-space:nowrap;">'
+        f'{html.escape(str(col))}</th>'
+        for col in df.columns
+    )
     body_rows = []
     for _, r in df.iterrows():
         cells = []
