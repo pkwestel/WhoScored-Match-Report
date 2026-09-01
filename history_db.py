@@ -1184,20 +1184,52 @@ _DEFENSIVE_LOCATIONS_COLUMNS = [
 ]
 
 
+def _insert_g_pk_column(df):
+    """
+    Inserts the derived 'G-PK' column (non-penalty goals - Goals minus PK,
+    i.e. penalties actually SCORED, not PK Attempted) into a Scoring Stats
+    table (see fetch_player_scoring_stats()), immediately to the right of
+    Assists, per request. df is one side's DataFrame (home or away, already
+    including its own 'Team Total' row) from _player_category_table() -
+    its Goals/PK Team Total values are already sums-across-players, and
+    Goals - PK computed on that summed row gives the correct season total
+    directly (sum-then-subtract is mathematically identical to subtracting
+    each player's own difference and summing those, same reasoning as this
+    project's other derived difference columns).
+
+    Shows '-' for every row if Goals or PK is entirely missing for this
+    match (an older match saved before 'fm_scoring' existed - see
+    _player_category_table()'s own docstring on when a column is entirely
+    '-') rather than fabricating a number from missing data.
+    """
+    if df.empty or "Goals" not in df.columns or "PK" not in df.columns:
+        return df
+    df = df.copy()
+    if (df["Goals"] == "-").any() or (df["PK"] == "-").any():
+        g_pk = "-"
+    else:
+        g_pk = df["Goals"] - df["PK"]
+    df.insert(df.columns.get_loc("Assists") + 1, "G-PK", g_pk)
+    return df
+
+
 def fetch_player_scoring_stats(db: DB, match_id, home_team, away_team) -> dict:
     """
-    Scoring Stats category: Minutes Played, Goals, Assists, Shots, SCA,
-    NPxG, PS-xG, xA, PK, PK Attempted, Sprints - one row per player, 'Team
-    Total' row at the bottom. Minutes Played/Goals/Assists/Shots/NPxG/PS-xG/
-    xA/PK/PK Attempted/Sprints all come from the 'fm_scoring' namespace
-    (fotmob_report.compute_player_scoring_stats()); SCA is pulled in from
-    'ws_passing' instead of being duplicated into fm_scoring, since it's
-    also the Passing category's own SCA figure (fotmob_report.
-    compute_passing()'s real Shot-Creating-Actions count, not a FotMob
-    proxy) - one real number, shown on both tables.
+    Scoring Stats category: Minutes Played, Goals, Assists, G-PK, Shots,
+    SCA, NPxG, PS-xG, xA, PK, PK Attempted, Sprints - one row per player,
+    'Team Total' row at the bottom. Minutes Played/Goals/Assists/Shots/
+    NPxG/PS-xG/xA/PK/PK Attempted/Sprints all come from the 'fm_scoring'
+    namespace (fotmob_report.compute_player_scoring_stats()); SCA is
+    pulled in from 'ws_passing' instead of being duplicated into
+    fm_scoring, since it's also the Passing category's own SCA figure
+    (fotmob_report.compute_passing()'s real Shot-Creating-Actions count,
+    not a FotMob proxy) - one real number, shown on both tables. G-PK is
+    a derived column (Goals minus PK) added afterward - see
+    _insert_g_pk_column().
     """
-    return _player_category_table(db, match_id, home_team, away_team,
-                                   ["fm_scoring", "ws_passing"], _SCORING_STATS_COLUMNS)
+    tables = _player_category_table(db, match_id, home_team, away_team,
+                                     ["fm_scoring", "ws_passing"], _SCORING_STATS_COLUMNS)
+    return {side: _insert_g_pk_column(side_df) for side, side_df in tables.items()}
 
 
 def fetch_player_possession(db: DB, match_id, home_team, away_team) -> dict:
