@@ -346,7 +346,10 @@ def _render_fixtures_like_table(df):
     )
 
 
-def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None):
+_FREEZE_HEADER_ROW_H_PX = 37  # approximate rendered height of one header row - see freeze_header below
+
+
+def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None, freeze_header=False):
     """
     Generic two-row-header HTML table: a merged group-header row (colspan,
     one per (label, [cols]) in `groups`) sitting above the real per-column
@@ -377,6 +380,18 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     Leave sort_key=None (the default) for a table that shouldn't be
     sortable.
 
+    freeze_header, when True, pins the two header rows in place while
+    scrolling vertically AND pins the very first column (ungrouped[0] -
+    'Player') in place while scrolling horizontally, spreadsheet-style -
+    done with plain CSS position:sticky (no JS), which needs the outer
+    div to actually BE a scrolling box (max-height + overflow:auto,
+    instead of the unconstrained/page-scrolls-instead default) for
+    "frozen while scrolling" to mean anything. _FREEZE_HEADER_ROW_H_PX is
+    the sticky top offset row 2's cells use so they sit directly below
+    row 1 rather than under it - an approximation of that row's real
+    rendered height, since exact pixel sizing can only be confirmed live
+    in a browser, not from this code alone.
+
     A '<Stat> (Per 90)' column's SECOND header row label has its
     ' (Per 90)' suffix stripped back off - so e.g. a Totals-block 'Goals'
     and a Per-90-block 'Goals' column show the identical text 'Goals',
@@ -404,34 +419,45 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     def _label(col):
         return col[: -len(" (Per 90)")] if col.endswith(" (Per 90)") else col
 
-    def _th(text, extra=""):
-        return (f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
-                f'white-space:nowrap;{extra}">{html.escape(str(text))}</th>')
-
     # Top (group-header) row uses a visibly darker border than the rest of
     # the table (#888 vs #ddd everywhere else) - per request, so it's clear
     # where e.g. 'Playing Time' ends and 'Totals' begins, which the same
     # light #ddd border every other cell uses made hard to see against the
     # header's own grey background.
-    row1_cells = [
-        f'<th rowspan="2" style="padding:6px 14px; border:1px solid #888; background:#f0f2f6; '
-        f'text-align:left; white-space:nowrap;">{html.escape(col)}</th>'
-        for col in ungrouped
-    ]
+    row1_cells = []
+    for i, col in enumerate(ungrouped):
+        style = (f'padding:6px 14px; border:1px solid #888; background:#f0f2f6; '
+                 f'text-align:left; white-space:nowrap;')
+        if freeze_header:
+            # ungrouped[0] ('Player') is BOTH the frozen first column and
+            # part of the frozen header - needs top AND left sticky, and
+            # the highest z-index so it stays above every other frozen
+            # cell where they'd otherwise overlap during a diagonal scroll.
+            style += f' position:sticky; top:0; z-index:{4 if i == 0 else 3};'
+            if i == 0:
+                style += " left:0;"
+        row1_cells.append(f'<th rowspan="2" style="{style}">{html.escape(col)}</th>')
     for label, cols in groups:
         if cols:
-            row1_cells.append(
-                f'<th colspan="{len(cols)}" style="padding:6px 14px; border:1px solid #888; '
-                f'background:#e2e5ea; text-align:center; white-space:nowrap;">'
-                f'{html.escape(label)}</th>'
-            )
+            style = (f'padding:6px 14px; border:1px solid #888; background:#e2e5ea; '
+                     f'text-align:center; white-space:nowrap;')
+            if freeze_header:
+                style += ' position:sticky; top:0; z-index:3;'
+            row1_cells.append(f'<th colspan="{len(cols)}" style="{style}">{html.escape(label)}</th>')
 
-    row2_cells = [_th(_label(col), " text-align:right;") for _, cols in groups for col in cols]
+    def _row2_th(text):
+        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+                 f'text-align:right; white-space:nowrap;')
+        if freeze_header:
+            style += f' position:sticky; top:{_FREEZE_HEADER_ROW_H_PX}px; z-index:2;'
+        return f'<th style="{style}">{html.escape(str(text))}</th>'
+
+    row2_cells = [_row2_th(_label(col)) for _, cols in groups for col in cols]
 
     body_rows = []
     for _, r in df.iterrows():
         cells = []
-        for col in ordered_cols:
+        for i, col in enumerate(ordered_cols):
             val = r[col]
             align = "left" if col == "Player" else "right"
             if pd.isna(val):
@@ -440,14 +466,20 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 cell_html = f"{val:.2f}"
             else:
                 cell_html = html.escape(str(val))
-            cells.append(
-                f'<td style="padding:6px 14px; border:1px solid #ddd; text-align:{align}; '
-                f'white-space:nowrap;">{cell_html}</td>'
-            )
+            style = f'padding:6px 14px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
+            if freeze_header and i == 0:
+                # Frozen first column's body cells need their own opaque
+                # background (rather than inheriting the table's default
+                # transparent/white) - without one, other columns' text
+                # would visibly show through/behind this cell while
+                # scrolling horizontally underneath it.
+                style += ' position:sticky; left:0; z-index:1; background:#fff;'
+            cells.append(f'<td style="{style}">{cell_html}</td>')
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
+    wrapper_style = "overflow:auto; max-height:520px;" if freeze_header else "overflow-x:auto;"
     st.markdown(f"""
-    <div style="overflow-x:auto;">
+    <div style="{wrapper_style}">
         <table style="border-collapse:collapse; font-size:0.95em;">
             <thead>
                 <tr>{"".join(row1_cells)}</tr>
@@ -476,6 +508,7 @@ def _render_general_stats_table(scoring_stats):
         [("Playing Time", playing_time_cols), ("Totals", totals_cols), ("Per 90", per90_cols)],
         decimal_cols={"NPxG", "PS-xG", "xA"},
         sort_key="general_stats",
+        freeze_header=True,
     )
 
 
