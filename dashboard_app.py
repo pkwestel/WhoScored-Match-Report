@@ -696,13 +696,30 @@ def _convert_to_per90(df, minutes_by_player):
     return pd.DataFrame(records, columns=df.columns)
 
 
+def _narrow_selectbox(label, options, key=None, index=0, width=2, total=7):
+    """
+    Draws st.selectbox() inside a narrow left-hand column instead of
+    letting it stretch across the ENTIRE page width - st.selectbox()'s own
+    default when it isn't placed inside a column, which made the Match/
+    Player/Team-filter pickers on the Pass Map/Passes Received/Touch Map
+    tabs (season and per-match) look huge for what's normally just one
+    team or player name. Same "narrow column + a spacer" trick already
+    used for the League Overview tab's League/Category dropdowns and the
+    Fixtures tab's own filters - width:total sets the dropdown's share of
+    the page (default 2:7, i.e. roughly 2/7 of the full width).
+    """
+    col, _spacer = st.columns([width, total - width])
+    with col:
+        return st.selectbox(label, options, key=key, index=index)
+
+
 def _match_picker(matches, key):
     """Shared match dropdown for the Pass Map/Passes Received tabs below."""
     options = {
         f"{r.home_team} vs {r.away_team} ({r.match_date})": r.match_id
         for r in matches.itertuples()
     }
-    label = st.selectbox("Match", list(options.keys()), key=key)
+    label = _narrow_selectbox("Match", list(options.keys()), key=key)
     return options[label], label
 
 
@@ -745,7 +762,7 @@ def _render_pass_map(db, matches, mode):
     if not players:
         st.info(f"No {'passes' if mode == 'passer' else 'received passes'} recorded for {match_label}.")
         return
-    player = st.selectbox("Player", players, key=f"passmap_player_{mode}")
+    player = _narrow_selectbox("Player", players, key=f"passmap_player_{mode}")
 
     if mode == "passer":
         player_passes = hdb.fetch_passes(db, match_id, passer=player)
@@ -830,7 +847,7 @@ def _team_filter_picker(df, team_col, key):
     map with nothing to tell them apart.
     """
     teams = sorted(df[team_col].dropna().unique())
-    choice = st.selectbox("Team (optional filter)", ["All teams"] + teams, key=key)
+    choice = _narrow_selectbox("Team (optional filter)", ["All teams"] + teams, key=key)
     return None if choice == "All teams" else choice
 
 
@@ -887,17 +904,14 @@ def _render_season_pass_map(db, mode):
         return
 
     player_col = "passer" if mode == "passer" else "receiver"
-    col1, col2 = st.columns(2)
-    with col1:
-        team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}")
+    team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}")
 
     scoped = all_passes if team_filter is None else all_passes[all_passes["team"] == team_filter]
     players = sorted(scoped[player_col].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    with col2:
-        player = st.selectbox("Player", players, key=f"season_passmap_player_{mode}")
+    player = _narrow_selectbox("Player", players, key=f"season_passmap_player_{mode}")
 
     if mode == "passer":
         player_passes = hdb.fetch_passes(db, passer=player, team=team_filter)
@@ -1005,7 +1019,7 @@ def _render_season_touchmap(db):
     if not players:
         st.info("No players found for this filter.")
         return
-    player = st.selectbox("Player", players, key="season_touchmap_player")
+    player = _narrow_selectbox("Player", players, key="season_touchmap_player")
 
     player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
     if player_touches.empty:
@@ -1066,7 +1080,7 @@ def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
     if not players:
         st.info("No players found in this match's touch data.")
         return
-    player = st.selectbox("Player", players, key="match_detail_touchmap_player")
+    player = _narrow_selectbox("Player", players, key="match_detail_touchmap_player")
     player_touches = touches[touches["player"] == player]
     player_team = (player_touches["team"].iloc[0]
                     if "team" in player_touches.columns and not player_touches.empty else None)
