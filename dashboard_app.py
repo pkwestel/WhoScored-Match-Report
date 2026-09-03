@@ -213,22 +213,19 @@ def _sort_options_and_map(df, link_columns):
 def _render_sort_control(df, sort_key, link_columns):
     """
     Draws the "Sort by" dropdown for one sortable table (see
-    _render_data_table_html()'s sort_key parameter) and returns df sorted
-    per whatever's currently selected (or df unchanged if "Default order"
-    is selected). A plain st.selectbox - a REAL Streamlit widget, so
-    picking an option triggers an ordinary rerun, not a browser navigation.
+    _render_data_table_html()'s sort_key/clickable_headers parameters) and
+    returns df sorted per whatever's currently selected (or df unchanged if
+    "Default order" is selected). A plain st.selectbox - a REAL Streamlit
+    widget, so picking an option triggers an ordinary rerun, not a browser
+    navigation.
 
-    An EARLIER version of this made each column header a clickable
-    '<a href="?sort_...">' link instead. That caused a full browser page
-    load on every click, which broke two things in practice: any
-    st.tabs() the sortable table lived inside (this dashboard's top-level
-    tabs, including the very "Shots" tab this control now lives on)
-    isn't addressable via the URL, so a fresh page load always snapped
-    back to the FIRST tab regardless of which one was showing; and at
-    least one browser opened that navigation in a brand new tab instead of
-    the current one. A real widget rerun can't trigger either problem -
-    the whole page state (which tab is open, etc.) stays exactly as it
-    was, only this one table's row order changes.
+    This is STILL what the Shots tab's own two tables (shots_for/
+    shots_against) use - only the League Table and the 5 Team Stats
+    category tables were asked to switch to clickable '<a href="?...">'
+    headers instead (see _apply_sort_from_query()/_build_sort_href(),
+    and _render_dash_tab_bar() for the tab-bar change that made a link
+    click on THOSE tables safe to begin with). Nothing about the Shots
+    tab's own tables changed.
     """
     options, option_map = _sort_options_and_map(df, link_columns)
     choice = st.selectbox("Sort by", options, key=f"sort_choice_{sort_key}")
@@ -244,6 +241,26 @@ def _render_sort_control(df, sort_key, link_columns):
     )
 
 
+def _build_query_href(**overrides):
+    """
+    Same-page '?...' link href with the given query param(s) set/overridden,
+    while preserving every OTHER query param already on the page as-is
+    (via dict(st.query_params)) - the shared 'stay right where you are,
+    just change this one thing' pattern behind every same-page link this
+    app draws: a sort-toggle link (_build_sort_href()) and the top-level
+    dashboard's own tab bar (_render_dash_tab_bar()) both build their
+    hrefs through this. Critically, this also preserves '?team=...' /
+    '?dash_tab=...' themselves when THEY aren't the thing being
+    overridden - e.g. clicking a General Stats sort link on the Team Page
+    keeps '?team=...' intact, and clicking a League Table sort link on the
+    main dashboard keeps '?dash_tab=league_overview' intact - so the click
+    reloads the exact same page/tab it was clicked on, not the default one.
+    """
+    params = dict(st.query_params)
+    params.update(overrides)
+    return "?" + urlencode(params)
+
+
 def _sort_query_param_name(sort_key):
     return f"sort_{sort_key}"
 
@@ -251,21 +268,18 @@ def _sort_query_param_name(sort_key):
 def _build_sort_href(sort_key, column, direction):
     """
     Same-page '?...' link href that toggles ONE table's own sort_{sort_key}
-    query param to '{column}:{direction}', while preserving every OTHER
-    query param already on the page as-is (via dict(st.query_params)) -
-    critically including '?team=...' when this is used on the Team Page,
-    so clicking a sort link there reloads the SAME team's page rather than
-    losing that param and falling back to the main tabbed dashboard.
+    query param to '{column}:{direction}' - see _build_query_href() for how
+    every other query param on the page (notably '?team=...' or
+    '?dash_tab=...') survives the click untouched.
 
-    This is safe for the Team Page specifically (see
-    _render_grouped_stats_table()'s own sort_key docstring) in a way it
-    ISN'T for anything living inside this dashboard's top-level st.tabs() -
-    see _render_sort_control()'s docstring for why THOSE tables use a
-    dropdown widget instead of a link like this one.
+    This is only safe to use for a table whose page is addressable via the
+    URL - the Team Page ('?team=...') and, now that _render_dash_tab_bar()
+    makes the active tab part of the URL too, the main dashboard's League
+    Table/Team Stats tables. _render_sort_control()'s docstring covers the
+    one place this still ISN'T used (the Shots tab's own two tables) and
+    why.
     """
-    params = dict(st.query_params)
-    params[_sort_query_param_name(sort_key)] = f"{column}:{direction}"
-    return "?" + urlencode(params)
+    return _build_query_href(**{_sort_query_param_name(sort_key): f"{column}:{direction}"})
 
 
 def _apply_sort_from_query(df, sort_key):
@@ -295,7 +309,8 @@ def _apply_sort_from_query(df, sort_key):
     return sorted_df, column, direction
 
 
-def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None):
+def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None,
+                             clickable_headers=False):
     """
     Renders df as a plain HTML table via st.markdown (bordered cells, bold
     light-grey header row - a reasonably close match to st.dataframe's own
@@ -308,16 +323,30 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     are shown right-aligned, link_columns/raw_html_columns left-aligned,
     matching st.dataframe's own default alignment convention.
 
-    sort_key, when given, draws a "Sort by" dropdown above the table (see
-    _render_sort_control()) letting you pick any column, in either
-    direction, to sort the table by - a real widget, not a clickable
-    header link (see that function's own docstring for why the header-
-    link version of this was replaced). sort_key must be a value unique to
-    THIS particular table on the page (e.g. 'league_table', or the current
-    category name for the Team Stats tables) so two sortable tables shown
-    together get their own independent dropdown/sort state rather than
-    sharing one. Leave sort_key=None (the default) for a table that
-    shouldn't be sortable at all (Fixtures, Team Page's Match Log).
+    sort_key, when given, makes this table sortable - by which mechanism
+    depends on clickable_headers:
+
+    - clickable_headers=True (League Table, the 5 Team Stats category
+      tables): every header cell becomes a clickable '<a href="?...">'
+      link that sorts by that column, toggling High-to-Low/Low-to-High
+      (or A-Z/Z-A for a link_columns column like 'Team') on repeat clicks,
+      with an arrow (▲/▼) marking whichever column is currently active -
+      see _apply_sort_from_query()/_build_sort_href(). Safe here because
+      these tables live in the main dashboard's League Overview tab, and
+      _render_dash_tab_bar() makes the active top-level tab part of the
+      URL, so a link click reloads back onto the SAME tab.
+    - clickable_headers=False (the default - the Shots tab's own two
+      tables): draws a "Sort by" dropdown above the table instead (see
+      _render_sort_control()) - a real widget, not a link, so it works
+      regardless of whether the surrounding page is addressable via the
+      URL.
+
+    Either way, sort_key must be a value unique to THIS particular table
+    on the page (e.g. 'league_table', or the current category name for the
+    Team Stats tables) so two sortable tables shown together get their own
+    independent sort state rather than sharing one. Leave sort_key=None
+    (the default) for a table that shouldn't be sortable at all (Fixtures,
+    Team Page's Match Log).
 
     raw_html_columns is for a column whose cell values are ALREADY a
     ready-to-insert HTML snippet (e.g. Fixtures' 'Report' column, a
@@ -327,16 +356,47 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     """
     if df.empty:
         return
+
+    active_column, active_direction = None, None
     if sort_key is not None:
-        df = _render_sort_control(df, sort_key, link_columns)
+        if clickable_headers:
+            df, active_column, active_direction = _apply_sort_from_query(df, sort_key)
+        else:
+            df = _render_sort_control(df, sort_key, link_columns)
 
     left_columns = set(link_columns) | set(raw_html_columns)
-    header_cells = "".join(
-        f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
-        f'text-align:{"left" if col in left_columns else "right"}; white-space:nowrap;">'
-        f'{html.escape(str(col))}</th>'
-        for col in df.columns
-    )
+
+    def _header_cell(col):
+        align = "left" if col in left_columns else "right"
+        label = html.escape(str(col))
+        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+                 f'text-align:{align}; white-space:nowrap;')
+        if sort_key is None or not clickable_headers:
+            return f'<th style="{style}">{label}</th>'
+
+        # Clicking the currently-active column again flips its direction;
+        # clicking any other column starts it at whichever direction makes
+        # sense for its own values (High-to-Low first for a numeric stat,
+        # A-Z first for a link/text column like 'Team').
+        if col == active_column:
+            next_direction = "asc" if active_direction == "desc" else "desc"
+            arrow = " ▲" if active_direction == "asc" else " ▼"
+        else:
+            if col in link_columns:
+                is_numeric = False
+            else:
+                numeric = pd.to_numeric(df[col], errors="coerce")
+                is_numeric = numeric.notna().sum() == df[col].notna().sum()
+            next_direction = "desc" if is_numeric else "asc"
+            arrow = ""
+        href = _build_sort_href(sort_key, col, next_direction)
+        return (
+            f'<th style="{style} cursor:pointer;">'
+            f'<a href="{href}" target="_self" '
+            f'style="color:inherit; text-decoration:none; display:block;">{label}{arrow}</a></th>'
+        )
+
+    header_cells = "".join(_header_cell(col) for col in df.columns)
     body_rows = []
     for _, r in df.iterrows():
         cells = []
@@ -1537,6 +1597,71 @@ def _render_team_page(db, team, season=None):
         _render_playing_time_table(plus_minus_stats)
 
 
+# The main dashboard's own top-level tabs - see _render_dash_tab_bar() just
+# below for why these are drawn as a custom link-based tab bar instead of a
+# plain st.tabs() call.
+_DASH_TAB_PARAM = "dash_tab"
+_DASH_TABS = [
+    ("league_overview", "League Overview"),
+    ("fixtures", "Fixtures"),
+    ("team", "Team Trends"),
+    ("player", "Player Trends"),
+    ("shots", "Shots"),
+    ("passmap", "Pass Map"),
+    ("passrecv", "Passes Received"),
+    ("season_passmap", "Season Pass Map"),
+    ("season_passrecv", "Season Passes Received"),
+    ("season_touchmap", "Season Touch Map"),
+]
+_DASH_TAB_SLUGS = {slug for slug, _ in _DASH_TABS}
+
+
+def _active_dash_tab():
+    """Current top-level tab slug from '?dash_tab=...', falling back to the
+    first tab (matching st.tabs()' own old default) for a fresh page load
+    or an unrecognized/stale value."""
+    slug = st.query_params.get(_DASH_TAB_PARAM, _DASH_TABS[0][0])
+    return slug if slug in _DASH_TAB_SLUGS else _DASH_TABS[0][0]
+
+
+def _render_dash_tab_bar(active_slug):
+    """
+    Draws the main dashboard's top-level nav as real '<a href="?dash_tab=
+    ...">' links styled to look like st.tabs() (a bold, red-underlined
+    active tab, plain grey text for the rest), instead of calling st.tabs()
+    itself. Deliberate trade-off: st.tabs()' own selected-tab state lives
+    only in the browser's frontend state, NOT the URL, so any REAL browser
+    navigation - e.g. clicking one of the League Table/Team Stats sort
+    links below (see _render_data_table_html()'s clickable_headers) -
+    reloads the page back to the FIRST tab regardless of which one was
+    actually showing. That was exactly the "reverts to League Overview"
+    bug reported for an earlier version of this dashboard's sortable
+    tables. Making the active tab part of the URL instead fixes that at
+    the root: _build_query_href()'s 'copy every other param, override
+    just this one' pattern means a sort-link click here preserves
+    '?dash_tab=...' too, so the page reloads back onto the SAME tab, not
+    the first one - the same trick that already made General Stats'
+    clickable headers safe on the (already query-param-addressed) Team
+    Page.
+    """
+    cells = []
+    for slug, label in _DASH_TABS:
+        is_active = slug == active_slug
+        href = _build_query_href(**{_DASH_TAB_PARAM: slug})
+        style = (
+            f'padding:8px 16px; text-decoration:none; white-space:nowrap; font-size:1rem; '
+            f'border-bottom:3px solid {"#FF4B4B" if is_active else "transparent"}; '
+            f'color:{"#000" if is_active else "#555"}; '
+            f'font-weight:{600 if is_active else 400};'
+        )
+        cells.append(f'<a href="{href}" target="_self" style="{style}">{html.escape(label)}</a>')
+    st.markdown(
+        f'<div style="display:flex; gap:4px; border-bottom:1px solid #ddd; '
+        f'margin-bottom:1.2em; overflow-x:auto;">{"".join(cells)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's
 # "Report" link) swaps the WHOLE page over to the single-match detail view,
@@ -1569,13 +1694,10 @@ else:
             unsafe_allow_html=True,
         )
 
-    (tab_team_totals, tab_fixtures, tab_team, tab_player, tab_shots, tab_passmap,
-     tab_passrecv, tab_season_passmap, tab_season_passrecv, tab_season_touchmap) = st.tabs([
-        "League Overview", "Fixtures", "Team Trends", "Player Trends", "Shots", "Pass Map",
-        "Passes Received", "Season Pass Map", "Season Passes Received", "Season Touch Map",
-    ])
+    _active_tab = _active_dash_tab()
+    _render_dash_tab_bar(_active_tab)
 
-    with tab_team_totals:
+    if _active_tab == "league_overview":
         # League dropdown - scopes the League Table + every Team Stats
         # category table below to one competition (matches.competition).
         # Only one league exists today ('Premier League', the free-text
@@ -1608,7 +1730,8 @@ else:
             # own LinkColumn can't show a clean, human-readable team name as
             # the link text (only a fixed string or a regex pulled straight
             # from the url-encoded URL itself).
-            _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table")
+            _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table",
+                                     clickable_headers=True)
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
@@ -1642,14 +1765,14 @@ else:
                 # League Table above for why this uses _render_data_table_html()
                 # rather than st.dataframe.
                 _render_data_table_html(shot_totals, link_columns=("Team",),
-                                         sort_key="teamstats_shots")
+                                         sort_key="teamstats_shots", clickable_headers=True)
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(db, competition=selected_league)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
                 _render_data_table_html(passing_totals, link_columns=("Team",),
-                                         sort_key="teamstats_passing")
+                                         sort_key="teamstats_passing", clickable_headers=True)
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(db, competition=selected_league)
             if touches_totals.empty:
@@ -1660,7 +1783,7 @@ else:
                 )
             else:
                 _render_data_table_html(touches_totals, link_columns=("Team",),
-                                         sort_key="teamstats_touches")
+                                         sort_key="teamstats_touches", clickable_headers=True)
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -1676,7 +1799,7 @@ else:
                 )
             else:
                 _render_data_table_html(defensive_totals, link_columns=("Team",),
-                                         sort_key="teamstats_defensive")
+                                         sort_key="teamstats_defensive", clickable_headers=True)
         elif totals_category == "Defensive Action Location":
             defensive_location_totals = hdb.fetch_season_defensive_location_totals(
                 db, competition=selected_league)
@@ -1688,9 +1811,10 @@ else:
                 )
             else:
                 _render_data_table_html(defensive_location_totals, link_columns=("Team",),
-                                         sort_key="teamstats_defensive_location")
+                                         sort_key="teamstats_defensive_location",
+                                         clickable_headers=True)
 
-    with tab_fixtures:
+    elif _active_tab == "fixtures":
         fixtures = hdb.fetch_fixtures(db)
         if fixtures.empty:
             st.info("No matches published yet - run the combined report app and use 'Save to Database'.")
@@ -1744,7 +1868,7 @@ else:
                 _render_fixtures_like_table(scoped)
                 st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
 
-    with tab_team:
+    elif _active_tab == "team":
         matches = hdb.fetch_matches(db)
         teams = sorted(set(matches["home_team"].dropna()) | set(matches["away_team"].dropna()))
         if not teams:
@@ -1766,7 +1890,7 @@ else:
                         chart_df = trends.set_index("match_date")[chosen]
                         st.line_chart(chart_df)
 
-    with tab_player:
+    elif _active_tab == "player":
         matches = hdb.fetch_matches(db)
         if matches.empty:
             st.info("No matches published yet.")
@@ -1797,7 +1921,7 @@ else:
                             chart_df = trends.set_index("match_date")[chosen]
                             st.line_chart(chart_df)
 
-    with tab_shots:
+    elif _active_tab == "shots":
         for_df, against_df = hdb.fetch_season_shot_totals(db)
         if for_df.empty and against_df.empty:
             st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
@@ -1837,17 +1961,17 @@ else:
                 _render_data_table_html(_team_totals_for(against_df), link_columns=("Team",),
                                          sort_key="shots_against")
 
-    with tab_passmap:
+    elif _active_tab == "passmap":
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
 
-    with tab_passrecv:
+    elif _active_tab == "passrecv":
         _render_pass_map(db, hdb.fetch_matches(db), mode="receiver")
 
-    with tab_season_passmap:
+    elif _active_tab == "season_passmap":
         _render_season_pass_map(db, mode="passer")
 
-    with tab_season_passrecv:
+    elif _active_tab == "season_passrecv":
         _render_season_pass_map(db, mode="receiver")
 
-    with tab_season_touchmap:
+    elif _active_tab == "season_touchmap":
         _render_season_touchmap(db)
