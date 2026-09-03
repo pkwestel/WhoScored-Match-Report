@@ -50,7 +50,7 @@ import html
 import io
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -244,6 +244,57 @@ def _render_sort_control(df, sort_key, link_columns):
     )
 
 
+def _sort_query_param_name(sort_key):
+    return f"sort_{sort_key}"
+
+
+def _build_sort_href(sort_key, column, direction):
+    """
+    Same-page '?...' link href that toggles ONE table's own sort_{sort_key}
+    query param to '{column}:{direction}', while preserving every OTHER
+    query param already on the page as-is (via dict(st.query_params)) -
+    critically including '?team=...' when this is used on the Team Page,
+    so clicking a sort link there reloads the SAME team's page rather than
+    losing that param and falling back to the main tabbed dashboard.
+
+    This is safe for the Team Page specifically (see
+    _render_grouped_stats_table()'s own sort_key docstring) in a way it
+    ISN'T for anything living inside this dashboard's top-level st.tabs() -
+    see _render_sort_control()'s docstring for why THOSE tables use a
+    dropdown widget instead of a link like this one.
+    """
+    params = dict(st.query_params)
+    params[_sort_query_param_name(sort_key)] = f"{column}:{direction}"
+    return "?" + urlencode(params)
+
+
+def _apply_sort_from_query(df, sort_key):
+    """
+    Reads sort_{sort_key} back out of the current query string (set by
+    clicking a row-2 header link built with _build_sort_href()) and
+    returns (sorted_df, active_column, active_direction) - active_column
+    is None (df returned unchanged) if nothing's been clicked yet, or the
+    named column doesn't actually exist on this df.
+    """
+    raw = st.query_params.get(_sort_query_param_name(sort_key))
+    if not raw or ":" not in raw:
+        return df, None, None
+    column, direction = raw.rsplit(":", 1)
+    if column not in df.columns or direction not in ("asc", "desc"):
+        return df, None, None
+    ascending = direction == "asc"
+    sort_series = pd.to_numeric(df[column], errors="coerce")
+    if sort_series.notna().sum() != df[column].notna().sum():
+        sort_series = df[column].astype(str).str.lower()
+    sorted_df = (
+        df.assign(_sort_val=sort_series)
+          .sort_values("_sort_val", ascending=ascending, na_position="last", kind="mergesort")
+          .drop(columns="_sort_val")
+          .reset_index(drop=True)
+    )
+    return sorted_df, column, direction
+
+
 def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None):
     """
     Renders df as a plain HTML table via st.markdown (bordered cells, bold
@@ -369,16 +420,25 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     plain '-' (this table's convention for "no value") is left as-is
     rather than forced into that format.
 
-    sort_key, when given, draws a "Sort by" dropdown above the table (see
-    _render_sort_control(), the same one _render_data_table_html() uses)
-    letting you pick any column, in either direction, to sort by. The
-    'Team Total' row (if this table has one - see _player_category_table()/
-    fetch_team_season_scoring_stats()/fetch_team_season_plus_minus()) is
-    pulled out before sorting and always re-appended at the very bottom
-    afterward, regardless of what's selected - it's a summary row, not a
-    player, so it should never shuffle into the middle of a sorted column.
-    Leave sort_key=None (the default) for a table that shouldn't be
-    sortable.
+    sort_key, when given, makes every ROW-2 header cell (the actual per-
+    stat column titles, e.g. 'Goals' - NOT row 1's rowspan'd 'Player'/'Age'
+    or its group labels like 'Totals') a clickable link that sorts the
+    table by that column, toggling High-to-Low/Low-to-High on repeat
+    clicks (an arrow - ▲/▼ - shows next to whichever column is
+    currently active). This is a real '<a href="?...">' link rather than
+    the dropdown _render_data_table_html() uses (see _render_sort_control()'s
+    docstring for why THAT one avoids links) - safe here specifically
+    because the Team Page this table lives on is swapped in via its own
+    '?team=...' query param rather than living inside this dashboard's
+    top-level st.tabs(), so a normal link click just reloads the SAME Team
+    Page (see _build_sort_href()) instead of resetting to the first tab.
+    The 'Team Total' row (if this table has one - see
+    _player_category_table()/fetch_team_season_scoring_stats()/
+    fetch_team_season_plus_minus()) is pulled out before sorting and
+    always re-appended at the very bottom afterward, regardless of what's
+    selected - it's a summary row, not a player, so it should never
+    shuffle into the middle of a sorted column. Leave sort_key=None (the
+    default) for a table that shouldn't be sortable.
 
     freeze_header, when True, pins the two header rows in place while
     scrolling vertically AND pins the very first column (ungrouped[0] -
@@ -401,14 +461,15 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     if df.empty:
         return
 
+    active_column, active_direction = None, None
     if sort_key is not None:
         is_total_row = df["Player"] == "Team Total" if "Player" in df.columns else None
         if is_total_row is not None and is_total_row.any():
             total_row, sortable_rows = df[is_total_row], df[~is_total_row]
-            sortable_rows = _render_sort_control(sortable_rows, sort_key, link_columns=())
+            sortable_rows, active_column, active_direction = _apply_sort_from_query(sortable_rows, sort_key)
             df = pd.concat([sortable_rows, total_row], ignore_index=True)
         else:
-            df = _render_sort_control(df, sort_key, link_columns=())
+            df, active_column, active_direction = _apply_sort_from_query(df, sort_key)
 
     per90_cols = [c for c in df.columns if c.endswith(" (Per 90)")]
     all_decimal_cols = set(decimal_cols) | set(per90_cols)
@@ -445,14 +506,35 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 style += ' position:sticky; top:0; z-index:3;'
             row1_cells.append(f'<th colspan="{len(cols)}" style="{style}">{html.escape(label)}</th>')
 
-    def _row2_th(text):
+    def _row2_th(col):
+        label = html.escape(_label(col))
         style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
                  f'text-align:right; white-space:nowrap;')
         if freeze_header:
             style += f' position:sticky; top:{_FREEZE_HEADER_ROW_H_PX}px; z-index:2;'
-        return f'<th style="{style}">{html.escape(str(text))}</th>'
+        if sort_key is None:
+            return f'<th style="{style}">{label}</th>'
 
-    row2_cells = [_row2_th(_label(col)) for _, cols in groups for col in cols]
+        # Clicking the currently-active column again flips its direction;
+        # clicking any other column starts it at whichever direction makes
+        # sense for its own values (High-to-Low first for a numeric stat,
+        # A-Z first for text) rather than always defaulting to the same one.
+        if col == active_column:
+            next_direction = "asc" if active_direction == "desc" else "desc"
+            arrow = " ▲" if active_direction == "asc" else " ▼"
+        else:
+            numeric = pd.to_numeric(df[col], errors="coerce")
+            is_numeric = numeric.notna().sum() == df[col].notna().sum()
+            next_direction = "desc" if is_numeric else "asc"
+            arrow = ""
+        href = _build_sort_href(sort_key, col, next_direction)
+        return (
+            f'<th style="{style} cursor:pointer;">'
+            f'<a href="{href}" target="_self" '
+            f'style="color:inherit; text-decoration:none; display:block;">{label}{arrow}</a></th>'
+        )
+
+    row2_cells = [_row2_th(col) for _, cols in groups for col in cols]
 
     body_rows = []
     for _, r in df.iterrows():
