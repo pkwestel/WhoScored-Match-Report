@@ -1864,17 +1864,21 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     == 'Penalty') - the same treatment as the Shot Breakdown tab, and for
     the same reason: a penalty isn't a shot in the run-of-play sense.
 
-    xG For/Against is NOT a simple sum of each shot's own xG value. Shots
-    by the SAME team at the exact same effective minute (Minute + Added
-    Time) are treated as one sequence - almost certainly a rebound/scramble
-    in the same phase of play, since FotMob's shot map carries no separate
-    possession/sequence ID to group on more precisely - and combined into a
-    single probability (1 minus the product of (1 - xG) across that
-    sequence's shots) rather than added together, since simply summing
-    individual shot xG values overstates the true combined chance of
-    scoring from one spell of play. Shots in different minutes are treated
-    as independent and their (already sequence-combined) values are simply
-    added together as usual.
+    xG For/Against is a plain sum of each shot's own xG value within the
+    player's window - deliberately NOT sequence-combined (an EARLIER
+    version of this function combined shots by the same team at the exact
+    same effective minute - Minute + Added Time - into one probability,
+    1 minus the product of (1 - xG) across that "sequence", on the theory
+    that a same-minute rebound/scramble isn't really two independent
+    scoring chances). That combining step was removed by request
+    specifically so this table's xG reconciles with the Team Totals tab's
+    own xG (compute_totals()'s 'Total xG', which prefers FotMob's own
+    officially-published match xG figure and otherwise falls back to a
+    plain per-shot sum - see that function's own docstring) - a player who
+    played the entire match should show the same non-penalty xG as the
+    match's own Team Totals figure (minus any penalty), which a sequence-
+    combined number generally can't, since combining always produces a
+    total at or below the plain sum whenever two shots share a minute.
 
     Returns one DataFrame with a Team column - split into two tables, one
     per team, when written to the workbook/UI (see build_workbook()).
@@ -1891,12 +1895,6 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     work['Minute'] = work['Minute'].fillna(0)
     work['Added Time'] = work['Added Time'].fillna(0)
     work['_effective_minute'] = work['Minute'] + work['Added Time']
-
-    # Sequence-combine xG: shots by the same team at the exact same
-    # effective minute become one combined probability, not a plain sum.
-    seq = (work.groupby(['Team', '_effective_minute'])['xG']
-           .apply(lambda xs: 1 - (1 - xs).prod())
-           .reset_index(name='seq_xG'))
 
     teams_all = ([t for t in [home_name, away_name] if t is not None]
                  or sorted(player_windows['Team'].dropna().unique()))
@@ -1915,8 +1913,6 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
 
         own_shots = work[(work['Team'] == team) & mask(work['_effective_minute'])]
         opp_shots = work[(work['Team'] == opp) & mask(work['_effective_minute'])] if opp else work.iloc[0:0]
-        own_seq = seq[(seq['Team'] == team) & mask(seq['_effective_minute'])]
-        opp_seq = seq[(seq['Team'] == opp) & mask(seq['_effective_minute'])] if opp else seq.iloc[0:0]
 
         records.append({
             'Team': team,
@@ -1926,8 +1922,8 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
             'Goals Against': int((opp_shots['Outcome'] == 'Goal').sum()),
             'Shots': int(len(own_shots)),
             'Shots Against': int(len(opp_shots)),
-            'xG': round(own_seq['seq_xG'].sum(), 2),
-            'xG Against': round(opp_seq['seq_xG'].sum(), 2),
+            'xG': round(own_shots['xG'].sum(), 2),
+            'xG Against': round(opp_shots['xG'].sum(), 2),
         })
 
     out = pd.DataFrame(records, columns=out_cols)
