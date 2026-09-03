@@ -2151,19 +2151,29 @@ def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
     Difference (xG - xG Against) - and a Per 90 rate for every one of
     those 8 stats.
 
-    Same '(stat / Minutes) * 90' formula, '-' for a player with 0 total
-    minutes, and Team-Total-row-recomputed-from-summed-totals (rather than
-    averaging individual players' own rates) principle as
-    fetch_team_season_scoring_stats()'s own Per 90 columns - see that
-    function's docstring and _per90() above for the full reasoning; this
-    reuses that exact same _per90() helper.
+    Same '(stat / Minutes) * 90' formula, and '-' for a player with 0 total
+    minutes, as fetch_team_season_scoring_stats()'s own Per 90 columns -
+    see _per90() above; this reuses that exact same helper. UNLIKE that
+    function, though, 'Team Total' here is NOT out[c].sum() across the
+    player rows above - each player row already carries the WHOLE team's
+    Shots/Goals/xG for whatever window they were on the pitch (that's the
+    entire point of a plus/minus table), so naively summing every player's
+    row would multiply the real season total by roughly however many
+    players were on the pitch at once. Team Total is instead computed
+    independently, straight from the shots table, using the exact same
+    non-penalty + same-effective-minute-sequence-combined xG rule
+    compute_plus_minus() applies per player window - just over each WHOLE
+    match instead - then summed across this team's matches this season.
+    Its own 'Minutes' is match-count × 90 (not summed player-minutes), so
+    its Per 90 figures come out as a "per game" rate rather than being
+    divided by an inflated denominator to compensate.
 
-    Goal Difference/xG Difference are computed from the ALREADY-SUMMED
-    Goals For/Against and xG/xG Against (sum-then-subtract) - mathemat-
-    ically identical to subtracting each match's own difference and then
-    summing those (subtraction is linear), so there's exactly one 'true'
-    season Goal Difference/xG Difference per player here, not an
-    approximation of one.
+    Goal Difference/xG Difference (both the per-player rows AND Team
+    Total) are computed from each one's own Goals For/Against and xG/xG
+    Against (sum-then-subtract) - mathematically identical to subtracting
+    each match's own difference and then summing those (subtraction is
+    linear), so there's exactly one 'true' season Goal Difference/xG
+    Difference here, not an approximation of one.
 
     Two-row merged-header display (a 'Totals' group for every summed
     column, a 'Per 90' group for the 8 rate columns) is purely a display
@@ -2244,13 +2254,77 @@ def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
            .sort_values("Minutes", ascending=False)
            .reset_index(drop=True))
 
-    team_total = {"Player": "Team Total"}
-    for c in ["Minutes", "Goals For", "Goals Against", "Goal Difference", "Shots",
-              "Shots Against", "xG", "xG Against", "xG Difference"]:
-        s = out[c].sum()
-        team_total[c] = round(s, 2) if c in _PLUS_MINUS_DECIMAL_COLUMNS else int(round(s))
+    # Team Total is deliberately NOT out[c].sum() the way every other
+    # Team-Total row in this module is computed - see this function's own
+    # docstring for why: each player row above already carries the WHOLE
+    # team's Shots/Goals/xG for whatever window they were on the pitch, so
+    # a team that used only 11 players all game would have each of them
+    # showing the SAME real match totals, and summing all 11 rows would
+    # overstate the season total roughly 11x (confirmed bug: a team whose
+    # real season total was 53 shots showed 583). Team Total is computed
+    # independently here instead, straight from the shots table, using the
+    # exact same non-penalty + same-effective-minute-sequence-combined xG
+    # rule fotmob_report.compute_plus_minus() uses for each player's own
+    # window - just applied to the WHOLE match rather than one player's
+    # slice of it, then summed across every one of this team's matches
+    # this season. 'Minutes' here is match-count * 90 (this season's total
+    # team playing time), not summed player-minutes, so the Per 90 figures
+    # come out as a sensible "per game" rate rather than being divided by
+    # an ~11x-inflated denominator to match.
+    team_minutes = len(team_matches) * 90
+    goals_for = goals_against = shots_for = shots_against = 0
+    xg_for = xg_against = 0.0
+
+    shots = fetch_shots(db)
+    if not shots.empty:
+        shots = shots[shots["match_id"].isin(set(team_matches["match_id"].astype(str)))].copy()
+        shots = shots[shots["situation"] != "Penalty"]
+        shots["xg"] = pd.to_numeric(shots["xg"], errors="coerce").fillna(0.0)
+        shots["minute"] = pd.to_numeric(shots["minute"], errors="coerce").fillna(0)
+        shots["added_time"] = pd.to_numeric(shots["added_time"], errors="coerce").fillna(0)
+        shots["_eff_minute"] = shots["minute"] + shots["added_time"]
+
+        for _, m in team_matches.iterrows():
+            if m["home_team"] == team:
+                opponent = m["away_team"]
+            elif m["away_team"] == team:
+                opponent = m["home_team"]
+            else:
+                continue
+            match_shots = shots[shots["match_id"] == str(m["match_id"])]
+            own = match_shots[match_shots["team"] == team]
+            opp = match_shots[match_shots["team"] == opponent]
+
+            shots_for += len(own)
+            shots_against += len(opp)
+            goals_for += int((own["outcome"] == "Goal").sum())
+            goals_against += int((opp["outcome"] == "Goal").sum())
+            if not own.empty:
+                xg_for += own.groupby("_eff_minute")["xg"].apply(lambda xs: 1 - (1 - xs).prod()).sum()
+            if not opp.empty:
+                xg_against += opp.groupby("_eff_minute")["xg"].apply(lambda xs: 1 - (1 - xs).prod()).sum()
+
+    goal_diff = goals_for - goals_against
+    xg_diff = xg_for - xg_against
+    team_total = {
+        "Player": "Team Total",
+        "Minutes": team_minutes,
+        "Goals For": int(round(goals_for)),
+        "Goals Against": int(round(goals_against)),
+        "Goal Difference": int(round(goal_diff)),
+        "Shots": int(round(shots_for)),
+        "Shots Against": int(round(shots_against)),
+        "xG": round(xg_for, 2),
+        "xG Against": round(xg_against, 2),
+        "xG Difference": round(xg_diff, 2),
+    }
+    stat_values = {
+        "Goals For": goals_for, "Goals Against": goals_against, "Goal Difference": goal_diff,
+        "Shots": shots_for, "Shots Against": shots_against, "xG": xg_for, "xG Against": xg_against,
+        "xG Difference": xg_diff,
+    }
     for stat in _PLUS_MINUS_STATS:
-        team_total[f"{stat} (Per 90)"] = _per90(team_total[stat], team_total["Minutes"])
+        team_total[f"{stat} (Per 90)"] = _per90(stat_values[stat], team_minutes)
 
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 

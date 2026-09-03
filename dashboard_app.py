@@ -146,6 +146,72 @@ def _no_scroll_height(df) -> int:
     return int(len(df) + 1) * 35 + 3
 
 
+def _split_team_total_row(df):
+    """
+    Splits a 'Team Total'-terminated DataFrame (see _player_category_table()/
+    _fetch_team_season_category_table() in history_db.py) into (sortable_df,
+    total_row) - every real player row, and the single 'Team Total' summary
+    row on its own. Returns (df, df.iloc[0:0]) unchanged (an empty total_row)
+    if df has no 'Player' column or no 'Team Total' row at all, so a caller
+    can use this unconditionally without checking first.
+    """
+    if "Player" not in df.columns:
+        return df, df.iloc[0:0]
+    is_total = df["Player"] == "Team Total"
+    if not is_total.any():
+        return df, df.iloc[0:0]
+    return df[~is_total].reset_index(drop=True), df[is_total].reset_index(drop=True)
+
+
+def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
+    """
+    Renders the 'Team Total' row (see _split_team_total_row()) as its own
+    small, headerless HTML table directly beneath a sortable st.dataframe -
+    used for the Team Page's Possession/Passing/Defensive Actions/
+    Defensive Action Locations tables specifically because st.dataframe's
+    own native column-header click-to-sort (see _render_team_page()'s
+    per-category loop) has no way to exclude one row from being reordered
+    along with everything else. Splitting the summary row out into this
+    separate, fixed table - shaded a bit darker (#e2e5ea, the same shade
+    _render_grouped_stats_table() uses for its own group-header row) so
+    it visually reads as a footer rather than just another player - keeps
+    it pinned to the very bottom no matter how the table above is sorted,
+    the same guarantee _render_grouped_stats_table()'s own Team-Total-
+    pinning already gives General Stats/Playing Time.
+
+    columns is the sortable table's OWN column order (so this footer's
+    cells line up in the same left-to-right order), and decimal_cols is
+    the same "these columns show 2 decimal places" set _render_grouped_
+    stats_table() takes - everything else renders as a plain int/string.
+    Renders nothing if total_row is empty.
+    """
+    if total_row.empty:
+        return
+    r = total_row.iloc[0]
+    cells = []
+    for col in columns:
+        val = r[col]
+        align = "left" if col == "Player" else "right"
+        if pd.isna(val):
+            cell_html = "-"
+        elif col in decimal_cols and isinstance(val, (int, float)) and not isinstance(val, bool):
+            cell_html = f"{val:.2f}"
+        else:
+            cell_html = html.escape(str(val))
+        weight = "font-weight:600;" if col == "Player" else ""
+        cells.append(
+            f'<td style="padding:6px 14px; border:1px solid #ccc; text-align:{align}; '
+            f'white-space:nowrap; {weight}">{cell_html}</td>'
+        )
+    st.markdown(f"""
+    <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse; font-size:0.95em; width:100%;">
+            <tbody><tr style="background:#e2e5ea;">{"".join(cells)}</tr></tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _team_page_url(team_name):
     """
     Relative '?team=<url-encoded name>' link to a team's Team Page (see
@@ -178,67 +244,6 @@ def _linkify_team_cell(team_name):
         return ""
     url = _team_page_url(team_name)
     return f'<a href="{url}" style="color:inherit; text-decoration:underline;">{html.escape(str(team_name))}</a>'
-
-
-def _sort_options_and_map(df, link_columns):
-    """
-    Builds the option list (and a lookup back to (column, ascending, is_
-    numeric)) for a sortable table's "Sort by" dropdown - two entries per
-    column ('xG (High to Low)'/'xG (Low to High)' for a numeric column,
-    'Team (A-Z)'/'Team (Z-A)' for a text/link column), plus a leading
-    'Default order' entry that means "don't touch the caller's own row
-    order" (e.g. the League Table's already-sensible Points/GD/GF sort).
-
-    A column counts as numeric here if EVERY one of its non-null values
-    parses as a number - covers every plain numeric column these season-
-    cumulative tables have; a link_columns entry like 'Team' is always
-    treated as text even if it happened to parse as numeric, since its
-    real per-row value is a team name.
-    """
-    options = ["Default order"]
-    option_map = {}
-    for col in df.columns:
-        numeric = pd.to_numeric(df[col], errors="coerce")
-        is_numeric = col not in link_columns and numeric.notna().sum() == df[col].notna().sum()
-        if is_numeric:
-            pairs = [(f"{col} (High to Low)", False), (f"{col} (Low to High)", True)]
-        else:
-            pairs = [(f"{col} (A-Z)", True), (f"{col} (Z-A)", False)]
-        for label, ascending in pairs:
-            options.append(label)
-            option_map[label] = (col, ascending, is_numeric)
-    return options, option_map
-
-
-def _render_sort_control(df, sort_key, link_columns):
-    """
-    Draws the "Sort by" dropdown for one sortable table (see
-    _render_data_table_html()'s sort_key/clickable_headers parameters) and
-    returns df sorted per whatever's currently selected (or df unchanged if
-    "Default order" is selected). A plain st.selectbox - a REAL Streamlit
-    widget, so picking an option triggers an ordinary rerun, not a browser
-    navigation.
-
-    This is STILL what the Shots tab's own two tables (shots_for/
-    shots_against) use - only the League Table and the 5 Team Stats
-    category tables were asked to switch to clickable '<a href="?...">'
-    headers instead (see _apply_sort_from_query()/_build_sort_href(),
-    and _render_dash_tab_bar() for the tab-bar change that made a link
-    click on THOSE tables safe to begin with). Nothing about the Shots
-    tab's own tables changed.
-    """
-    options, option_map = _sort_options_and_map(df, link_columns)
-    choice = st.selectbox("Sort by", options, key=f"sort_choice_{sort_key}")
-    if choice == "Default order":
-        return df
-    column, ascending, is_numeric = option_map[choice]
-    sort_series = pd.to_numeric(df[column], errors="coerce") if is_numeric else df[column].astype(str).str.lower()
-    return (
-        df.assign(_sort_val=sort_series)
-          .sort_values("_sort_val", ascending=ascending, na_position="last", kind="mergesort")
-          .drop(columns="_sort_val")
-          .reset_index(drop=True)
-    )
 
 
 def _build_query_href(**overrides):
@@ -275,9 +280,9 @@ def _build_sort_href(sort_key, column, direction):
     This is only safe to use for a table whose page is addressable via the
     URL - the Team Page ('?team=...') and, now that _render_dash_tab_bar()
     makes the active tab part of the URL too, the main dashboard's League
-    Table/Team Stats tables. _render_sort_control()'s docstring covers the
-    one place this still ISN'T used (the Shots tab's own two tables) and
-    why.
+    Table. (The 5 Team Stats category tables and the Shots tab's own two
+    tables moved to plain st.dataframe instead - see those call sites -
+    since native grid sorting has no full-navigation risk to begin with.)
     """
     return _build_query_href(**{_sort_query_param_name(sort_key): f"{column}:{direction}"})
 
@@ -309,44 +314,31 @@ def _apply_sort_from_query(df, sort_key):
     return sorted_df, column, direction
 
 
-def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None,
-                             clickable_headers=False):
+def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=None):
     """
     Renders df as a plain HTML table via st.markdown (bordered cells, bold
     light-grey header row - a reasonably close match to st.dataframe's own
     look) instead of st.dataframe, specifically so any column named in
     link_columns can be rendered as real team-name links (see
     _linkify_team_cell()) rather than plain text. Used for the League
-    Table, the 5 season Team Stats category tables, the season-wide Shots
-    tab's For/Against tables, and the Fixtures table - all previously plain
-    st.dataframe calls before team-name links were added. Numeric columns
-    are shown right-aligned, link_columns/raw_html_columns left-aligned,
-    matching st.dataframe's own default alignment convention.
+    Table and the Fixtures table - the 5 season Team Stats category tables
+    and the Shots tab's For/Against tables moved to plain st.dataframe
+    instead (dropping their own Team links) once native grid sorting made
+    that the better tradeoff for those - see those call sites. Numeric
+    columns are shown right-aligned, link_columns/raw_html_columns left-
+    aligned, matching st.dataframe's own default alignment convention.
 
-    sort_key, when given, makes this table sortable - by which mechanism
-    depends on clickable_headers:
-
-    - clickable_headers=True (League Table, the 5 Team Stats category
-      tables): every header cell becomes a clickable '<a href="?...">'
-      link that sorts by that column, toggling High-to-Low/Low-to-High
-      (or A-Z/Z-A for a link_columns column like 'Team') on repeat clicks,
-      with an arrow (▲/▼) marking whichever column is currently active -
-      see _apply_sort_from_query()/_build_sort_href(). Safe here because
-      these tables live in the main dashboard's League Overview tab, and
-      _render_dash_tab_bar() makes the active top-level tab part of the
-      URL, so a link click reloads back onto the SAME tab.
-    - clickable_headers=False (the default - the Shots tab's own two
-      tables): draws a "Sort by" dropdown above the table instead (see
-      _render_sort_control()) - a real widget, not a link, so it works
-      regardless of whether the surrounding page is addressable via the
-      URL.
-
-    Either way, sort_key must be a value unique to THIS particular table
-    on the page (e.g. 'league_table', or the current category name for the
-    Team Stats tables) so two sortable tables shown together get their own
-    independent sort state rather than sharing one. Leave sort_key=None
-    (the default) for a table that shouldn't be sortable at all (Fixtures,
-    Team Page's Match Log).
+    sort_key, when given, makes every header cell a clickable
+    '<a href="?...">' link that sorts by that column, toggling High-to-Low/
+    Low-to-High (or A-Z/Z-A for a link_columns column like 'Team') on
+    repeat clicks, with an arrow (▲/▼) marking whichever column is
+    currently active - see _apply_sort_from_query()/_build_sort_href().
+    Safe here because the League Table lives in the main dashboard's
+    League Overview tab, and _render_dash_tab_bar() makes the active top-
+    level tab part of the URL, so a link click reloads back onto the SAME
+    tab. sort_key must be a value unique to THIS particular table on the
+    page. Leave sort_key=None (the default) for a table that shouldn't be
+    sortable at all (Fixtures, Team Page's Match Log).
 
     raw_html_columns is for a column whose cell values are ALREADY a
     ready-to-insert HTML snippet (e.g. Fixtures' 'Report' column, a
@@ -359,10 +351,7 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
 
     active_column, active_direction = None, None
     if sort_key is not None:
-        if clickable_headers:
-            df, active_column, active_direction = _apply_sort_from_query(df, sort_key)
-        else:
-            df = _render_sort_control(df, sort_key, link_columns)
+        df, active_column, active_direction = _apply_sort_from_query(df, sort_key)
 
     left_columns = set(link_columns) | set(raw_html_columns)
 
@@ -371,7 +360,7 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
         label = html.escape(str(col))
         style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
                  f'text-align:{align}; white-space:nowrap;')
-        if sort_key is None or not clickable_headers:
+        if sort_key is None:
             return f'<th style="{style}">{label}</th>'
 
         # Clicking the currently-active column again flips its direction;
@@ -485,9 +474,9 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     or its group labels like 'Totals') a clickable link that sorts the
     table by that column, toggling High-to-Low/Low-to-High on repeat
     clicks (an arrow - ▲/▼ - shows next to whichever column is
-    currently active). This is a real '<a href="?...">' link rather than
-    the dropdown _render_data_table_html() uses (see _render_sort_control()'s
-    docstring for why THAT one avoids links) - safe here specifically
+    currently active). This is the same clickable-header mechanism
+    _render_data_table_html() uses for the League Table (see
+    _apply_sort_from_query()/_build_sort_href()) - safe here specifically
     because the Team Page this table lives on is swapped in via its own
     '?team=...' query param rather than living inside this dashboard's
     top-level st.tabs(), so a normal link click just reloads the SAME Team
@@ -1579,8 +1568,16 @@ def _render_team_page(db, team, season=None):
         else:
             if show_per90:
                 category_df = _convert_to_per90(category_df, minutes_by_player)
-            st.dataframe(category_df, use_container_width=False, hide_index=True,
-                         height=_no_scroll_height(category_df))
+            # 'Team Total' is split out and rendered as its own fixed,
+            # darker-shaded footer row (see _render_pinned_team_total_row())
+            # rather than left inside this st.dataframe - native grid sort
+            # has no concept of "pin this one row", so leaving Team Total
+            # in would let it get shuffled into the middle of the table on
+            # a descending sort instead of staying put at the bottom.
+            sortable_df, total_row = _split_team_total_row(category_df)
+            st.dataframe(sortable_df, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(sortable_df))
+            _render_pinned_team_total_row(sortable_df.columns, total_row)
 
     # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
     # xG For and Against, totaled for exactly the minutes each player was on
@@ -1631,9 +1628,9 @@ def _render_dash_tab_bar(active_slug):
     active tab, plain grey text for the rest), instead of calling st.tabs()
     itself. Deliberate trade-off: st.tabs()' own selected-tab state lives
     only in the browser's frontend state, NOT the URL, so any REAL browser
-    navigation - e.g. clicking one of the League Table/Team Stats sort
-    links below (see _render_data_table_html()'s clickable_headers) -
-    reloads the page back to the FIRST tab regardless of which one was
+    navigation - e.g. clicking one of the League Table's own sort links
+    below (see _render_data_table_html()) - reloads the page back to the
+    FIRST tab regardless of which one was
     actually showing. That was exactly the "reverts to League Overview"
     bug reported for an earlier version of this dashboard's sortable
     tables. Making the active tab part of the URL instead fixes that at
@@ -1730,8 +1727,7 @@ else:
             # own LinkColumn can't show a clean, human-readable team name as
             # the link text (only a fixed string or a regex pulled straight
             # from the url-encoded URL itself).
-            _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table",
-                                     clickable_headers=True)
+            _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table")
 
         st.subheader("Team Stats")
         totals_category = st.selectbox(
@@ -1761,18 +1757,22 @@ else:
                     if c != "Team":
                         shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
                 shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
-                # Team column linked to that team's Team Page - see the
-                # League Table above for why this uses _render_data_table_html()
-                # rather than st.dataframe.
-                _render_data_table_html(shot_totals, link_columns=("Team",),
-                                         sort_key="teamstats_shots", clickable_headers=True)
+                # Plain st.dataframe (Team is no longer a link on this
+                # table - see the League Table above for why IT still is,
+                # and _render_team_page()'s Possession/Passing/Defensive
+                # tables for the same tradeoff) - clicking any column
+                # header sorts natively, instantly, with no page reload at
+                # all, since this is a real Streamlit grid widget rather
+                # than our own HTML table + link/dropdown sort mechanism.
+                st.dataframe(shot_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(shot_totals))
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(db, competition=selected_league)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
-                _render_data_table_html(passing_totals, link_columns=("Team",),
-                                         sort_key="teamstats_passing", clickable_headers=True)
+                st.dataframe(passing_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(passing_totals))
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(db, competition=selected_league)
             if touches_totals.empty:
@@ -1782,8 +1782,8 @@ else:
                     "backfill it."
                 )
             else:
-                _render_data_table_html(touches_totals, link_columns=("Team",),
-                                         sort_key="teamstats_touches", clickable_headers=True)
+                st.dataframe(touches_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(touches_totals))
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -1798,8 +1798,8 @@ else:
                     "first."
                 )
             else:
-                _render_data_table_html(defensive_totals, link_columns=("Team",),
-                                         sort_key="teamstats_defensive", clickable_headers=True)
+                st.dataframe(defensive_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(defensive_totals))
         elif totals_category == "Defensive Action Location":
             defensive_location_totals = hdb.fetch_season_defensive_location_totals(
                 db, competition=selected_league)
@@ -1810,9 +1810,8 @@ else:
                     "report app to backfill it."
                 )
             else:
-                _render_data_table_html(defensive_location_totals, link_columns=("Team",),
-                                         sort_key="teamstats_defensive_location",
-                                         clickable_headers=True)
+                st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(defensive_location_totals))
 
     elif _active_tab == "fixtures":
         fixtures = hdb.fetch_fixtures(db)
@@ -1951,15 +1950,17 @@ else:
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("For")
-                # Team column linked to that team's Team Page - see the
-                # League Table/Team Stats/Fixtures tables for the same
-                # treatment (_render_data_table_html()/_linkify_team_cell()).
-                _render_data_table_html(_team_totals_for(for_df), link_columns=("Team",),
-                                         sort_key="shots_for")
+                # Plain st.dataframe - native instant column-header sort,
+                # no page reload (same tradeoff as the 5 Team Stats tables
+                # above: Team is plain text here, not a link).
+                for_totals = _team_totals_for(for_df)
+                st.dataframe(for_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(for_totals))
             with col2:
                 st.subheader("Against")
-                _render_data_table_html(_team_totals_for(against_df), link_columns=("Team",),
-                                         sort_key="shots_against")
+                against_totals = _team_totals_for(against_df)
+                st.dataframe(against_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(against_totals))
 
     elif _active_tab == "passmap":
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")

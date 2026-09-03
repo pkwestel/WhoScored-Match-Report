@@ -1527,9 +1527,63 @@ def extract_player_minutes(match_json):
 # match), so these are matched by key, not a fixed group index/title.
 _SCORING_STAT_KEYS = {
     'assists': 'Assists',
-    'expected_goals_non_penalty': 'NPxG',
     'expected_goals_on_target_variant': 'PS-xG',
 }
+
+
+def _sequence_combined_player_npxg(shots_df):
+    """
+    Per-player Non-Penalty xG (NPxG), computed directly from the shot map
+    using the exact same non-penalty + same-effective-minute sequence-
+    combining rule as compute_plus_minus() (see that function's own
+    docstring: shots at the exact same effective minute - Minute + Added
+    Time - are almost certainly one rebound/scramble, so their xG values
+    are combined into one probability, 1 - product(1 - xG), rather than
+    simply added) - just grouped by (Team, Player) here instead of just
+    Team, so e.g. two rebound attempts by the SAME player in one goalmouth
+    scramble combine into one probability instead of being double-summed.
+
+    Used in place of FotMob's own per-player 'xG Non-penalty' stat-group
+    figure (previously matched via _SCORING_STAT_KEYS, now removed from
+    there) specifically because summing THAT figure across a whole squad
+    can exceed the team's true (properly sequence-combined) season NPxG
+    total - FotMob's own per-player number doesn't appear to apply this
+    same-sequence combination the way the rest of this project's own
+    shot-map-derived totals do, so two rebound shots in the same scramble
+    count fully independently there instead of being combined. Recomputing
+    from the shot map instead keeps every NPxG figure in this project -
+    per-shot, per-player, per-team, season-cumulative - internally
+    consistent with the exact same rule.
+
+    Known limitation: this still can't reconcile a sequence shared ACROSS
+    two different players (e.g. Player A's shot is saved, Player B scores
+    the rebound the same minute) - each player's shots are only combined
+    with their OWN other shots at that same minute, never a teammate's,
+    since there's no clean way to split one combined sequence's
+    probability across two different contributors. Summing every player's
+    NPxG can therefore still slightly exceed the true team total in that
+    specific case - a much smaller, accepted approximation compared to
+    the original per-player-double-counting-rebounds gap this replaces.
+
+    Returns columns Team, Player, NPxG (rounded to 2 decimals) - one row
+    per player who took at least one non-penalty shot. Empty DataFrame
+    (same columns) if shots_df is empty or every shot was a penalty.
+    """
+    cols = ['Team', 'Player', 'NPxG']
+    if shots_df is None or shots_df.empty:
+        return pd.DataFrame(columns=cols)
+    work = shots_df[shots_df['Situation'] != 'Penalty'].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    work['xG'] = work['xG'].fillna(0.0)
+    work['Minute'] = work['Minute'].fillna(0)
+    work['Added Time'] = work['Added Time'].fillna(0)
+    work['_effective_minute'] = work['Minute'] + work['Added Time']
+    seq = (work.groupby(['Team', 'Player', '_effective_minute'])['xG']
+           .apply(lambda xs: 1 - (1 - xs).prod()))
+    out = seq.groupby(['Team', 'Player']).sum().reset_index(name='NPxG')
+    out['NPxG'] = out['NPxG'].round(2)
+    return out[cols]
 
 
 def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_minutes=None,
@@ -1548,9 +1602,16 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
     Outcome == 'Goal' (same penalty definition as PENALTY_XG elsewhere in
     this module).
 
-    Assists/NPxG ('xG Non-penalty')/PS-xG ('Expected goals on target
-    (xGOT)') have no shot-map equivalent - they're FotMob's own per-player
-    figures, matched by stat key (see _SCORING_STAT_KEYS above).
+    Assists/PS-xG ('Expected goals on target (xGOT)') have no shot-map
+    equivalent - they're FotMob's own per-player figures, matched by stat
+    key (see _SCORING_STAT_KEYS above). NPxG ('xG Non-penalty'), by
+    contrast, IS derived from shots_df - see _sequence_combined_player_
+    npxg()'s own docstring for why this is recomputed from the shot map
+    rather than taken from FotMob's own per-player figure the way Assists/
+    PS-xG are: FotMob's own number doesn't combine a player's own rebound
+    shots the way this project's shot-map-derived xG figures do elsewhere,
+    which let it drift above the properly sequence-combined team total
+    when summed across a whole squad.
 
     Minutes Played/xA/Sprints are passed in as already-computed
     (extract_player_minutes()/extract_player_xa()/extract_player_sprints())
@@ -1607,7 +1668,8 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
                    'Player': pdata.get('name')}
             row.update(found)
             fm_rows.append(row)
-    fm_df = pd.DataFrame(fm_rows, columns=['Team', 'Player', 'Assists', 'NPxG', 'PS-xG'])
+    fm_df = pd.DataFrame(fm_rows, columns=['Team', 'Player', 'Assists', 'PS-xG'])
+    npxg_df = _sequence_combined_player_npxg(shots_df)
 
     if shots_df is not None and not shots_df.empty:
         shot_agg = shots_df.groupby(['Team', 'Player']).agg(
@@ -1627,7 +1689,7 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
         shot_agg = pd.DataFrame(columns=['Team', 'Player', 'Shots', 'Goals', 'PK Attempted', 'PK'])
 
     roster_sources = []
-    for df in [fm_df, shot_agg, player_xa, player_minutes, player_sprints]:
+    for df in [fm_df, npxg_df, shot_agg, player_xa, player_minutes, player_sprints]:
         if df is not None and not df.empty:
             roster_sources.append(df[['Team', 'Player']])
     if not roster_sources:
@@ -1636,6 +1698,7 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
 
     out = roster.merge(shot_agg, on=['Team', 'Player'], how='left')
     out = out.merge(fm_df, on=['Team', 'Player'], how='left')
+    out = out.merge(npxg_df, on=['Team', 'Player'], how='left')
     out = out.merge(player_xa if player_xa is not None and not player_xa.empty
                      else pd.DataFrame(columns=['Team', 'Player', 'xA']), on=['Team', 'Player'], how='left')
     out = out.merge(player_minutes if player_minutes is not None and not player_minutes.empty
