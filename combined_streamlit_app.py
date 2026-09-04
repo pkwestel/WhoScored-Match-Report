@@ -152,10 +152,16 @@ if st.button("Generate Combined Report", type="primary"):
                 player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
                 player_lineup = fr.extract_player_age_and_start(fm_match_json)
                 player_cards = fr.extract_player_cards(fm_match_json)
+                # FotMob's own per-player Non-Penalty xG - fed into both
+                # compute_shot_breakdowns() and compute_player_scoring_stats()
+                # so they show the same figure - see extract_player_npxg()'s
+                # own docstring, and batch_lib.py's identical call site.
+                player_npxg = fr.extract_player_npxg(fm_match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(
-                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
+                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes,
+                    player_npxg)
                 player_scoring = fr.compute_player_scoring_stats(
-                    fm_match_json, shots_df, player_xa, player_minutes, player_sprints)
+                    fm_match_json, shots_df, player_xa, player_minutes, player_sprints, player_npxg)
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
                 player_windows = fr.extract_player_windows(fm_match_json, player_minutes, shots_df)
                 plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)

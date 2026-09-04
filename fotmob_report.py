@@ -1194,6 +1194,77 @@ def extract_player_xa(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+def extract_player_npxg(match_json):
+    """
+    Per-player Non-Penalty xG for this match - FotMob's own published
+    figure ('xG Non-penalty' in FotMob's own player stat groups, stat key
+    'expected_goals_non_penalty' - confirmed live under 'Attack' for one
+    player in a real match_json dump), not recomputed from our own shot
+    map. Read the same way as extract_player_xa()/extract_player_sprints()
+    (the group this lives in varies by player, so matched purely by key,
+    with a label fallback in case FotMob ever retitles/re-keys it).
+
+    Used for both the Shot Breakdown tab's 'By Player' Total xG column and
+    the Scoring Stats category's NPxG column (see compute_shot_breakdowns()/
+    compute_player_scoring_stats()) - per request, so both read FotMob's
+    own per-player number directly, and the Team Page's General Stats
+    table (which just sums whatever's saved per match - see history_db.
+    fetch_team_season_scoring_stats()) ends up as a plain add-up of those
+    same match-report numbers too. This replaces an EARLIER approach
+    (_sequence_combined_player_npxg(), since removed) that recomputed NPxG
+    from the shot map using this project's own same-minute sequence-
+    combining rule (see _combine_sequence_group(), still used elsewhere
+    for Plus Minus/Playing Time) - more internally self-consistent with
+    those other tables, but not what a player's FotMob profile itself
+    shows, which is what was actually wanted here.
+
+    Players who didn't play (stats: []) are skipped. Returns columns:
+    Team, Player, NPxG.
+    """
+    columns = ['Team', 'Player', 'NPxG']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        stat_groups = pdata.get('stats')
+        if not stat_groups:
+            continue  # didn't play
+        npxg_value = None
+        for group in stat_groups:
+            group_stats = group.get('stats') if isinstance(group, dict) else None
+            if not isinstance(group_stats, dict):
+                continue
+            for label, entry in group_stats.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get('key', '')).lower()
+                if key == 'expected_goals_non_penalty' or 'non-penalty' in str(label).lower():
+                    stat_obj = entry.get('stat')
+                    val = stat_obj.get('value') if isinstance(stat_obj, dict) else None
+                    if val is not None:
+                        npxg_value = val
+                    break
+            if npxg_value is not None:
+                break
+        if npxg_value is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'NPxG': round(float(npxg_value), 2),
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def extract_player_sprints(match_json):
     """
     Per-player total number of sprints for this match - FotMob's own figure
@@ -1594,63 +1665,8 @@ def _combine_sequence_group(rows):
     return total
 
 
-def _sequence_combined_player_npxg(shots_df):
-    """
-    Per-player Non-Penalty xG (NPxG), computed directly from the shot map
-    using the same non-penalty + same-effective-minute sequence-combining
-    rule as compute_plus_minus() (see that function's own docstring and
-    _combine_sequence_group() above for the full rule, including the
-    outcome-based chain-breaking refinement) - just grouped by (Team,
-    Player) here instead of just Team, so e.g. two rebound attempts by
-    the SAME player in one goalmouth scramble combine into one probability
-    instead of being double-summed.
-
-    Used in place of FotMob's own per-player 'xG Non-penalty' stat-group
-    figure (previously matched via _SCORING_STAT_KEYS, now removed from
-    there) specifically because summing THAT figure across a whole squad
-    can exceed the team's true (properly sequence-combined) season NPxG
-    total - FotMob's own per-player number doesn't appear to apply this
-    same-sequence combination the way the rest of this project's own
-    shot-map-derived totals do, so two rebound shots in the same scramble
-    count fully independently there instead of being combined. Recomputing
-    from the shot map instead keeps every NPxG figure in this project -
-    per-shot, per-player, per-team, season-cumulative - internally
-    consistent with the exact same rule.
-
-    Known limitation: this still can't reconcile a sequence shared ACROSS
-    two different players (e.g. Player A's shot is saved, Player B scores
-    the rebound the same minute) - each player's shots are only chained
-    with their OWN other shots at that same minute, never a teammate's,
-    since there's no clean way to split one combined sequence's
-    probability across two different contributors. Summing every player's
-    NPxG can therefore still slightly exceed the true team total in that
-    specific case - a much smaller, accepted approximation compared to
-    the original per-player-double-counting-rebounds gap this replaces.
-
-    Returns columns Team, Player, NPxG (rounded to 2 decimals) - one row
-    per player who took at least one non-penalty shot. Empty DataFrame
-    (same columns) if shots_df is empty or every shot was a penalty.
-    """
-    cols = ['Team', 'Player', 'NPxG']
-    if shots_df is None or shots_df.empty:
-        return pd.DataFrame(columns=cols)
-    work = shots_df[shots_df['Situation'] != 'Penalty'].copy()
-    if work.empty:
-        return pd.DataFrame(columns=cols)
-    work['xG'] = work['xG'].fillna(0.0)
-    work['Minute'] = work['Minute'].fillna(0)
-    work['Added Time'] = work['Added Time'].fillna(0)
-    work['_effective_minute'] = work['Minute'] + work['Added Time']
-    per_minute = work.groupby(['Team', 'Player', '_effective_minute']).apply(
-        lambda g: _combine_sequence_group(zip(g['xG'], g['Outcome'])), include_groups=False
-    )
-    out = per_minute.groupby(level=['Team', 'Player']).sum().reset_index(name='NPxG')
-    out['NPxG'] = out['NPxG'].round(2)
-    return out[cols]
-
-
 def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_minutes=None,
-                                  player_sprints=None):
+                                  player_sprints=None, player_npxg=None):
     """
     Full per-player scoring-stats table for the match detail view's Scoring
     Stats category (dashboard_app.py's Player Stats tab): Minutes Played,
@@ -1667,20 +1683,25 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
 
     Assists/PS-xG ('Expected goals on target (xGOT)') have no shot-map
     equivalent - they're FotMob's own per-player figures, matched by stat
-    key (see _SCORING_STAT_KEYS above). NPxG ('xG Non-penalty'), by
-    contrast, IS derived from shots_df - see _sequence_combined_player_
-    npxg()'s own docstring for why this is recomputed from the shot map
-    rather than taken from FotMob's own per-player figure the way Assists/
-    PS-xG are: FotMob's own number doesn't combine a player's own rebound
-    shots the way this project's shot-map-derived xG figures do elsewhere,
-    which let it drift above the properly sequence-combined team total
-    when summed across a whole squad.
+    key (see _SCORING_STAT_KEYS above). NPxG ('xG Non-penalty') is ALSO
+    FotMob's own per-player figure now - passed in as player_npxg (from
+    extract_player_npxg), same "already-computed by the caller" convention
+    as player_xa/player_minutes/player_sprints below - rather than
+    recomputed from the shot map (an EARLIER approach, since removed - see
+    extract_player_npxg()'s own docstring for why this switched back to
+    FotMob's own number: per request, to match what a player's own FotMob
+    page shows, and so this table and the Shot Breakdown tab's 'By Player'
+    Total xG column - which now also reads player_npxg, see compute_shot_
+    breakdowns() - report the identical figure for the same player/match).
+    A player with no NPxG reading supplied at all reads 0.0 here, same as
+    every other numeric column in this table.
 
-    Minutes Played/xA/Sprints are passed in as already-computed
-    (extract_player_minutes()/extract_player_xa()/extract_player_sprints())
-    rather than recomputed here, since every caller already needs those
-    three for compute_shot_breakdowns() - this just reuses them instead of
-    walking playerStats a second time for the same figures.
+    Minutes Played/xA/Sprints/NPxG are passed in as already-computed
+    (extract_player_minutes()/extract_player_xa()/extract_player_sprints()/
+    extract_player_npxg()) rather than recomputed here, since every caller
+    already needs the first three for compute_shot_breakdowns() too - this
+    just reuses them instead of walking playerStats a second time for the
+    same figures.
 
     Full-roster union (same approach as compute_shot_breakdowns()'s 'By
     Player' table): a player shows up here if they took a shot, took a
@@ -1732,7 +1753,9 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
             row.update(found)
             fm_rows.append(row)
     fm_df = pd.DataFrame(fm_rows, columns=['Team', 'Player', 'Assists', 'PS-xG'])
-    npxg_df = _sequence_combined_player_npxg(shots_df)
+    npxg_df = (player_npxg[['Team', 'Player', 'NPxG']]
+               if player_npxg is not None and not player_npxg.empty
+               else pd.DataFrame(columns=['Team', 'Player', 'NPxG']))
 
     if shots_df is not None and not shots_df.empty:
         shot_agg = shots_df.groupby(['Team', 'Player']).agg(
@@ -2005,7 +2028,7 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
 
 
 def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, player_sprints=None,
-                             player_line_breaking_passes=None):
+                             player_line_breaking_passes=None, player_npxg=None):
     """
     Roll the shot map up along a few dimensions - by player, by situation
     (open play / set piece / penalty / corner / fast break, per FotMob's own
@@ -2027,21 +2050,35 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
     the 'By Player' table, regardless of whether they took a shot or created
     a chance - a defender who never got near goal still gets a row showing
     their Minutes Played/Sprints/Line Breaking Passes, with Shots/Goals/
-    Total xG/xA all reading 0 for them. (This table's shot-based dimensions
-    are still the only source of Shots/Goals/Total xG themselves - a player
-    who genuinely never touched the ball never gets invented shot data, they
-    just aren't excluded from the table anymore on that basis alone.)
+    Total xG/xA all reading 0 for them. (Shots/Goals are still only ever
+    sourced from the shot map itself - a player who genuinely never touched
+    the ball never gets invented shot data, they just aren't excluded from
+    the table anymore on that basis alone.)
+
+    Total xG on the 'By Player' breakdown specifically: if player_npxg (from
+    extract_player_npxg) is supplied, it REPLACES the shot-map-derived
+    figure below with FotMob's own per-player Non-Penalty xG number - per
+    request, so this matches what a player's own FotMob page shows rather
+    than this project's own recomputation, and so the Scoring Stats table
+    (compute_player_scoring_stats(), which uses this exact same source) and
+    the Team Page's General Stats table (which just sums per-match Scoring
+    Stats figures - see history_db.fetch_team_season_scoring_stats()) all
+    read the identical number for the same player/match. Without player_npxg
+    supplied (e.g. an older caller not yet updated), this falls back to the
+    ORIGINAL shot-map-derived figure described below - kept only as a safety
+    net, not the normal path anymore.
 
     Penalties are excluded from Shots / Goals / Total xG everywhere on this
     tab - a penalty kick isn't a shot in the run-of-play sense, so it
     shouldn't inflate a player's/team's shot volume, expected goals, or
-    actual goals tally. A group's Total xG is computed as that group's full
-    xG total (every shot, penalties included) minus PENALTY_XG (FotMob's own
-    flat 0.79 expected-goals value for any penalty) times however many
-    penalties are in that group - rather than simply summing only the
-    non-penalty shots' own xG figures - so the result doesn't depend on
-    whatever value the shot map's own xG field happens to carry for a
-    penalty. A group made up entirely of penalties (most notably the
+    actual goals tally. Every dimension's Total xG - and the 'By Player'
+    breakdown's own fallback figure described above - is computed as that
+    group's full xG total (every shot, penalties included) minus PENALTY_XG
+    (FotMob's own flat 0.79 expected-goals value for any penalty) times
+    however many penalties are in that group - rather than simply summing
+    only the non-penalty shots' own xG figures - so the result doesn't
+    depend on whatever value the shot map's own xG field happens to carry
+    for a penalty. A group made up entirely of penalties (most notably the
     'Penalty' row that would otherwise appear on the By Situation table)
     drops out of its breakdown entirely, since after this exclusion it would
     only ever show up as an all-zero row.
@@ -2093,7 +2130,7 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
             # their Minutes Played/Sprints/Line Breaking Passes), rather
             # than being silently excluded from the table entirely.
             roster_sources = [agg[['Team', group_col]].rename(columns={group_col: 'Player'})]
-            for src in (player_xa, player_minutes, player_sprints, player_line_breaking_passes):
+            for src in (player_xa, player_minutes, player_sprints, player_line_breaking_passes, player_npxg):
                 if src is not None and not src.empty:
                     roster_sources.append(src[['Team', 'Player']])
             roster = pd.concat(roster_sources, ignore_index=True).drop_duplicates().reset_index(drop=True)
@@ -2109,6 +2146,19 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
             agg['Shots'] = pd.to_numeric(agg['Shots'], errors='coerce').fillna(0).astype(int)
             agg['Goals'] = pd.to_numeric(agg['Goals'], errors='coerce').fillna(0).astype(int)
             agg['Total xG'] = pd.to_numeric(agg['Total xG'], errors='coerce').fillna(0.0).round(2)
+
+            if player_npxg is not None and not player_npxg.empty:
+                # Overrides the shot-map-derived 'Total xG' above with
+                # FotMob's own per-player figure - see this function's own
+                # docstring for why. A player with no NPxG reading at all
+                # (didn't play, or FotMob has no stat for them) keeps their
+                # existing (0.0-filled) shot-map figure rather than being
+                # blanked out.
+                agg = agg.merge(player_npxg.rename(columns={'NPxG': '_fm_npxg'}),
+                                 how='left', on=['Team', 'Player'])
+                agg['Total xG'] = agg['_fm_npxg'].where(agg['_fm_npxg'].notna(), agg['Total xG'])
+                agg = agg.drop(columns=['_fm_npxg'])
+                agg['Total xG'] = agg['Total xG'].round(2)
 
             if player_xa is not None and not player_xa.empty:
                 agg = agg.merge(player_xa, how='left', on=['Team', 'Player'])

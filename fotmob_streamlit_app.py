@@ -95,8 +95,13 @@ if st.button("Generate Report", type="primary"):
                 player_minutes = fr.extract_player_minutes(match_json)
                 player_sprints = fr.extract_player_sprints(match_json)
                 player_line_breaking_passes = fr.extract_player_line_breaking_passes(match_json)
+                # FotMob's own per-player Non-Penalty xG - see extract_player_
+                # npxg()'s own docstring; used for the 'By Player' Total xG
+                # column below instead of a shot-map recomputation.
+                player_npxg = fr.extract_player_npxg(match_json)
                 shot_breakdowns = fr.compute_shot_breakdowns(
-                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
+                    shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes,
+                    player_npxg)
 
             with st.spinner("Computing xG breakdown..."):
                 xg_breakdown = fr.compute_xg_breakdown(shots_df, home_name, away_name)
