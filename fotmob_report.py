@@ -152,6 +152,7 @@ import re
 import json
 import time
 import base64
+import math
 import argparse
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -1531,17 +1532,78 @@ _SCORING_STAT_KEYS = {
 }
 
 
+# A shot's Outcome (see OUTCOME_MAP above) that keeps the ball alive and
+# in play, meaning whatever the SAME team shoots next in that same
+# effective minute could genuinely be a follow-up/rebound off it - used
+# by _combine_sequence_group() below to decide where a same-minute
+# "sequence" is allowed to continue versus where it must break.
+_LIVE_BALL_OUTCOMES = {'Saved', 'Blocked', 'Hit Post'}
+
+
+def _combine_sequence_group(rows):
+    """
+    Combines one (Team[, Player], effective-minute) group of shots - see
+    compute_plus_minus()/_sequence_combined_player_npxg()'s own docstrings
+    for why same-minute shots get combined into one probability at all
+    rather than simply summed - into that minute's total combined xG.
+
+    A naive version of this (an EARLIER implementation) treated every
+    shot in the group as one single combined sequence, which over-
+    combines: it's entirely possible for a team to take two UNRELATED
+    shots in the same clock minute (FotMob's shot map only has minute-
+    level granularity, not seconds) with a defensive clearance and a
+    fresh attack in between, and those two shots are two genuinely
+    independent scoring chances, not one rebound. This version narrows
+    that down using each shot's own Outcome: a run of CONSECUTIVE shots
+    (rows is assumed to already be in FotMob's own shot-map order -
+    compute_shots() sorts only by Minute/Added Time, a stable sort, so
+    shots tied on the same effective minute keep their original within-
+    minute chronological order, the closest signal available to true
+    sub-minute sequencing) only combines into one probability while the
+    ball stayed in play between them - i.e. a shot only chains onto the
+    one immediately before it if that EARLIER shot's own Outcome was
+    Saved, Blocked, or Hit Post (see _LIVE_BALL_OUTCOMES above). An
+    outcome that stops play - Off Target, Goal, Own Goal - breaks the
+    chain: whatever comes next in that same minute must be a separate
+    attack (at minimum a clearance/restart happened), not a continuation
+    of the same phase, and starts its own independent chain instead of
+    being wrongly combined with what came before it.
+
+    Each chain's own shots are combined via 1 - product(1 - xG); this
+    minute's total is the sum of however many independent chains it
+    contains (almost always just one - this only matters on the rarer
+    minute with 3+ shots from the same team). Known remaining limitation:
+    this still can't detect two genuinely unrelated shots that happen to
+    both follow a save/block within the same minute - there's no
+    possession/sequence ID or sub-minute timestamp in this data to
+    distinguish that case, so it's a reduction in false combinations, not
+    a full elimination of them.
+
+    rows: an iterable of (xG, Outcome) tuples for one group, in that
+    group's original order. Returns the group's total combined xG (float).
+    """
+    total = 0.0
+    chain = []
+    for xg, outcome in rows:
+        chain.append(xg)
+        if outcome not in _LIVE_BALL_OUTCOMES:
+            total += 1 - math.prod(1 - x for x in chain)
+            chain = []
+    if chain:
+        total += 1 - math.prod(1 - x for x in chain)
+    return total
+
+
 def _sequence_combined_player_npxg(shots_df):
     """
     Per-player Non-Penalty xG (NPxG), computed directly from the shot map
-    using the exact same non-penalty + same-effective-minute sequence-
-    combining rule as compute_plus_minus() (see that function's own
-    docstring: shots at the exact same effective minute - Minute + Added
-    Time - are almost certainly one rebound/scramble, so their xG values
-    are combined into one probability, 1 - product(1 - xG), rather than
-    simply added) - just grouped by (Team, Player) here instead of just
-    Team, so e.g. two rebound attempts by the SAME player in one goalmouth
-    scramble combine into one probability instead of being double-summed.
+    using the same non-penalty + same-effective-minute sequence-combining
+    rule as compute_plus_minus() (see that function's own docstring and
+    _combine_sequence_group() above for the full rule, including the
+    outcome-based chain-breaking refinement) - just grouped by (Team,
+    Player) here instead of just Team, so e.g. two rebound attempts by
+    the SAME player in one goalmouth scramble combine into one probability
+    instead of being double-summed.
 
     Used in place of FotMob's own per-player 'xG Non-penalty' stat-group
     figure (previously matched via _SCORING_STAT_KEYS, now removed from
@@ -1557,7 +1619,7 @@ def _sequence_combined_player_npxg(shots_df):
 
     Known limitation: this still can't reconcile a sequence shared ACROSS
     two different players (e.g. Player A's shot is saved, Player B scores
-    the rebound the same minute) - each player's shots are only combined
+    the rebound the same minute) - each player's shots are only chained
     with their OWN other shots at that same minute, never a teammate's,
     since there's no clean way to split one combined sequence's
     probability across two different contributors. Summing every player's
@@ -1579,9 +1641,10 @@ def _sequence_combined_player_npxg(shots_df):
     work['Minute'] = work['Minute'].fillna(0)
     work['Added Time'] = work['Added Time'].fillna(0)
     work['_effective_minute'] = work['Minute'] + work['Added Time']
-    seq = (work.groupby(['Team', 'Player', '_effective_minute'])['xG']
-           .apply(lambda xs: 1 - (1 - xs).prod()))
-    out = seq.groupby(['Team', 'Player']).sum().reset_index(name='NPxG')
+    per_minute = work.groupby(['Team', 'Player', '_effective_minute']).apply(
+        lambda g: _combine_sequence_group(zip(g['xG'], g['Outcome'])), include_groups=False
+    )
+    out = per_minute.groupby(level=['Team', 'Player']).sum().reset_index(name='NPxG')
     out['NPxG'] = out['NPxG'].round(2)
     return out[cols]
 
@@ -1864,21 +1927,20 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     == 'Penalty') - the same treatment as the Shot Breakdown tab, and for
     the same reason: a penalty isn't a shot in the run-of-play sense.
 
-    xG For/Against is a plain sum of each shot's own xG value within the
-    player's window - deliberately NOT sequence-combined (an EARLIER
-    version of this function combined shots by the same team at the exact
-    same effective minute - Minute + Added Time - into one probability,
-    1 minus the product of (1 - xG) across that "sequence", on the theory
-    that a same-minute rebound/scramble isn't really two independent
-    scoring chances). That combining step was removed by request
-    specifically so this table's xG reconciles with the Team Totals tab's
-    own xG (compute_totals()'s 'Total xG', which prefers FotMob's own
-    officially-published match xG figure and otherwise falls back to a
-    plain per-shot sum - see that function's own docstring) - a player who
-    played the entire match should show the same non-penalty xG as the
-    match's own Team Totals figure (minus any penalty), which a sequence-
-    combined number generally can't, since combining always produces a
-    total at or below the plain sum whenever two shots share a minute.
+    xG For/Against is NOT a simple sum of each shot's own xG value. Shots
+    by the SAME team at the exact same effective minute (Minute + Added
+    Time) are treated as a potential sequence - see _combine_sequence_
+    group()'s own docstring for the full rule, including the outcome-
+    based refinement: a shot only chains onto the one immediately before
+    it if that earlier shot's own Outcome was Saved/Blocked/Hit Post (the
+    ball stayed in play), so an Off Target/Goal/Own Goal shot always
+    breaks the chain rather than wrongly combining two unrelated same-
+    minute attacks. Each chain's shots are combined into one probability
+    (1 minus the product of (1 - xG) across that chain) rather than
+    simply added, since summing individual shot xG values overstates the
+    true combined chance of scoring from one genuine phase of play; shots
+    in different chains (or different minutes entirely) are independent
+    and their combined values are simply added together as usual.
 
     Returns one DataFrame with a Team column - split into two tables, one
     per team, when written to the workbook/UI (see build_workbook()).
@@ -1895,6 +1957,15 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     work['Minute'] = work['Minute'].fillna(0)
     work['Added Time'] = work['Added Time'].fillna(0)
     work['_effective_minute'] = work['Minute'] + work['Added Time']
+
+    # Sequence-combine xG (see _combine_sequence_group()) per (Team,
+    # effective minute) - a chain only breaks WITHIN one minute's own
+    # shot list, so this is computed once for the whole match and simply
+    # filtered down to each player's own window below, same as own_shots/
+    # opp_shots already are.
+    seq = (work.groupby(['Team', '_effective_minute']).apply(
+                lambda g: _combine_sequence_group(zip(g['xG'], g['Outcome'])), include_groups=False)
+           .reset_index(name='seq_xG'))
 
     teams_all = ([t for t in [home_name, away_name] if t is not None]
                  or sorted(player_windows['Team'].dropna().unique()))
@@ -1913,6 +1984,8 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
 
         own_shots = work[(work['Team'] == team) & mask(work['_effective_minute'])]
         opp_shots = work[(work['Team'] == opp) & mask(work['_effective_minute'])] if opp else work.iloc[0:0]
+        own_seq = seq[(seq['Team'] == team) & mask(seq['_effective_minute'])]
+        opp_seq = seq[(seq['Team'] == opp) & mask(seq['_effective_minute'])] if opp else seq.iloc[0:0]
 
         records.append({
             'Team': team,
@@ -1922,8 +1995,8 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
             'Goals Against': int((opp_shots['Outcome'] == 'Goal').sum()),
             'Shots': int(len(own_shots)),
             'Shots Against': int(len(opp_shots)),
-            'xG': round(own_shots['xG'].sum(), 2),
-            'xG Against': round(opp_shots['xG'].sum(), 2),
+            'xG': round(own_seq['seq_xG'].sum(), 2),
+            'xG Against': round(opp_seq['seq_xG'].sum(), 2),
         })
 
     out = pd.DataFrame(records, columns=out_cols)
