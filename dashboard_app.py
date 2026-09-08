@@ -1422,6 +1422,16 @@ def _render_team_page(db, team, season=None):
     picker - just a small Season dropdown next to the title, for whenever
     more than one season's worth of data exists (today there's only one).
 
+    A second small Competition dropdown (see history_db.
+    fetch_team_competitions()) sits just above the General Stats table,
+    but ONLY once this team has saved matches in more than one competition
+    this season (e.g. Premier League + Champions League) - with just the
+    one, every table below is scoped to it directly and there's no
+    dropdown at all. Selecting a different competition there re-scopes
+    General Stats, Possession, Passing, Defensive Actions, Defensive
+    Action Locations, Playing Time, AND the Match Log all together, since
+    every one of those fetch calls is passed that same selection.
+
     season is whatever _team_page_url() baked into the link (currently
     always None, since that link never sets a season) - falls back to this
     team's most recent season if not given/not a real season.
@@ -1510,6 +1520,44 @@ def _render_team_page(db, team, season=None):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
+    # Competition dropdown - scopes every table below (General Stats
+    # through Playing Time) AND the Match Log to one matches.competition
+    # value, so a team that starts playing e.g. Champions League matches
+    # never has those silently mixed into its Premier League numbers (or
+    # vice versa) - see history_db.fetch_team_competitions()'s own
+    # docstring. Only rendered at all when this team has saved matches in
+    # MORE than one competition this season; with just the one (the normal
+    # case today), every table below is scoped to it directly, with
+    # nothing to choose from in the first place. 'Premier League' is
+    # preferred as the default selection whenever it's one of the options.
+    #
+    # Narrow st.columns([1, 3]) split (rather than a full-width selectbox)
+    # so the dropdown doesn't dominate the page or leave awkward dead space
+    # next to it - same sizing already used for the League Overview tab's
+    # own League dropdown.
+    #
+    # Static session_state key (not scoped per team/season) matches this
+    # page's existing Season dropdown convention just above - but unlike
+    # Season (whose options list is the same for every team), a stale
+    # value from a PREVIOUS team's competition list could not appear in
+    # THIS team's list at all, which would crash st.selectbox outright, so
+    # this clamps/reseeds the session_state value first rather than
+    # relying on Streamlit's own index= handling.
+    competitions = hdb.fetch_team_competitions(db, team, season)
+    if len(competitions) > 1:
+        default_competition = "Premier League" if "Premier League" in competitions else competitions[0]
+        if st.session_state.get("team_page_competition") not in competitions:
+            st.session_state["team_page_competition"] = default_competition
+        comp_col, _comp_spacer = st.columns([1, 3])
+        with comp_col:
+            competition = st.selectbox(
+                "Competition", competitions, key="team_page_competition",
+                label_visibility="collapsed",
+            )
+        st.markdown("<div style='height:1.0em;'></div>", unsafe_allow_html=True)
+    else:
+        competition = competitions[0] if competitions else None
+
     # Match-report tables, season-cumulative rather than one match's worth -
     # General Stats (né "Scoring Stats" - renamed since it now also carries
     # Age/Appearances/Starts, not just scoring numbers) is the first of
@@ -1519,7 +1567,7 @@ def _render_team_page(db, team, season=None):
     # 'Total ...' relabeling, even though every number is now a season sum
     # rather than one match's.
     st.subheader("General Stats")
-    scoring_stats = hdb.fetch_team_season_scoring_stats(db, team, season)
+    scoring_stats = hdb.fetch_team_season_scoring_stats(db, team, season, competition=competition)
     if scoring_stats.empty:
         st.info(f"No scoring stats saved yet for {team} in {season}.")
     else:
@@ -1531,7 +1579,7 @@ def _render_team_page(db, team, season=None):
     # columns, same renderer - see _render_fixtures_like_table()), oldest
     # match on top since fetch_team_match_log() is already ascending.
     st.subheader("Match Log")
-    match_log = hdb.fetch_team_match_log(db, team, season)
+    match_log = hdb.fetch_team_match_log(db, team, season, competition=competition)
     if match_log.empty:
         st.info(f"No matches saved yet for {team} in {season}.")
     else:
@@ -1576,7 +1624,7 @@ def _render_team_page(db, team, season=None):
                 help=f"Converts the {title} table into (stat / Minutes) × 90 rates "
                      "instead of season totals.",
             )
-        category_df = fetcher(db, team, season)
+        category_df = fetcher(db, team, season, competition=competition)
         if category_df.empty:
             st.info(f"No {title.lower()} stats saved yet for {team} in {season}.")
         else:
@@ -1601,7 +1649,7 @@ def _render_team_page(db, team, season=None):
     # than alongside General Stats near the top.
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     st.subheader("Playing Time")
-    plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season)
+    plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season, competition=competition)
     if plus_minus_stats.empty:
         st.info(f"No plus/minus stats saved yet for {team} in {season}.")
     else:

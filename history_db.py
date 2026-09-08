@@ -748,7 +748,7 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
             .reset_index(drop=True))
 
 
-def fetch_team_match_log(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_match_log(db: DB, team, season, competition=None) -> pd.DataFrame:
     """
     One team's own slice of fetch_fixtures() - identical columns/row shape,
     filtered down to just the matches this team played in this season.
@@ -756,14 +756,24 @@ def fetch_team_match_log(db: DB, team, season) -> pd.DataFrame:
     look exactly like the Fixtures tab's table (same renderer - see
     dashboard_app._render_fixtures_like_table()). Already in ascending date
     order since fetch_fixtures() itself is.
+
+    competition: optional Competition filter (fetch_fixtures()'s own column
+    of that name, same underlying matches.competition value) - see
+    fetch_team_season_scoring_stats()'s own docstring for the exact same
+    convention (None includes every competition together). The Team Page
+    passes its own selected Competition through here too, so the match log
+    always lists only the matches actually counted in the tables above it.
     """
     fixtures = fetch_fixtures(db)
     if fixtures.empty:
         return fixtures
-    return fixtures[
+    scoped = fixtures[
         ((fixtures["Home Team"] == team) | (fixtures["Away Team"] == team))
         & (fixtures["Season"] == season)
-    ].reset_index(drop=True)
+    ]
+    if competition is not None:
+        scoped = scoped[scoped["Competition"] == competition]
+    return scoped.reset_index(drop=True)
 
 
 def _flatten_extra(rows, id_cols):
@@ -1968,7 +1978,39 @@ def _per90(stat_total, minutes_total):
     return round(stat_total / minutes_total * 90, 2)
 
 
-def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_competitions(db: DB, team, season) -> list:
+    """
+    Every distinct matches.competition value this team has at least one
+    saved match in for this season, sorted alphabetically - e.g.
+    ['Premier League'] today, or ['Champions League', 'Premier League']
+    once this team's first Champions League match gets saved.
+
+    Powers the Team Page's Competition dropdown (see dashboard_app.
+    _render_team_page()): that dropdown only appears at all when this
+    returns more than one value - a team with just the one competition (the
+    normal case today) shows every table scoped to it with no dropdown to
+    choose from in the first place, so there's nothing to switch between.
+    When the dropdown IS shown, 'Premier League' is preferred as the
+    default selection if present, per request - this function itself makes
+    no such preference, it's purely "what's available", ordering aside.
+
+    Returns an empty list (not an error) for a team with no saved matches
+    at all this season - callers should treat that the same as "only one
+    (unknown) competition", i.e. no dropdown, no explicit filter.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return []
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+        & (matches["season"] == season)
+    ]
+    return sorted(team_matches["competition"].dropna().unique().tolist())
+
+
+def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> pd.DataFrame:
     """
     Season-cumulative version of the match report's own Scoring Stats
     category table (see fetch_player_scoring_stats()) for the Team Page:
@@ -2046,6 +2088,13 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
 
     Sorted by Minutes, descending (most-used players first). Returns an
     empty DataFrame if this team has no matches saved for this season.
+
+    competition: optional matches.competition filter - e.g. 'Premier
+    League' vs 'Champions League', see fetch_team_competitions()/the Team
+    Page's own Competition dropdown. None (the default) includes every
+    competition's matches together, same as before this parameter existed;
+    dashboard_app._render_team_page() always passes an explicit value now,
+    so two competitions' numbers never silently mix into one total.
     """
     sum_cols = _SCORING_STATS_COLUMNS + _CARD_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
     out_cols = (
@@ -2062,7 +2111,10 @@ def fetch_team_season_scoring_stats(db: DB, team, season) -> pd.DataFrame:
     team_matches = matches[
         ((matches["home_team"] == team) | (matches["away_team"] == team))
         & (matches["season"] == season)
-    ].sort_values("match_date")  # chronological - "earliest match with an Age reading" needs this order
+    ]
+    if competition is not None:
+        team_matches = team_matches[team_matches["competition"] == competition]
+    team_matches = team_matches.sort_values("match_date")  # chronological - "earliest match with an Age reading" needs this order
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
 
@@ -2182,7 +2234,7 @@ def _combine_sequence_group(rows):
     return total
 
 
-def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_season_plus_minus(db: DB, team, season, competition=None) -> pd.DataFrame:
     """
     Season-cumulative version of the match report's own FM Plus/Minus
     table (fotmob_report.compute_plus_minus() - Goals For/Against, Shots/
@@ -2233,6 +2285,10 @@ def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
     Sorted by Minutes, descending, same convention as General Stats.
     Returns an empty DataFrame if this team has no matches saved for this
     season.
+
+    competition: optional matches.competition filter - see
+    fetch_team_season_scoring_stats()'s own docstring for the exact same
+    convention (None includes every competition together).
     """
     sum_cols = ["Minutes Played", "Goals For", "Goals Against", "Shots", "Shots Against", "xG", "xG Against"]
     out_cols = (
@@ -2250,6 +2306,8 @@ def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
         ((matches["home_team"] == team) | (matches["away_team"] == team))
         & (matches["season"] == season)
     ]
+    if competition is not None:
+        team_matches = team_matches[team_matches["competition"] == competition]
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
 
@@ -2384,7 +2442,8 @@ def fetch_team_season_plus_minus(db: DB, team, season) -> pd.DataFrame:
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
-def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, columns: list) -> pd.DataFrame:
+def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, columns: list,
+                                        competition=None) -> pd.DataFrame:
     """
     Season-cumulative version of _player_category_table() above (the match
     detail view's per-match Player Stats category tables): every player
@@ -2415,6 +2474,10 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
     '-' for "some underlying match's data is missing" the way a single
     match's _player_category_table() can. Returns an empty DataFrame if
     this team has no matches saved for this season.
+
+    competition: optional matches.competition filter - see
+    fetch_team_season_scoring_stats()'s own docstring for the exact same
+    convention (None includes every competition together).
     """
     out_cols = ["Player"] + columns
 
@@ -2427,6 +2490,8 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
         ((matches["home_team"] == team) | (matches["away_team"] == team))
         & (matches["season"] == season)
     ]
+    if competition is not None:
+        team_matches = team_matches[team_matches["competition"] == competition]
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
 
@@ -2467,29 +2532,33 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
-def fetch_team_season_possession(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_season_possession(db: DB, team, season, competition=None) -> pd.DataFrame:
     """Season-cumulative version of fetch_player_possession() for the Team Page."""
-    return _fetch_team_season_category_table(db, team, season, ["ws_touches"], _POSSESSION_COLUMNS)
+    return _fetch_team_season_category_table(
+        db, team, season, ["ws_touches"], _POSSESSION_COLUMNS, competition=competition
+    )
 
 
-def fetch_team_season_passing(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_season_passing(db: DB, team, season, competition=None) -> pd.DataFrame:
     """Season-cumulative version of fetch_player_passing() for the Team Page."""
     return _fetch_team_season_category_table(
-        db, team, season, ["ws_passing", "fm_line_breaking_passes"], _PASSING_COLUMNS
+        db, team, season, ["ws_passing", "fm_line_breaking_passes"], _PASSING_COLUMNS,
+        competition=competition
     )
 
 
-def fetch_team_season_defensive_actions(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_season_defensive_actions(db: DB, team, season, competition=None) -> pd.DataFrame:
     """Season-cumulative version of fetch_player_defensive_actions() for the Team Page."""
     return _fetch_team_season_category_table(
-        db, team, season, ["ws_defensive"], _DEFENSIVE_ACTIONS_COLUMNS
+        db, team, season, ["ws_defensive"], _DEFENSIVE_ACTIONS_COLUMNS, competition=competition
     )
 
 
-def fetch_team_season_defensive_locations(db: DB, team, season) -> pd.DataFrame:
+def fetch_team_season_defensive_locations(db: DB, team, season, competition=None) -> pd.DataFrame:
     """Season-cumulative version of fetch_player_defensive_locations() for the Team Page."""
     return _fetch_team_season_category_table(
-        db, team, season, ["ws_defensive_locations"], _DEFENSIVE_LOCATIONS_COLUMNS
+        db, team, season, ["ws_defensive_locations"], _DEFENSIVE_LOCATIONS_COLUMNS,
+        competition=competition
     )
 
 
