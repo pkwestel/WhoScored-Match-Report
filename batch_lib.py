@@ -152,10 +152,17 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
     player_lineup = fr.extract_player_age_and_start(fm_match_json)
     player_cards = fr.extract_player_cards(fm_match_json)
+    # FotMob's own per-player Non-Penalty xG figure - computed once here and
+    # fed into BOTH compute_shot_breakdowns() (its 'By Player' Total xG
+    # column) and compute_player_scoring_stats() (its NPxG column), per
+    # request, so the Shot Breakdown tab and the Scoring Stats table always
+    # show the identical number for the same player/match - see extract_
+    # player_npxg()'s own docstring.
+    player_npxg = fr.extract_player_npxg(fm_match_json)
     shot_breakdowns = fr.compute_shot_breakdowns(
-        shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes)
+        shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes, player_npxg)
     player_scoring = fr.compute_player_scoring_stats(
-        fm_match_json, shots_df, player_xa, player_minutes, player_sprints)
+        fm_match_json, shots_df, player_xa, player_minutes, player_sprints, player_npxg)
     xg_breakdown = fr.compute_xg_breakdown(shots_df, fm_home_name, fm_away_name)
     player_windows = fr.extract_player_windows(fm_match_json, player_minutes, shots_df)
     plus_minus = fr.compute_plus_minus(shots_df, player_windows, fm_home_name, fm_away_name)
@@ -258,6 +265,27 @@ def build_db_stats(report):
     than dropped - better to have it show up on its own than silently lose
     it, and it's an easy fix (add the alias to TEAM_NAME_ALIASES) once
     spotted.
+
+    PLAYER NAME RECONCILIATION (same problem, one level down): WhoScored and
+    FotMob can also disagree on how to spell one PLAYER's name - confirmed
+    real case, Everton's Vitalii Mykolenko (WhoScored's spelling) vs FotMob's
+    'Vitaliy Mykolenko' - see combined_report.PLAYER_NAME_ALIASES. passing_
+    out/defensive_actions/player_third all use WhoScored's own player name,
+    but plus_minus/player_scoring/player_lineup/player_cards/the Shot
+    Breakdown 'By Player' table's Line Breaking Passes column all use
+    FotMob's own player name - exactly the same "two different DB rows for
+    one real thing" failure mode as the team-name case above, just for
+    players: this specific mismatch caused Mykolenko to show 0 Minutes
+    Played (and no Goals/Assists/NPxG/etc) everywhere in the app, because
+    his real FotMob-sourced numbers were saved under a spelling nothing else
+    ever looked up. _to_ws_player_name() below fixes it the same way -
+    every FotMob player name is remapped to whichever player name WhoScored
+    used for THIS match (collected from passing_out/defensive_actions/
+    player_third) it canonically matches (via combined_report.
+    canonical_player_name()); one that doesn't match anyone WhoScored's
+    matched already (an unknown player, or a genuine not-yet-aliased
+    mismatch) is kept as its own row rather than dropped, same fallback as
+    the team-name case.
     """
     ws_names = [report.get("ws_home_name"), report.get("ws_away_name")]
 
@@ -266,6 +294,20 @@ def build_db_stats(report):
             return fm_name
         for w in ws_names:
             if w and cr.canonical_team_name(w) == cr.canonical_team_name(fm_name):
+                return w
+        return fm_name
+
+    ws_player_names = set()
+    for _df in (report.get("passing_out"), report.get("defensive_actions"), report.get("player_third")):
+        if _df is not None and not _df.empty and "player" in _df.columns:
+            ws_player_names.update(_df["player"].dropna().unique())
+
+    def _to_ws_player_name(fm_name):
+        if not fm_name:
+            return fm_name
+        target = cr.canonical_player_name(fm_name)
+        for w in ws_player_names:
+            if cr.canonical_player_name(w) == target:
                 return w
         return fm_name
 
@@ -327,7 +369,7 @@ def build_db_stats(report):
     if not report["plus_minus"].empty:
         for _, row in report["plus_minus"].iterrows():
             team = _to_ws_name(row["Team"])
-            key = (team, row["Player"])
+            key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_plus_minus"] = row.drop(["Team", "Player"]).to_dict()
 
     # compute_player_scoring_stats()'s full per-player table (Minutes
@@ -342,7 +384,7 @@ def build_db_stats(report):
     if player_scoring is not None and not player_scoring.empty:
         for _, row in player_scoring.iterrows():
             team = _to_ws_name(row["Team"])
-            key = (team, row["Player"])
+            key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_scoring"] = row.drop(["Team", "Player"]).to_dict()
 
     # FotMob's per-player Line Breaking Passes total (from the Shot
@@ -353,7 +395,7 @@ def build_db_stats(report):
     if by_player is not None and not by_player.empty and "Line Breaking Passes" in by_player.columns:
         for _, row in by_player.dropna(subset=["Line Breaking Passes"]).iterrows():
             team = _to_ws_name(row["Team"])
-            key = (team, row["Player"])
+            key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_line_breaking_passes"] = {
                 "Line Breaking Passes": int(row["Line Breaking Passes"])
             }
@@ -372,7 +414,7 @@ def build_db_stats(report):
     if player_lineup is not None and not player_lineup.empty:
         for _, row in player_lineup.iterrows():
             team = _to_ws_name(row["Team"])
-            key = (team, row["Player"])
+            key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_lineup"] = {
                 "Age": int(row["Age"]), "Started": bool(row["Started"])
             }
@@ -392,7 +434,7 @@ def build_db_stats(report):
     if player_cards is not None and not player_cards.empty:
         for _, row in player_cards.iterrows():
             team = _to_ws_name(row["Team"])
-            key = (team, row["Player"])
+            key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_cards"] = {
                 "Yellow Cards": int(row["Yellow Cards"]), "Red Cards": int(row["Red Cards"])
             }
