@@ -1066,6 +1066,106 @@ def _render_season_touchmap(db):
     plt.close(fig)
 
 
+def _render_pairs_tab(db, mode):
+    """
+    Shared renderer for the Pass Pairs / Shot Pairs tabs - "look and
+    function the exact same way" per request, just fed from history_db.
+    fetch_team_passing_pairs()/fetch_team_shot_pairs() respectively.
+    Cascading dropdowns: League -> Team -> Player -> a specific match or
+    "Full Season" (every one of that team's matches in that league). Two
+    tables side by side, built from the same pair counts but read from
+    opposite columns:
+      - mode='pass': left = every player the selected player completed a
+        pass TO (passer == player), right = every player who completed a
+        pass TO the selected player (receiver == player).
+      - mode='shot': left = every shot-taker the selected player set up
+        with a pass that led to a shot (passer == player, i.e. assists BY
+        this player), right = every player whose pass led to a shot BY the
+        selected player (shot_taker == player, i.e. who assisted THEM).
+    Each dropdown's key includes every dropdown above it in the cascade
+    (league, then +team, then +player) so changing an upstream choice
+    gives the downstream widget a brand-new key with no stale prior
+    selection - Streamlit then falls back to its own index=0 default
+    instead of erroring on an option that no longer exists (e.g. a player
+    who only exists on the previously-selected team).
+    """
+    if mode == "pass":
+        fetch_pairs = hdb.fetch_team_passing_pairs
+        passer_col, receiver_col = "passer", "receiver"
+        count_label = "Passes Completed"
+        empty_msg = "No passing pair data saved for {team} in {league}."
+        left_header, right_header = "Passes by {player}", "Passes Received by {player}"
+        left_col_label, right_col_label = "Receiver", "Passer"
+    else:
+        fetch_pairs = hdb.fetch_team_shot_pairs
+        passer_col, receiver_col = "passer", "shot_taker"
+        count_label = "Shots"
+        empty_msg = "No shot pair data saved for {team} in {league}."
+        left_header, right_header = "Assists by {player}", "{player}'s Shots (by Assister)"
+        left_col_label, right_col_label = "Shot Taker", "Passer"
+
+    key_ns = "passpairs" if mode == "pass" else "shotpairs"
+
+    available_leagues = hdb.fetch_available_competitions(db)
+    if not available_leagues:
+        st.info("No matches saved yet - publish at least one match with 'Save to Database' first.")
+        return
+    league = _narrow_selectbox("League", available_leagues, key=f"{key_ns}_league")
+
+    teams = hdb.fetch_teams_for_competition(db, league)
+    if not teams:
+        st.info(f"No teams found for {league}.")
+        return
+    team = _narrow_selectbox("Team", teams, key=f"{key_ns}_team_{league}")
+
+    season_pairs = fetch_pairs(db, team, match_id=None, competition=league)
+    if season_pairs.empty:
+        st.info(empty_msg.format(team=team, league=league))
+        return
+    players = sorted(set(season_pairs[passer_col].dropna()) | set(season_pairs[receiver_col].dropna()))
+    if not players:
+        st.info(empty_msg.format(team=team, league=league))
+        return
+    player = _narrow_selectbox("Player", players, key=f"{key_ns}_player_{league}_{team}")
+
+    team_matches = hdb.fetch_team_matches_for_competition(db, team, league)
+    match_options = {"Full Season": None}
+    for r in team_matches.itertuples():
+        match_options[f"{r.home_team} vs {r.away_team} ({r.match_date})"] = r.match_id
+    match_label = _narrow_selectbox("Match", list(match_options.keys()), key=f"{key_ns}_match_{league}_{team}")
+    match_id = match_options[match_label]
+
+    pairs = season_pairs if match_id is None else fetch_pairs(db, team, match_id=match_id)
+    if pairs.empty:
+        st.info(f"No {'passing' if mode == 'pass' else 'shot'} pair data for {match_label}.")
+        return
+
+    left = (pairs.loc[pairs[passer_col] == player, [receiver_col, "count"]]
+            .rename(columns={receiver_col: left_col_label, "count": count_label})
+            .sort_values(count_label, ascending=False)
+            .reset_index(drop=True))
+    right = (pairs.loc[pairs[receiver_col] == player, [passer_col, "count"]]
+             .rename(columns={passer_col: right_col_label, "count": count_label})
+             .sort_values(count_label, ascending=False)
+             .reset_index(drop=True))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader(left_header.format(player=player))
+        if left.empty:
+            st.info("No data for this player/scope.")
+        else:
+            st.dataframe(left, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(left))
+    with col2:
+        st.subheader(right_header.format(player=player))
+        if right.empty:
+            st.info("No data for this player/scope.")
+        else:
+            st.dataframe(right, use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(right))
+
+
 def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
     """Single-match touch map - same idea as _render_season_touchmap()
     above, scoped to one match_id instead of the whole database."""
@@ -1694,6 +1794,8 @@ _DASH_TABS = [
     ("season_passmap", "Season Pass Map"),
     ("season_passrecv", "Season Passes Received"),
     ("season_touchmap", "Season Touch Map"),
+    ("pass_pairs", "Pass Pairs"),
+    ("shot_pairs", "Shot Pairs"),
 ]
 _DASH_TAB_SLUGS = {slug for slug, _ in _DASH_TABS}
 
@@ -2084,3 +2186,9 @@ else:
 
     elif _active_tab == "season_touchmap":
         _render_season_touchmap(db)
+
+    elif _active_tab == "pass_pairs":
+        _render_pairs_tab(db, mode="pass")
+
+    elif _active_tab == "shot_pairs":
+        _render_pairs_tab(db, mode="shot")

@@ -1422,6 +1422,47 @@ def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
     return df.sort_values(['Team', 'Minute', 'Added Time'], na_position='first').reset_index(drop=True)
 
 
+def fetch_team_shot_pairs(db: DB, team, match_id=None, competition=None) -> pd.DataFrame:
+    """
+    Shot Pairs tab: every distinct shot_taker -> passer combination for one
+    team, either for a single match or summed across every one of that
+    team's saved matches (same match_id/competition scoping as fetch_team_
+    passing_pairs() above). The passer is whoever's SCA1 action was itself
+    a pass - mirrors whoscored_report.compute_shot_pairs()'s own filter
+    exactly (sca1_action starts with 'Pass', sca1_player not null) - and is
+    reconstructed from the shots table's own extra_json rather than needing
+    a dedicated pairs table of its own, the same way fetch_shot_creating_
+    actions() above reconstructs the match report's SCA columns from
+    already-saved data. Returns ['shot_taker', 'passer', 'count'], sorted
+    by count descending. Empty DataFrame (right columns, no rows) if this
+    team has no saved shot data - or no pass-assisted shots at all - for
+    the given scope.
+    """
+    cols = ["shot_taker", "passer", "count"]
+    shots = fetch_shots(db, match_id=match_id, team=team)
+    if shots.empty:
+        return pd.DataFrame(columns=cols)
+    if match_id is None and competition is not None:
+        keep_ids = _match_ids_for_competition(db, competition)
+        shots = shots[shots["match_id"].astype(str).isin(keep_ids)]
+    if shots.empty:
+        return pd.DataFrame(columns=cols)
+    records = []
+    for _, r in shots.iterrows():
+        extra = json.loads(r["extra_json"]) if r.get("extra_json") else {}
+        sca1_player = extra.get("SCA1_Player")
+        sca1_action = extra.get("SCA1_Action")
+        if sca1_player and str(sca1_action).startswith("Pass"):
+            records.append({"shot_taker": r["player"], "passer": sca1_player})
+    if not records:
+        return pd.DataFrame(columns=cols)
+    out = (pd.DataFrame(records).groupby(["shot_taker", "passer"]).size()
+           .reset_index(name="count")
+           .sort_values("count", ascending=False)
+           .reset_index(drop=True))
+    return out[cols]
+
+
 def fetch_season_shot_totals(db: DB, competition=None):
     """
     Season-cumulative Shots/Goals/Total xG per team, broken down by shot
@@ -1556,6 +1597,40 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
         # real null here is enough to make it disappear as a "player".
         df["receiver"] = df["receiver"].replace({"NaN": None, "nan": None, "": None})
     return df
+
+
+def fetch_team_passing_pairs(db: DB, team, match_id=None, competition=None) -> pd.DataFrame:
+    """
+    Passing Pairs tab: every distinct passer -> receiver combination
+    (completed passes only) for one team, either for a single match
+    (match_id given) or summed across every one of that team's saved
+    matches (match_id=None, optionally scoped to one competition first via
+    _match_ids_for_competition() - the same filter the League Overview/Team
+    Page tables already use). Reuses fetch_passes() - the Pass Map/Passes
+    Received tabs' own source, same 'passes' table - rather than a
+    dedicated pairs table: this is exactly the same completed-passes/
+    receiver-not-null rule whoscored_report.compute_passing_pairs() applies
+    at scrape time, just re-aggregated from the saved per-event rows so a
+    season total doesn't need re-parsing raw match events. Returns
+    ['passer', 'receiver', 'count'], sorted by count descending. Empty
+    DataFrame (right columns, no rows) if this team has no saved pass data
+    for the given scope.
+    """
+    cols = ["passer", "receiver", "count"]
+    passes = fetch_passes(db, match_id=match_id, team=team, completed_only=True)
+    if passes.empty:
+        return pd.DataFrame(columns=cols)
+    if match_id is None and competition is not None:
+        keep_ids = _match_ids_for_competition(db, competition)
+        passes = passes[passes["match_id"].astype(str).isin(keep_ids)]
+    passes = passes.dropna(subset=["receiver"])
+    if passes.empty:
+        return pd.DataFrame(columns=cols)
+    out = (passes.groupby(["passer", "receiver"]).size()
+           .reset_index(name="count")
+           .sort_values("count", ascending=False)
+           .reset_index(drop=True))
+    return out[cols]
 
 
 def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame:
@@ -1740,6 +1815,44 @@ def _match_ids_for_competition(db: DB, competition) -> set:
     if matches.empty:
         return set()
     return set(matches.loc[matches["competition"] == competition, "match_id"].astype(str))
+
+
+def fetch_teams_for_competition(db: DB, competition=None) -> list:
+    """
+    Every team (home or away side) with at least one saved match in this
+    competition, alphabetically - backs the Pass Pairs/Shot Pairs tabs'
+    League -> Team dropdown cascade. competition=None returns every team
+    with any saved match at all, same all-inclusive convention as
+    _match_ids_for_competition(None).
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return []
+    if competition is not None:
+        matches = matches[matches["competition"] == competition]
+    teams = set(matches["home_team"].dropna()) | set(matches["away_team"].dropna())
+    return sorted(teams)
+
+
+def fetch_team_matches_for_competition(db: DB, team, competition=None) -> pd.DataFrame:
+    """
+    Every saved match (match_id, home_team, away_team, match_date, ...)
+    involving this team in this competition, sorted chronologically -
+    backs the Pass Pairs/Shot Pairs tabs' own match dropdown (the "all that
+    player's matches" picker), alongside a separate "Full Season" option
+    the dashboard adds itself. Not season-scoped on top of competition -
+    this project only has one season of saved data so far (see fetch_
+    available_seasons()'s docstring), so competition alone is enough to
+    disambiguate; a second season would need this to grow a season=
+    parameter the same way fetch_team_match_log() already has one.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return matches
+    if competition is not None:
+        matches = matches[matches["competition"] == competition]
+    matches = matches[(matches["home_team"] == team) | (matches["away_team"] == team)]
+    return matches.sort_values("match_date").reset_index(drop=True)
 
 
 def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
