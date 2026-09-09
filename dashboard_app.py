@@ -1792,7 +1792,11 @@ else:
             _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table")
 
         st.subheader("Team Stats")
-        totals_category = st.selectbox(
+        # Narrow column (see _narrow_selectbox()) rather than a plain full-
+        # width st.selectbox() - this dropdown's options are all short
+        # words/phrases, so letting it stretch across the entire page (the
+        # previous behavior) left a lot of dead space to its right.
+        totals_category = _narrow_selectbox(
             "Category", ["Shots", "Passing", "Touches", "Defensive Actions",
                          "Defensive Action Location"],
             key="team_totals_category"
@@ -1803,14 +1807,33 @@ else:
                 st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
             else:
                 def _shot_side_totals(df, suffix):
-                    out_cols = ["Team", f"Shots {suffix}", f"Goals {suffix}", f"xG {suffix}"]
+                    # 'xG per Shot' placed right after this side's own 'xG'
+                    # column (rather than at the very end of out_cols) so
+                    # that, once the For/Against sides are merged below,
+                    # 'xG per Shot For' lands right before 'Shots Against'
+                    # and 'xG per Shot Against' lands last - per request -
+                    # with no extra reordering needed after the merge.
+                    out_cols = ["Team", f"Shots {suffix}", f"Goals {suffix}", f"xG {suffix}",
+                                f"xG per Shot {suffix}"]
                     if df.empty:
                         return pd.DataFrame(columns=out_cols)
                     agg = df.groupby("Team")[["Shots", "Goals", "Total xG"]].sum().reset_index()
                     agg = agg.rename(columns={"Shots": f"Shots {suffix}", "Goals": f"Goals {suffix}",
                                                "Total xG": f"xG {suffix}"})
                     agg[f"xG {suffix}"] = agg[f"xG {suffix}"].round(2)
-                    return agg
+                    # Total xG / Shots - 0 (rather than NaN/inf) for a team
+                    # with 0 shots on this side, same "no fabricated rate"
+                    # convention as _per90()'s own 0-minutes case elsewhere.
+                    # Dividing by 1 (a harmless placeholder) on those 0-shot
+                    # rows and then overwriting them with a flat 0.0 avoids
+                    # ever computing a real 0/0 - cleaner than a pd.NA round
+                    # trip, which triggers a pandas downcasting warning.
+                    shots_col = agg[f"Shots {suffix}"]
+                    safe_denominator = shots_col.where(shots_col != 0, 1)
+                    agg[f"xG per Shot {suffix}"] = (
+                        (agg[f"xG {suffix}"] / safe_denominator).where(shots_col != 0, 0.0).round(2)
+                    )
+                    return agg[out_cols]
 
                 shot_totals = _shot_side_totals(shot_for_df, "For").merge(
                     _shot_side_totals(shot_against_df, "Against"), on="Team", how="outer"
