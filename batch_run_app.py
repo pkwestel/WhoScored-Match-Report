@@ -337,7 +337,12 @@ if results:
         help="Reuses whatever you entered in Step 2's duplicate-check field - change it here if needed.",
         key="batch_db_url_save",
     )
-    competition = st.text_input("Competition", value="Premier League")
+    # Dropdown rather than a free-text field - see combined_streamlit_app.py's
+    # identical "Save to Database" Competition field for why this needs to
+    # match exactly, character-for-character, across every save. One
+    # competition applies to this WHOLE batch (every match saved here uses
+    # whatever's picked) - run separate batches if a batch mixes leagues.
+    competition = st.selectbox("Competition", ["Premier League", "UEFA Champions League"], index=0)
 
     if st.button("Save all successful matches to the database", type="primary"):
         any_saved = False

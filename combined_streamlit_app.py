@@ -280,7 +280,17 @@ if report:
             help="sqlite:///history.db for local testing, or postgresql://user:pass@host:port/dbname "
                  "for your hosted database. Defaults to the DATABASE_URL environment variable if set.",
         )
-        competition = st.text_input("Competition", value="Premier League")
+        # Dropdown rather than a free-text field - a competition name has
+        # to match EXACTLY (character-for-character) across every save for
+        # the League/Team Page Competition dropdowns to group matches
+        # correctly (see history_db.fetch_available_competitions()/
+        # fetch_team_competitions()) - a plain text box risks a typo or an
+        # inconsistent spelling ("Champions League" one save, "UEFA
+        # Champions League" the next) silently splitting one competition
+        # into two. Add a new competition here (and to batch_run_app.py's
+        # identical dropdown) as it comes up - just another string in this
+        # list, nothing else needs to change.
+        competition = st.selectbox("Competition", ["Premier League", "UEFA Champions League"], index=0)
         match_date = st.date_input(
             "Match date (fallback only)",
             value=datetime.date.today(),
