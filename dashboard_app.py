@@ -1134,6 +1134,7 @@ def _render_pairs_tab(db, mode):
         match_options[f"{r.home_team} vs {r.away_team} ({r.match_date})"] = r.match_id
     match_label = _narrow_selectbox("Match", list(match_options.keys()), key=f"{key_ns}_match_{league}_{team}")
     match_id = match_options[match_label]
+    season_match_ids = set(team_matches["match_id"].astype(str))
 
     pairs = season_pairs if match_id is None else fetch_pairs(db, team, match_id=match_id)
     if pairs.empty:
@@ -1149,21 +1150,133 @@ def _render_pairs_tab(db, mode):
              .sort_values(count_label, ascending=False)
              .reset_index(drop=True))
 
+    # Selecting a row on either side (a specific teammate) drills down into
+    # the actual Pass Map for that exact passer -> receiver pair - see
+    # _render_pair_pass_map()'s docstring for why this always pulls from
+    # the full 'passes' table rather than being limited to shot-creating
+    # passes, even on the Shot Pairs tab. selection_mode="single-row" +
+    # on_select="rerun" is native st.dataframe row-selection (no custom
+    # click-handling/page reload needed); the key includes every upstream
+    # dropdown choice so switching league/team/player/match clears any
+    # stale selection instead of pointing at a row that no longer exists.
+    scope_key = f"{league}_{team}_{player}_{match_label}"
     col1, col2 = st.columns(2)
     with col1:
         st.subheader(left_header.format(player=player))
         if left.empty:
             st.info("No data for this player/scope.")
         else:
-            st.dataframe(left, use_container_width=False, hide_index=True,
-                         height=_no_scroll_height(left))
+            left_event = st.dataframe(
+                left, use_container_width=False, hide_index=True,
+                height=_no_scroll_height(left),
+                on_select="rerun", selection_mode="single-row",
+                key=f"{key_ns}_left_{scope_key}",
+            )
+            selected = left_event.selection.rows if left_event is not None else []
+            if selected:
+                other = left.iloc[selected[0]][left_col_label]
+                st.divider()
+                _render_pair_pass_map(db, team, passer=player, receiver=other,
+                                       match_id=match_id, season_match_ids=season_match_ids)
     with col2:
         st.subheader(right_header.format(player=player))
         if right.empty:
             st.info("No data for this player/scope.")
         else:
-            st.dataframe(right, use_container_width=False, hide_index=True,
-                         height=_no_scroll_height(right))
+            right_event = st.dataframe(
+                right, use_container_width=False, hide_index=True,
+                height=_no_scroll_height(right),
+                on_select="rerun", selection_mode="single-row",
+                key=f"{key_ns}_right_{scope_key}",
+            )
+            selected = right_event.selection.rows if right_event is not None else []
+            if selected:
+                other = right.iloc[selected[0]][right_col_label]
+                st.divider()
+                _render_pair_pass_map(db, team, passer=other, receiver=player,
+                                       match_id=match_id, season_match_ids=season_match_ids)
+
+
+def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids):
+    """
+    Drill-down for the Pass Pairs/Shot Pairs tabs: clicking a row in either
+    side table on _render_pairs_tab() shows the real Pass Map for that
+    specific passer -> receiver pair (e.g. Benjamin Sesko, all passes
+    received from Bruno Fernandes) - every completed pass between exactly
+    these two players, scoped to whichever match or "Full Season" selection
+    was already active on that tab. Deliberately reads from the full
+    'passes' table via fetch_passes(passer=, receiver=) rather than being
+    limited to shot-creating (SCA1) passes even when reached from the Shot
+    Pairs tab - the point of this view is "how do these two actually
+    connect on the pitch", not just the one pass that led to a shot.
+    Reuses pitch_viz.plot_pass_map() exactly like the Pass Map/Season Pass
+    Map tabs (see _render_pass_map()/_render_season_pass_map()), just
+    filtered to one specific pair instead of one player's every pass.
+    """
+    if match_id is not None:
+        pair_passes = hdb.fetch_passes(db, match_id=match_id, team=team, passer=passer,
+                                        receiver=receiver, completed_only=True)
+    else:
+        pair_passes = hdb.fetch_passes(db, team=team, passer=passer, receiver=receiver,
+                                        completed_only=True)
+        if not pair_passes.empty:
+            pair_passes = pair_passes[pair_passes["match_id"].astype(str).isin(season_match_ids)]
+
+    st.markdown(f"**Pass Map: {passer} → {receiver}**")
+    if pair_passes.empty:
+        st.info(f"No completed passes found from {passer} to {receiver} for this scope.")
+        return
+
+    pair_passes = pair_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+    n_matches = pair_passes["match_id"].nunique()
+    total = len(pair_passes)
+    progressive = int(pair_passes["is_progressive"].sum())
+    key_passes = int(pair_passes["is_key_pass"].sum())
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Passes Completed", total)
+    c2.metric("Progressive", progressive)
+    c3.metric("Key Passes", key_passes)
+    stat_items = [
+        (f"{total} Completed", TITLE_COLOR),
+        (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+        (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+    ]
+
+    if match_id is not None:
+        matches = hdb.fetch_matches(db)
+        match_row = matches.loc[matches["match_id"] == match_id]
+        home_team = match_row["home_team"].iloc[0] if not match_row.empty else None
+        away_team = match_row["away_team"].iloc[0] if not match_row.empty else None
+        match_date = (_split_date_and_kickoff(match_row["match_date"].iloc[0])[0]
+                      if not match_row.empty else None)
+        subtitle = None
+    else:
+        home_team = away_team = None
+        match_date = None
+        subtitle = (_current_season_and_league(db, pair_passes["match_id"].unique().tolist())
+                    or f"Season - {n_matches} match(es)")
+
+    fig = plot_pass_map(pair_passes, receiver, team, home_team, away_team, stat_items,
+                         title_suffix=f"Passes Received from {passer}",
+                         subtitle=subtitle, match_date=match_date)
+
+    png_buf = io.BytesIO()
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+    png_buf.seek(0)
+    st.image(png_buf, width=420)
+
+    download_buf = io.BytesIO()
+    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+    download_buf.seek(0)
+    st.download_button(
+        label="Download Pass Map (PNG)",
+        data=download_buf,
+        file_name=f"{passer.replace(' ', '_')}_to_{receiver.replace(' ', '_')}_passmap.png",
+        mime="image/png",
+        key=f"pairpassmap_dl_{passer}_{receiver}_{match_id}",
+    )
+    plt.close(fig)
 
 
 def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
