@@ -212,6 +212,27 @@ def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
     """, unsafe_allow_html=True)
 
 
+# Cosmetic-only team name overrides for display - the DB's own stored team
+# key (matches.home_team/away_team and every other team-keyed column) stays
+# whatever WhoScored's own scrape produced ("Porto"), since that's what
+# every join/filter/URL-lookup in this app keys off of - see combined_
+# report.TEAM_NAME_ALIASES's own docstring for why FotMob's fuller names
+# ("FC Porto") aren't used as the storage key. This dict is purely "what
+# string does a human see", applied at the last possible moment (right
+# before a name is drawn/linked/shown), NEVER before a name is used to
+# filter/fetch/build a URL - _display_team_name() must only ever wrap the
+# text a widget/table/chart actually renders, not the value passed back
+# into any hdb.fetch_*()/query-param call.
+TEAM_DISPLAY_NAMES = {
+    "Porto": "FC Porto",
+}
+
+
+def _display_team_name(team_name):
+    """Cosmetic rename for display only - see TEAM_DISPLAY_NAMES above."""
+    return TEAM_DISPLAY_NAMES.get(team_name, team_name)
+
+
 def _team_page_url(team_name):
     """
     Relative '?team=<url-encoded name>' link to a team's Team Page (see
@@ -243,7 +264,8 @@ def _linkify_team_cell(team_name):
     if not team_name or (isinstance(team_name, float) and pd.isna(team_name)):
         return ""
     url = _team_page_url(team_name)
-    return f'<a href="{url}" style="color:inherit; text-decoration:underline;">{html.escape(str(team_name))}</a>'
+    return (f'<a href="{url}" style="color:inherit; text-decoration:underline;">'
+            f'{html.escape(str(_display_team_name(team_name)))}</a>')
 
 
 def _build_query_href(**overrides):
@@ -696,7 +718,7 @@ def _convert_to_per90(df, minutes_by_player):
     return pd.DataFrame(records, columns=df.columns)
 
 
-def _narrow_selectbox(label, options, key=None, index=0, width=2, total=7):
+def _narrow_selectbox(label, options, key=None, index=0, width=2, total=7, format_func=None):
     """
     Draws st.selectbox() inside a narrow left-hand column instead of
     letting it stretch across the ENTIRE page width - st.selectbox()'s own
@@ -707,16 +729,25 @@ def _narrow_selectbox(label, options, key=None, index=0, width=2, total=7):
     used for the League Overview tab's League/Category dropdowns and the
     Fixtures tab's own filters - width:total sets the dropdown's share of
     the page (default 2:7, i.e. roughly 2/7 of the full width).
+
+    format_func (optional): passed straight through to st.selectbox() -
+    lets a caller show a cosmetic label (e.g. _display_team_name(), "Porto"
+    -> "FC Porto") for each option while the actual returned value stays
+    the real underlying option (the raw DB team name every fetch/filter
+    call below still needs), exactly like st.selectbox()'s own format_func.
     """
     col, _spacer = st.columns([width, total - width])
     with col:
-        return st.selectbox(label, options, key=key, index=index)
+        kwargs = {"key": key, "index": index}
+        if format_func is not None:
+            kwargs["format_func"] = format_func
+        return st.selectbox(label, options, **kwargs)
 
 
 def _match_picker(matches, key):
     """Shared match dropdown for the Pass Map/Passes Received tabs below."""
     options = {
-        f"{r.home_team} vs {r.away_team} ({r.match_date})": r.match_id
+        f"{_display_team_name(r.home_team)} vs {_display_team_name(r.away_team)} ({r.match_date})": r.match_id
         for r in matches.itertuples()
     }
     label = _narrow_selectbox("Match", list(options.keys()), key=key)
@@ -780,11 +811,11 @@ def _render_pass_map(db, matches, mode):
     # end_y (SQL-friendlier column names) - rename before handing off.
     player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
 
-    home_team = matches.loc[matches["match_id"] == match_id, "home_team"].iloc[0]
-    away_team = matches.loc[matches["match_id"] == match_id, "away_team"].iloc[0]
+    home_team = _display_team_name(matches.loc[matches["match_id"] == match_id, "home_team"].iloc[0])
+    away_team = _display_team_name(matches.loc[matches["match_id"] == match_id, "away_team"].iloc[0])
     match_date_raw = matches.loc[matches["match_id"] == match_id, "match_date"].iloc[0]
     match_date, _ = _split_date_and_kickoff(match_date_raw)
-    player_team = (player_passes["team"].iloc[0]
+    player_team = (_display_team_name(player_passes["team"].iloc[0])
                     if "team" in player_passes.columns and not player_passes.empty else None)
 
     total = len(player_passes)
@@ -847,7 +878,8 @@ def _team_filter_picker(df, team_col, key):
     map with nothing to tell them apart.
     """
     teams = sorted(df[team_col].dropna().unique())
-    choice = _narrow_selectbox("Team (optional filter)", ["All teams"] + teams, key=key)
+    choice = _narrow_selectbox("Team (optional filter)", ["All teams"] + teams, key=key,
+                                format_func=lambda t: t if t == "All teams" else _display_team_name(t))
     return None if choice == "All teams" else choice
 
 
@@ -962,10 +994,10 @@ def _render_season_pass_map(db, mode):
     # than one team this season, "All teams" selected) fall back to
     # whichever team shows up most often in their passes, rather than
     # leaving the title's '({team})' blank.
-    player_team = team_filter or (
+    player_team = _display_team_name(team_filter or (
         player_passes["team"].mode().iloc[0] if "team" in player_passes.columns and not player_passes.empty
         else None
-    )
+    ))
 
     # Line 2 of the title: "{current season} {league}" (e.g. "2026-27
     # Premier League") derived from these actual matches - see
@@ -1034,10 +1066,10 @@ def _render_season_touchmap(db):
     # picker above was used - otherwise (a player who's played for more
     # than one team this season, "All teams" selected) fall back to
     # whichever team shows up most often in their touches.
-    player_team = team_filter or (
+    player_team = _display_team_name(team_filter or (
         player_touches["team"].mode().iloc[0] if "team" in player_touches.columns and not player_touches.empty
         else None
-    )
+    ))
 
     # Line 2 of the title: "{current season} {league}" - see
     # _current_season_and_league()'s own docstring; falls back to the
@@ -1116,22 +1148,22 @@ def _render_pairs_tab(db, mode):
     if not teams:
         st.info(f"No teams found for {league}.")
         return
-    team = _narrow_selectbox("Team", teams, key=f"{key_ns}_team_{league}")
+    team = _narrow_selectbox("Team", teams, key=f"{key_ns}_team_{league}", format_func=_display_team_name)
 
     season_pairs = fetch_pairs(db, team, match_id=None, competition=league)
     if season_pairs.empty:
-        st.info(empty_msg.format(team=team, league=league))
+        st.info(empty_msg.format(team=_display_team_name(team), league=league))
         return
     players = sorted(set(season_pairs[passer_col].dropna()) | set(season_pairs[receiver_col].dropna()))
     if not players:
-        st.info(empty_msg.format(team=team, league=league))
+        st.info(empty_msg.format(team=_display_team_name(team), league=league))
         return
     player = _narrow_selectbox("Player", players, key=f"{key_ns}_player_{league}_{team}")
 
     team_matches = hdb.fetch_team_matches_for_competition(db, team, league)
     match_options = {"Full Season": None}
     for r in team_matches.itertuples():
-        match_options[f"{r.home_team} vs {r.away_team} ({r.match_date})"] = r.match_id
+        match_options[f"{_display_team_name(r.home_team)} vs {_display_team_name(r.away_team)} ({r.match_date})"] = r.match_id
     match_label = _narrow_selectbox("Match", list(match_options.keys()), key=f"{key_ns}_match_{league}_{team}")
     match_id = match_options[match_label]
     season_match_ids = set(team_matches["match_id"].astype(str))
@@ -1246,8 +1278,8 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
     if match_id is not None:
         matches = hdb.fetch_matches(db)
         match_row = matches.loc[matches["match_id"] == match_id]
-        home_team = match_row["home_team"].iloc[0] if not match_row.empty else None
-        away_team = match_row["away_team"].iloc[0] if not match_row.empty else None
+        home_team = _display_team_name(match_row["home_team"].iloc[0]) if not match_row.empty else None
+        away_team = _display_team_name(match_row["away_team"].iloc[0]) if not match_row.empty else None
         match_date = (_split_date_and_kickoff(match_row["match_date"].iloc[0])[0]
                       if not match_row.empty else None)
         subtitle = None
@@ -1257,7 +1289,7 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
         subtitle = (_current_season_and_league(db, pair_passes["match_id"].unique().tolist())
                     or f"Season - {n_matches} match(es)")
 
-    fig = plot_pass_map(pair_passes, receiver, team, home_team, away_team, stat_items,
+    fig = plot_pass_map(pair_passes, receiver, _display_team_name(team), home_team, away_team, stat_items,
                          title_suffix=f"Passes Received from {passer}",
                          subtitle=subtitle, match_date=match_date)
 
@@ -1295,12 +1327,13 @@ def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
         return
     player = _narrow_selectbox("Player", players, key="match_detail_touchmap_player")
     player_touches = touches[touches["player"] == player]
-    player_team = (player_touches["team"].iloc[0]
+    player_team = (_display_team_name(player_touches["team"].iloc[0])
                     if "team" in player_touches.columns and not player_touches.empty else None)
     date_part, _ = _split_date_and_kickoff(match_date)
 
     fig = plot_touch_map(player_touches, player, player_team=player_team,
-                          home_name=home_team, away_name=away_team, match_date=date_part)
+                          home_name=_display_team_name(home_team), away_name=_display_team_name(away_team),
+                          match_date=date_part)
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
@@ -1552,9 +1585,9 @@ def _render_match_detail(db, match_id):
         # decimal_cols is passed unconditionally for every category - it's
         # a no-op for the 4 categories that don't have an NPxG/PS-xG/xA
         # column at all, and correct for Scoring Stats, which does.
-        st.caption(f"[{home_team}]({_team_page_url(home_team)})")
+        st.caption(f"[{_display_team_name(home_team)}]({_team_page_url(home_team)})")
         if tables["home"].empty:
-            st.info(f"No {category.lower()} saved for {home_team} in this match.")
+            st.info(f"No {category.lower()} saved for {_display_team_name(home_team)} in this match.")
         else:
             home_sortable, home_total = _split_team_total_row(tables["home"])
             st.dataframe(home_sortable, use_container_width=False, hide_index=True,
@@ -1562,9 +1595,9 @@ def _render_match_detail(db, match_id):
             _render_pinned_team_total_row(home_sortable.columns, home_total,
                                            decimal_cols=("NPxG", "PS-xG", "xA"))
 
-        st.caption(f"[{away_team}]({_team_page_url(away_team)})")
+        st.caption(f"[{_display_team_name(away_team)}]({_team_page_url(away_team)})")
         if tables["away"].empty:
-            st.info(f"No {category.lower()} saved for {away_team} in this match.")
+            st.info(f"No {category.lower()} saved for {_display_team_name(away_team)} in this match.")
         else:
             away_sortable, away_total = _split_team_total_row(tables["away"])
             st.dataframe(away_sortable, use_container_width=False, hide_index=True,
@@ -1601,7 +1634,7 @@ def _render_match_detail(db, match_id):
                 # clickable link) - '###' matches st.subheader's own H3
                 # sizing, per request that every team name on the match
                 # report link back to its Team Page.
-                st.markdown(f"### [{t}]({_team_page_url(t)})")
+                st.markdown(f"### [{_display_team_name(t)}]({_team_page_url(t)})")
                 t_shots = shots[shots["Team"] == t].drop(columns=["Team"]).reset_index(drop=True)
                 st.dataframe(t_shots, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(t_shots))
@@ -1700,11 +1733,11 @@ def _render_team_page(db, team, season=None):
     stats = hdb.fetch_team_page_stats(db, team, season=season)
     with title_col:
         title_season = stats["season"] if stats else season
-        st.markdown(f'<div style="font-size:2em; font-weight:bold;">{title_season} {team}</div>',
+        st.markdown(f'<div style="font-size:2em; font-weight:bold;">{title_season} {_display_team_name(team)}</div>',
                     unsafe_allow_html=True)
 
     if stats is None:
-        st.info(f"No stats saved yet for {team} in {season}.")
+        st.info(f"No stats saved yet for {_display_team_name(team)} in {season}.")
         return
 
     record = f"{stats['w']}-{stats['d']}-{stats['l']}"
@@ -1805,7 +1838,7 @@ def _render_team_page(db, team, season=None):
     st.subheader("General Stats")
     scoring_stats = hdb.fetch_team_season_scoring_stats(db, team, season, competition=competition)
     if scoring_stats.empty:
-        st.info(f"No scoring stats saved yet for {team} in {season}.")
+        st.info(f"No scoring stats saved yet for {_display_team_name(team)} in {season}.")
     else:
         _render_general_stats_table(scoring_stats)
 
@@ -1817,7 +1850,7 @@ def _render_team_page(db, team, season=None):
     st.subheader("Match Log")
     match_log = hdb.fetch_team_match_log(db, team, season, competition=competition)
     if match_log.empty:
-        st.info(f"No matches saved yet for {team} in {season}.")
+        st.info(f"No matches saved yet for {_display_team_name(team)} in {season}.")
     else:
         _render_fixtures_like_table(match_log)
 
@@ -1862,7 +1895,7 @@ def _render_team_page(db, team, season=None):
             )
         category_df = fetcher(db, team, season, competition=competition)
         if category_df.empty:
-            st.info(f"No {title.lower()} stats saved yet for {team} in {season}.")
+            st.info(f"No {title.lower()} stats saved yet for {_display_team_name(team)} in {season}.")
         else:
             if show_per90:
                 category_df = _convert_to_per90(category_df, minutes_by_player)
@@ -1887,7 +1920,7 @@ def _render_team_page(db, team, season=None):
     st.subheader("Playing Time")
     plus_minus_stats = hdb.fetch_team_season_plus_minus(db, team, season, competition=competition)
     if plus_minus_stats.empty:
-        st.info(f"No plus/minus stats saved yet for {team} in {season}.")
+        st.info(f"No plus/minus stats saved yet for {_display_team_name(team)} in {season}.")
     else:
         _render_playing_time_table(plus_minus_stats)
 
@@ -1904,11 +1937,11 @@ _DASH_TABS = [
     ("shots", "Shots"),
     ("passmap", "Pass Map"),
     ("passrecv", "Passes Received"),
+    ("pass_pairs", "Pass Pairs"),
+    ("shot_pairs", "Shot Pairs"),
     ("season_passmap", "Season Pass Map"),
     ("season_passrecv", "Season Passes Received"),
     ("season_touchmap", "Season Touch Map"),
-    ("pass_pairs", "Pass Pairs"),
-    ("shot_pairs", "Shot Pairs"),
 ]
 _DASH_TAB_SLUGS = {slug for slug, _ in _DASH_TABS}
 
@@ -2087,6 +2120,10 @@ else:
                 # header sorts natively, instantly, with no page reload at
                 # all, since this is a real Streamlit grid widget rather
                 # than our own HTML table + link/dropdown sort mechanism.
+                # Team column relabeled for display only (_display_team_name())
+                # right before rendering - nothing downstream re-filters this
+                # DataFrame by Team afterward, so this is safe to do in place.
+                shot_totals["Team"] = shot_totals["Team"].map(_display_team_name)
                 st.dataframe(shot_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(shot_totals))
         elif totals_category == "Passing":
@@ -2094,6 +2131,7 @@ else:
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
+                passing_totals["Team"] = passing_totals["Team"].map(_display_team_name)
                 st.dataframe(passing_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(passing_totals))
         elif totals_category == "Touches":
@@ -2105,6 +2143,7 @@ else:
                     "backfill it."
                 )
             else:
+                touches_totals["Team"] = touches_totals["Team"].map(_display_team_name)
                 st.dataframe(touches_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(touches_totals))
                 st.caption(
@@ -2121,6 +2160,7 @@ else:
                     "first."
                 )
             else:
+                defensive_totals["Team"] = defensive_totals["Team"].map(_display_team_name)
                 st.dataframe(defensive_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(defensive_totals))
         elif totals_category == "Defensive Action Location":
@@ -2133,6 +2173,7 @@ else:
                     "report app to backfill it."
                 )
             else:
+                defensive_location_totals["Team"] = defensive_location_totals["Team"].map(_display_team_name)
                 st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(defensive_location_totals))
 
@@ -2196,11 +2237,13 @@ else:
         if not teams:
             st.info("No matches published yet.")
         else:
-            team = st.selectbox("Team", teams)
+            team = st.selectbox("Team", teams, format_func=_display_team_name)
             trends = hdb.fetch_team_trends(db, team)
             if trends.empty:
-                st.info(f"No stats saved yet for {team}.")
+                st.info(f"No stats saved yet for {_display_team_name(team)}.")
             else:
+                if "team" in trends.columns:
+                    trends = trends.assign(team=trends["team"].map(_display_team_name))
                 st.dataframe(trends, use_container_width=True, hide_index=True)
                 numeric_cols = [c for c in trends.columns
                                  if c not in ("match_date", "match_id", "team", "is_home")
