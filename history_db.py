@@ -2675,6 +2675,109 @@ def fetch_team_season_defensive_locations(db: DB, team, season, competition=None
     )
 
 
+def fetch_team_match_counts(db: DB, season, competition=None) -> dict:
+    """
+    {team: number of matches played in this season+competition scope} -
+    used by the league-wide Player Stats tab (see fetch_league_season_
+    scoring_stats() and friends below) to know each team's own "available
+    minutes" this season (matches * 90) for its Per 90 toggle's minimum-
+    minutes-played filter - a player who's only featured in a handful of a
+    busy season's matches shouldn't get a per-90 rate calculated off a tiny
+    sample, and "35% of MY OWN CLUB's matches" is a fairer bar than a flat
+    minutes number, since not every club has played the same number of
+    games at any given point in a season. Every team that's played at
+    least one match in this scope is a key - a team with zero simply
+    doesn't appear, rather than showing up with a count of 0.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return {}
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    scoped = matches[matches["season"] == season]
+    if competition is not None:
+        scoped = scoped[scoped["competition"] == competition]
+    if scoped.empty:
+        return {}
+    counts = {}
+    for _, m in scoped.iterrows():
+        counts[m["home_team"]] = counts.get(m["home_team"], 0) + 1
+        counts[m["away_team"]] = counts.get(m["away_team"], 0) + 1
+    return counts
+
+
+def _fetch_league_season_table(db: DB, season, competition, per_team_fetcher, sort_col) -> pd.DataFrame:
+    """
+    Shared plumbing for the Player Stats tab's 5 league-wide leaderboards -
+    calls `per_team_fetcher(db, team, season, competition=competition)`
+    (one of the fetch_team_season_*() functions above) once for every team
+    that's played at least one match in this (season, competition) scope,
+    drops each team's own 'Team Total' row (not meaningful once every
+    team's players are mixed into one cross-team table), tags every
+    remaining row with a 'Team' column (inserted right after 'Player', so
+    a player's own club is always visible next to their name), and
+    concatenates the lot into one DataFrame sorted by `sort_col`
+    descending - the same "most involved player first" column each
+    per-team function already sorts by on its own (Minutes for General
+    Stats, Total Touches for Possession, etc.), just re-applied across the
+    combined table since concatenation alone would leave it grouped team-
+    by-team instead of one real leaderboard. Returns a genuinely empty
+    DataFrame (no columns) if no team in this scope has any saved data -
+    every caller already only checks .empty, never a specific column, in
+    that case.
+    """
+    teams = sorted(fetch_team_match_counts(db, season, competition).keys())
+    frames = []
+    for team in teams:
+        df = per_team_fetcher(db, team, season, competition=competition)
+        if df.empty:
+            continue
+        df = df[df["Player"] != "Team Total"].copy()
+        if df.empty:
+            continue
+        df.insert(1, "Team", team)
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    if sort_col in out.columns:
+        out = out.sort_values(sort_col, ascending=False).reset_index(drop=True)
+    return out
+
+
+def fetch_league_season_scoring_stats(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide General Stats leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(db, season, competition, fetch_team_season_scoring_stats, "Minutes")
+
+
+def fetch_league_season_possession(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide Possession leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(
+        db, season, competition, fetch_team_season_possession, _POSSESSION_COLUMNS[0]
+    )
+
+
+def fetch_league_season_passing(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide Passing leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(
+        db, season, competition, fetch_team_season_passing, _PASSING_COLUMNS[0]
+    )
+
+
+def fetch_league_season_defensive_actions(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide Defensive Actions leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(
+        db, season, competition, fetch_team_season_defensive_actions, _DEFENSIVE_ACTIONS_COLUMNS[0]
+    )
+
+
+def fetch_league_season_defensive_locations(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide Defensive Action Locations leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(
+        db, season, competition, fetch_team_season_defensive_locations, _DEFENSIVE_LOCATIONS_COLUMNS[0]
+    )
+
+
 def fetch_season_passing_totals(db: DB, competition=None) -> pd.DataFrame:
     """
     Season-cumulative passing totals per team, summed across every player

@@ -718,6 +718,65 @@ def _convert_to_per90(df, minutes_by_player):
     return pd.DataFrame(records, columns=df.columns)
 
 
+_PLAYER_STATS_MIN_MINUTES_FRACTION = 0.35  # see _convert_to_per90_league()'s own docstring
+
+
+def _convert_to_per90_league(df, minutes_lookup, team_available_minutes, stat_cols):
+    """
+    Per 90 view for the league-wide Player Stats tab - same (value / season
+    Minutes) * 90 formula as _convert_to_per90() above, but with two
+    differences driven by this table mixing every club's players together
+    instead of just one team's small roster:
+
+    1. minutes_lookup is keyed by (Team, Player), not Player alone - two
+       different clubs can have a same-named player league-wide, which a
+       single team's own roster never has to worry about.
+    2. Any player who hasn't played at least _PLAYER_STATS_MIN_MINUTES_
+       FRACTION (35%) of their OWN CLUB's available minutes this season
+       (team_available_minutes[team], i.e. that club's own match count in
+       this scope * 90) is dropped from the Per 90 view entirely, rather
+       than shown with a rate computed off a tiny sample - a single-
+       appearance substitute's "1 goal in 12 minutes" would otherwise show
+       an absurd, misleading rate sitting at the top of a real leaderboard,
+       a risk the Team Page's own per-team toggle doesn't have (a lone
+       cameo is obviously visible in context there, on a roster of ~20-30
+       names the viewer already knows).
+
+    stat_cols is the explicit list of columns to convert - unlike
+    _convert_to_per90() (which converts every non-Player column, fine for
+    the 4 simple category tables where every column IS a stat), the
+    General Stats table also carries Age/Appearances/Starts/Minutes, which
+    should never themselves become a "per 90" rate - so this only ever
+    touches the columns the caller explicitly names, leaving every other
+    column (including Team/Player) untouched.
+
+    Returns a DataFrame with the exact same columns as df, just fewer
+    rows (the filtered-out players) and stat_cols converted - never '-'
+    for a kept row, since the minimum-minutes filter already guarantees a
+    kept player has a real, sane Minutes figure to divide by.
+    """
+    if df.empty or "Team" not in df.columns or "Player" not in df.columns:
+        return df.iloc[0:0]
+
+    keep_rows = []
+    for _, row in df.iterrows():
+        minutes = minutes_lookup.get((row["Team"], row["Player"]))
+        available = team_available_minutes.get(row["Team"])
+        if minutes and available and minutes >= _PLAYER_STATS_MIN_MINUTES_FRACTION * available:
+            keep_rows.append(row)
+    if not keep_rows:
+        return df.iloc[0:0]
+
+    records = []
+    for row in keep_rows:
+        minutes = minutes_lookup[(row["Team"], row["Player"])]
+        rec = {c: row[c] for c in df.columns}
+        for c in stat_cols:
+            rec[c] = round(row[c] / minutes * 90, 2)
+        records.append(rec)
+    return pd.DataFrame(records, columns=df.columns)
+
+
 def _narrow_selectbox(label, options, key=None, index=0, width=2, total=7, format_func=None):
     """
     Draws st.selectbox() inside a narrow left-hand column instead of
@@ -1309,6 +1368,180 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
         key=f"pairpassmap_dl_{passer}_{receiver}_{match_id}",
     )
     plt.close(fig)
+
+
+# Explicit list (rather than reaching into history_db._PER90_STATS, a
+# private constant) of which General Stats columns get a Per 90 rate on
+# the league-wide Player Stats tab - deliberately excludes Age/Appearances/
+# Starts/Minutes (never a "per 90" quantity) and PK/PK Attempted/Sprints/
+# Yellow Cards/Red Cards (plain counts nobody expresses as a per-90 rate
+# on this project's own Team Page either) - same set history_db.py's own
+# fetch_team_season_scoring_stats() already treats as "per 90-worthy".
+_PLAYER_STATS_GENERAL_PER90_COLS = ["Goals", "Assists", "Shots", "NPxG", "xA", "SCA"]
+
+_PLAYER_STATS_ROWS_PER_PAGE = 30
+
+
+def _render_player_stats_table(key, title, df, per90_cols):
+    """
+    One table on the Player Stats tab (General Stats/Possession/Passing/
+    Defensive Actions/Defensive Action Locations) - shared rendering for
+    all 5: a subheader + Per 90 toggle on one row, a 30-row cap with a
+    "Show More" button beneath (adds _PLAYER_STATS_ROWS_PER_PAGE more rows
+    per click - a plain session_state counter keyed to `key`, so each of
+    the 5 tables expands independently), and the table itself.
+
+    df must already carry the columns to show in Totals view (Team right
+    after Player, per _fetch_league_season_table()'s own convention);
+    per90_cols is the exact list of columns _convert_to_per90_league()
+    should convert when the toggle is on - the 4 simple category tables
+    pass every stat column they have, General Stats passes just
+    _PLAYER_STATS_GENERAL_PER90_COLS (see that constant's own comment).
+    """
+    header_col, toggle_col = st.columns([5, 1])
+    with header_col:
+        st.subheader(title)
+    with toggle_col:
+        show_per90 = st.toggle(
+            "Per 90", key=f"player_stats_per90_{key}",
+            help=f"Converts to (stat / Minutes) x 90 rates, limited to players with at least "
+                 f"{int(_PLAYER_STATS_MIN_MINUTES_FRACTION * 100)}% of their own club's available "
+                 f"minutes this season.",
+        )
+    # df has already been converted to Per 90 (and minimum-minutes-filtered)
+    # by the caller if the toggle is on - see _render_player_stats_tab()'s
+    # _totals_or_per90() closure - so this function only draws the toggle
+    # widget itself (above) and the caption/empty-state that go with it.
+    if show_per90:
+        st.caption(
+            f"Only players with at least {int(_PLAYER_STATS_MIN_MINUTES_FRACTION * 100)}% of their "
+            "own club's available minutes this season are shown."
+        )
+        if df.empty:
+            st.info("No players meet the minimum-minutes threshold for this league/season.")
+            return
+    elif df.empty:
+        st.info("No data saved yet for this league/season.")
+        return
+
+    rows_key = f"{key}_rows_shown"
+    rows_shown = st.session_state.get(rows_key, _PLAYER_STATS_ROWS_PER_PAGE)
+    display_df = df.head(rows_shown).reset_index(drop=True)
+    st.dataframe(display_df, use_container_width=False, hide_index=True,
+                 height=_no_scroll_height(display_df))
+    if rows_shown < len(df):
+        if st.button(f"Show More ({rows_shown} of {len(df)})", key=f"{key}_show_more"):
+            st.session_state[rows_key] = rows_shown + _PLAYER_STATS_ROWS_PER_PAGE
+            st.rerun()
+
+
+def _render_player_stats_tab(db):
+    """
+    League-wide "Player Stats" tab - every one of the Team Page's own 5
+    season-cumulative tables (General Stats/Possession/Passing/Defensive
+    Actions/Defensive Action Locations), but covering every team in a
+    chosen League+Season at once instead of just one club, so it works as
+    a real league-leaders board. Built on top of history_db.fetch_league_
+    season_*() (see those functions' own docstrings) - each one already
+    loops over every team, drops their 'Team Total' rows, and tags every
+    row with which club it's from.
+
+    General Stats here deliberately shows ONLY the Playing Time (Age/
+    Appearances/Starts/Minutes) and Totals columns, not the baked-in Per
+    90 columns fetch_team_season_scoring_stats() also computes - per
+    request, this table instead gets the exact same "Per 90" TOGGLE the
+    other 4 tables already have, rather than showing both totals and per-
+    90 numbers side by side permanently.
+
+    Minutes for the Per 90 toggle's minimum-minutes-played filter (see
+    _convert_to_per90_league()) always come from THIS SAME League Stats
+    fetch (General Stats' own 'Minutes' column) - built once here into a
+    (Team, Player) -> Minutes dict and reused across all 5 tables, exactly
+    mirroring the Team Page's own "compute Minutes once, reuse everywhere"
+    pattern (see _render_team_page()'s minutes_by_player dict).
+    """
+    available_leagues = hdb.fetch_available_competitions(db)
+    available_seasons = hdb.fetch_available_seasons(db)
+    if not available_leagues or not available_seasons:
+        st.info("No matches saved yet - publish at least one match with 'Save to Database' first.")
+        return
+
+    # Plain st.selectbox (not _narrow_selectbox, which nests its OWN
+    # st.columns([width, total-width]) internally - doing that a second
+    # time inside col1/col2 below would hand it a 0-width remainder column,
+    # which st.columns() rejects) - each dropdown is already narrowed just
+    # by sitting in a half-width column, side by side rather than stacked.
+    col1, col2, _spacer = st.columns([1, 1, 2])
+    with col1:
+        league = st.selectbox("League", available_leagues, key="player_stats_league")
+    with col2:
+        season = st.selectbox("Season", available_seasons, key="player_stats_season")
+
+    general_stats = hdb.fetch_league_season_scoring_stats(db, season, competition=league)
+    if general_stats.empty:
+        st.info(f"No player stats saved yet for {league} in {season}.")
+        return
+
+    # Drop the baked-in '... (Per 90)' columns - see this function's own
+    # docstring for why General Stats gets the shared toggle instead.
+    general_base_cols = [c for c in general_stats.columns if not c.endswith(" (Per 90)")]
+    general_stats = general_stats[general_base_cols]
+
+    team_available_minutes = {
+        team: matches * 90 for team, matches in hdb.fetch_team_match_counts(db, season, competition=league).items()
+    }
+    minutes_lookup = {
+        (row.Team, row.Player): row.Minutes for row in general_stats.itertuples()
+    }
+
+    def _totals_or_per90(df, per90_cols, key):
+        show_per90 = st.session_state.get(f"player_stats_per90_{key}", False)
+        if not show_per90:
+            return df
+        return _convert_to_per90_league(df, minutes_lookup, team_available_minutes, per90_cols)
+
+    st.markdown("<div style='height:0.5em;'></div>", unsafe_allow_html=True)
+    _render_player_stats_table(
+        "player_stats_general", "General Stats",
+        _totals_or_per90(general_stats, _PLAYER_STATS_GENERAL_PER90_COLS, "player_stats_general"),
+        _PLAYER_STATS_GENERAL_PER90_COLS,
+    )
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    possession = hdb.fetch_league_season_possession(db, season, competition=league)
+    possession_stat_cols = [c for c in possession.columns if c not in ("Player", "Team")]
+    _render_player_stats_table(
+        "player_stats_possession", "Possession",
+        _totals_or_per90(possession, possession_stat_cols, "player_stats_possession"),
+        possession_stat_cols,
+    )
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    passing = hdb.fetch_league_season_passing(db, season, competition=league)
+    passing_stat_cols = [c for c in passing.columns if c not in ("Player", "Team")]
+    _render_player_stats_table(
+        "player_stats_passing", "Passing",
+        _totals_or_per90(passing, passing_stat_cols, "player_stats_passing"),
+        passing_stat_cols,
+    )
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    defensive_actions = hdb.fetch_league_season_defensive_actions(db, season, competition=league)
+    defensive_actions_stat_cols = [c for c in defensive_actions.columns if c not in ("Player", "Team")]
+    _render_player_stats_table(
+        "player_stats_defensive_actions", "Defensive Actions",
+        _totals_or_per90(defensive_actions, defensive_actions_stat_cols, "player_stats_defensive_actions"),
+        defensive_actions_stat_cols,
+    )
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    defensive_locations = hdb.fetch_league_season_defensive_locations(db, season, competition=league)
+    defensive_locations_stat_cols = [c for c in defensive_locations.columns if c not in ("Player", "Team")]
+    _render_player_stats_table(
+        "player_stats_defensive_locations", "Defensive Action Locations",
+        _totals_or_per90(defensive_locations, defensive_locations_stat_cols, "player_stats_defensive_locations"),
+        defensive_locations_stat_cols,
+    )
 
 
 def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
@@ -1932,6 +2165,7 @@ _DASH_TAB_PARAM = "dash_tab"
 _DASH_TABS = [
     ("league_overview", "League Overview"),
     ("fixtures", "Fixtures"),
+    ("player_stats", "Player Stats"),
     ("team", "Team Trends"),
     ("player", "Player Trends"),
     ("shots", "Shots"),
@@ -2230,6 +2464,9 @@ else:
             else:
                 _render_fixtures_like_table(scoped)
                 st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
+
+    elif _active_tab == "player_stats":
+        _render_player_stats_tab(db)
 
     elif _active_tab == "team":
         matches = hdb.fetch_matches(db)
