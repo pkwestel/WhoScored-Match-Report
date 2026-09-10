@@ -80,6 +80,7 @@ re-ran a report) overwrites rather than duplicates.
 import json
 import math
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -1139,11 +1140,25 @@ def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: l
     Returns {'home': DataFrame, 'away': DataFrame} - either can be empty if
     that team has no saved rows for these namespaces yet at all (e.g. an
     older match saved before this category existed).
+
+    Every table returned here also gets a 'Position' column (GK/DEF/MID/
+    FWD) inserted right after 'Player', sourced from the 'fm_position'
+    namespace (fotmob_report.extract_player_positions()) via
+    _fetch_position_map() below - kept as a separate lookup rather than
+    folded into the namespaces/columns handling above because Position is
+    a text label ('MID'), not a numeric stat, and would break the
+    pd.to_numeric/round/astype(int) handling below. Shows '-' for the
+    Team Total row (a position doesn't apply to a team-wide sum) and for
+    any player missing from the fm_position namespace (an older match
+    saved before it existed) - same "don't fabricate missing data"
+    convention as every other column here.
     """
     df = _fetch_player_namespaces(db, match_id, namespaces)
     if df.empty:
-        empty = pd.DataFrame(columns=["Player"] + columns)
+        empty = pd.DataFrame(columns=["Player", "Position"] + columns)
         return {"home": empty, "away": empty}
+
+    position_map = _fetch_position_map(db, match_id)
 
     missing_cols = [c for c in columns if c not in df.columns]
     present_cols = [c for c in columns if c in df.columns]
@@ -1167,11 +1182,32 @@ def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: l
         for c in missing_cols:
             sub[c] = "-"
         sub = sub[["Player"] + columns]
+        sub.insert(1, "Position", [position_map.get((team_name, p), "-") for p in sub["Player"]])
         total = {c: (sub[c].sum() if c in present_cols else "-") for c in columns}
         total["Player"] = "Team Total"
-        return pd.concat([sub, pd.DataFrame([total])], ignore_index=True)
+        total["Position"] = "-"
+        total_df = pd.DataFrame([total])[sub.columns]
+        return pd.concat([sub, total_df], ignore_index=True)
 
     return {"home": _one(home_team), "away": _one(away_team)}
+
+
+def _fetch_position_map(db: DB, match_id) -> dict:
+    """
+    Every player's broad GK/DEF/MID/FWD group for this match, keyed by
+    (Team, Player) - sourced from the 'fm_position' namespace (fotmob_
+    report.extract_player_positions(), merged into player_stats by
+    batch_lib.build_db_stats()). Used by _player_category_table() above to
+    add a 'Position' column to every Player Stats category table on the
+    match detail view. Returns {} for a match saved before the fm_position
+    namespace existed, or if no player on either side had a usable
+    usualPosition value - callers already treat a missing key as '-', so
+    an empty dict just means every player on this table shows '-'.
+    """
+    df = _fetch_player_namespaces(db, match_id, ["fm_position"])
+    if df.empty or "Position" not in df.columns:
+        return {}
+    return {(row["Team"], row["Player"]): row["Position"] for _, row in df.iterrows()}
 
 
 # Column order for each Player Stats category table - see the docstrings on
@@ -2140,6 +2176,12 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     did while playing for THIS team - a mid-season transfer's stats at
     their previous club aren't included.
 
+    Also carries a 'Position' column (GK/DEF/MID/FWD), inserted right
+    after 'Player' - same season-wide mode-of-per-match-readings treatment
+    as _fetch_team_season_category_table()'s own Position column (see
+    _season_mode_position()); '-' for the Team Total row and for any
+    player with no fm_position reading at all this season.
+
     Three column GROUPS, per request - purely a display concern (this
     function just returns one flat DataFrame; dashboard_app._render_
     grouped_stats_table() is what actually draws the merged group-header
@@ -2211,7 +2253,7 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     """
     sum_cols = _SCORING_STATS_COLUMNS + _CARD_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
     out_cols = (
-        ["Player", "Age", "Appearances", "Starts"]
+        ["Player", "Position", "Age", "Appearances", "Starts"]
         + ["Minutes" if c == "Minutes Played" else c for c in sum_cols]
         + [f"{stat} (Per 90)" for stat in _PER90_STATS]
     )
@@ -2231,10 +2273,10 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
 
-    sums, appearances, starts, ages = {}, {}, {}, {}
+    sums, appearances, starts, ages, positions = {}, {}, {}, {}, {}
     for match_id in team_matches["match_id"]:
         df = _fetch_player_namespaces(
-            db, match_id, ["fm_scoring", "ws_passing", "fm_lineup", "fm_cards"]
+            db, match_id, ["fm_scoring", "ws_passing", "fm_lineup", "fm_cards", "fm_position"]
         )
         if df.empty:
             continue
@@ -2261,6 +2303,10 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
                 if pd.notna(age_val):
                     ages[player] = int(age_val)
 
+            pos = r.get("Position")
+            if pos:
+                positions.setdefault(player, []).append(pos)
+
     if not sums:
         return pd.DataFrame(columns=out_cols)
 
@@ -2268,6 +2314,7 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     for player, totals in sums.items():
         rec = {
             "Player": player,
+            "Position": _season_mode_position(positions.get(player, [])),
             "Age": ages.get(player, "-"),
             "Appearances": appearances.get(player, 0),
             "Starts": starts.get(player, 0),
@@ -2284,9 +2331,9 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
            .sort_values("Minutes", ascending=False)
            .reset_index(drop=True))
 
-    team_total = {"Player": "Team Total", "Age": "-"}
+    team_total = {"Player": "Team Total", "Position": "-", "Age": "-"}
     for c in out_cols:
-        if c in ("Player", "Age") or c.endswith("(Per 90)"):
+        if c in ("Player", "Position", "Age") or c.endswith("(Per 90)"):
             continue
         s = out[c].sum()
         team_total[c] = round(s, 2) if c in _DECIMAL_STAT_COLUMNS else int(round(s))
@@ -2555,6 +2602,26 @@ def fetch_team_season_plus_minus(db: DB, team, season, competition=None) -> pd.D
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
+def _season_mode_position(positions: list) -> str:
+    """
+    Most-common broad Position (GK/DEF/MID/FWD) across every match a
+    player's fm_position reading was seen in this season - used by
+    _fetch_team_season_category_table() and fetch_team_season_scoring_
+    stats() below to reduce a whole season's worth of per-match Position
+    readings down to one label per player. A player's usualPosition is a
+    static FotMob attribute that only very rarely differs match to match
+    (a squad player deployed slightly differently isn't reflected here at
+    all - see extract_player_positions()'s own docstring), so mode (not
+    "most recent" or "first seen") is the least surprising tie-breaker for
+    the rare case it does vary. Returns '-' for a player with no fm_position
+    reading in any match this season (an older match saved before that
+    namespace existed, or every match this player featured in lacked it).
+    """
+    if not positions:
+        return "-"
+    return Counter(positions).most_common(1)[0][0]
+
+
 def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, columns: list,
                                         competition=None) -> pd.DataFrame:
     """
@@ -2591,8 +2658,13 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
     competition: optional matches.competition filter - see
     fetch_team_season_scoring_stats()'s own docstring for the exact same
     convention (None includes every competition together).
+
+    Also carries a 'Position' column (GK/DEF/MID/FWD), inserted right
+    after 'Player' - the season-wide mode of that player's per-match
+    fm_position readings (see _season_mode_position()), '-' for the Team
+    Total row and for any player with no reading at all this season.
     """
-    out_cols = ["Player"] + columns
+    out_cols = ["Player", "Position"] + columns
 
     matches = fetch_matches(db)
     if matches.empty:
@@ -2607,10 +2679,16 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
         team_matches = team_matches[team_matches["competition"] == competition]
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
+    # Chronological order - purely so _season_mode_position()'s tie-break
+    # (first-seen wins among equally-common labels) lands on the SAME
+    # reading fetch_team_season_scoring_stats() would pick for the same
+    # player/season, same reasoning as that function's own "earliest match"
+    # ordering for Age; the sums themselves are order-independent.
+    team_matches = team_matches.sort_values("match_date")
 
-    sums = {}
+    sums, positions = {}, {}
     for match_id in team_matches["match_id"]:
-        df = _fetch_player_namespaces(db, match_id, namespaces)
+        df = _fetch_player_namespaces(db, match_id, namespaces + ["fm_position"])
         if df.empty:
             continue
         sub = df[df["Team"] == team]
@@ -2623,13 +2701,16 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
             for c in present_cols:
                 v = pd.to_numeric(r[c], errors="coerce")
                 row_totals[c] += 0.0 if pd.isna(v) else float(v)
+            pos = r.get("Position")
+            if pos:
+                positions.setdefault(player, []).append(pos)
 
     if not sums:
         return pd.DataFrame(columns=out_cols)
 
     records = []
     for player, totals in sums.items():
-        rec = {"Player": player}
+        rec = {"Player": player, "Position": _season_mode_position(positions.get(player, []))}
         for c in columns:
             rec[c] = int(round(totals[c]))
         records.append(rec)
@@ -2638,7 +2719,7 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
            .sort_values(columns[0], ascending=False)
            .reset_index(drop=True))
 
-    team_total = {"Player": "Team Total"}
+    team_total = {"Player": "Team Total", "Position": "-"}
     for c in columns:
         team_total[c] = int(round(out[c].sum()))
 
@@ -2714,8 +2795,10 @@ def _fetch_league_season_table(db: DB, season, competition, per_team_fetcher, so
     that's played at least one match in this (season, competition) scope,
     drops each team's own 'Team Total' row (not meaningful once every
     team's players are mixed into one cross-team table), tags every
-    remaining row with a 'Team' column (inserted right after 'Player', so
-    a player's own club is always visible next to their name), and
+    remaining row with a 'Team' column (inserted right after 'Player' -
+    or right after 'Position' when the per-team fetcher already carries
+    one, so a player's own club is always visible next to their name and
+    Position stays the very first thing after the name itself), and
     concatenates the lot into one DataFrame sorted by `sort_col`
     descending - the same "most involved player first" column each
     per-team function already sorts by on its own (Minutes for General
@@ -2735,7 +2818,13 @@ def _fetch_league_season_table(db: DB, season, competition, per_team_fetcher, so
         df = df[df["Player"] != "Team Total"].copy()
         if df.empty:
             continue
-        df.insert(1, "Team", team)
+        # Right after 'Position' when present (every fetch_team_season_*()
+        # function now carries one - see _season_mode_position()), else
+        # right after 'Player' - keeps the column order 'Player, Position,
+        # Team, ...' rather than letting Team land in between Player and
+        # Position.
+        insert_at = 2 if "Position" in df.columns else 1
+        df.insert(insert_at, "Team", team)
         frames.append(df)
     if not frames:
         return pd.DataFrame()

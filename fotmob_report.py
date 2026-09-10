@@ -1265,6 +1265,62 @@ def extract_player_npxg(match_json):
     return pd.DataFrame(rows, columns=columns)
 
 
+_USUAL_POSITION_LABELS = {0: 'GK', 1: 'DEF', 2: 'MID', 3: 'FWD'}
+
+
+def extract_player_positions(match_json):
+    """
+    Broad position group (Goalkeeper/Defender/Midfielder/Forward) for
+    every player who actually featured in this match - read from
+    content.playerStats.<playerId>.usualPosition, a small int FotMob's own
+    convention maps 0/1/2/3 to GK/DEF/MID/FWD. CONFIRMED against a real
+    live match_json dump (fotmob_raw_6106264.json) by cross-referencing
+    every starter AND substitute on both full squads (lineup data) against
+    their playerStats usualPosition value: every goalkeeper on both sides
+    (confirmed via the sibling 'isGoalkeeper' flag) has usualPosition == 0,
+    every real-life defender/full-back has 1, every real-life midfielder
+    has 2, every real-life forward/winger has 3 - checked across 20+
+    players total, no exceptions found.
+
+    Same 'didn't play' skip as extract_player_npxg()/extract_player_
+    sprints() (an empty 'stats' list means this player never featured) -
+    usualPosition is a static player attribute, not a match event, so
+    without this skip an unused substitute would show up as a brand-new
+    row carrying only a Position and nothing else, which every other per-
+    match category table in this project deliberately avoids (a player
+    only ever appears in a match report alongside real match stats).
+
+    Returns ['Team', 'Player', 'Position'] - a usualPosition value outside
+    0-3 (never seen in a real sample, but not impossible on a future API
+    change) is skipped rather than guessed at. Returns an empty DataFrame
+    if content.playerStats isn't present at all.
+    """
+    columns = ['Team', 'Player', 'Position']
+    player_stats = match_json.get('playerStats') if isinstance(match_json, dict) else None
+    if not isinstance(player_stats, dict):
+        player_stats = _search_for_key(match_json, {'playerStats'})
+    if not isinstance(player_stats, dict):
+        return pd.DataFrame(columns=columns)
+
+    team_map = extract_team_id_map(match_json)
+    rows = []
+    for pdata in player_stats.values():
+        if not isinstance(pdata, dict):
+            continue
+        if not pdata.get('stats'):
+            continue  # didn't play
+        label = _USUAL_POSITION_LABELS.get(pdata.get('usualPosition'))
+        if label is None:
+            continue
+        team_id = pdata.get('teamId')
+        rows.append({
+            'Team': team_map.get(team_id, pdata.get('teamName') or str(team_id)),
+            'Player': pdata.get('name'),
+            'Position': label,
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def extract_player_sprints(match_json):
     """
     Per-player total number of sprints for this match - FotMob's own figure

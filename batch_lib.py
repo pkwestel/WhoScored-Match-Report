@@ -152,6 +152,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
     player_lineup = fr.extract_player_age_and_start(fm_match_json)
     player_cards = fr.extract_player_cards(fm_match_json)
+    player_positions = fr.extract_player_positions(fm_match_json)
     # FotMob's own per-player Non-Penalty xG figure - computed once here and
     # fed into BOTH compute_shot_breakdowns() (its 'By Player' Total xG
     # column) and compute_player_scoring_stats() (its NPxG column), per
@@ -215,6 +216,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "player_scoring": player_scoring,
         "player_lineup": player_lineup,
         "player_cards": player_cards,
+        "player_positions": player_positions,
         "xg_breakdown": xg_breakdown,
         "shot_breakdowns": shot_breakdowns,
         "plus_minus": plus_minus,
@@ -438,6 +440,21 @@ def build_db_stats(report):
             player_stats.setdefault(key, {})["fm_cards"] = {
                 "Yellow Cards": int(row["Yellow Cards"]), "Red Cards": int(row["Red Cards"])
             }
+
+    # extract_player_positions()'s broad GK/DEF/MID/FWD group for THIS
+    # match - its own 'fm_position' namespace, same content.playerStats
+    # source as fm_scoring/NPxG above. Only players who actually featured
+    # appear here at all (see that function's own docstring on skipping
+    # non-playing squad members) - deliberately NOT setdefault-ing a brand
+    # new player_stats entry for anyone not already keyed by another
+    # namespace, same reasoning. Team names here are FotMob's own, same
+    # _to_ws_name() reconciliation as fm_scoring/fm_lineup/fm_cards above.
+    player_positions = report.get("player_positions")
+    if player_positions is not None and not player_positions.empty:
+        for _, row in player_positions.iterrows():
+            team = _to_ws_name(row["Team"])
+            key = (team, _to_ws_player_name(row["Player"]))
+            player_stats.setdefault(key, {})["fm_position"] = {"Position": row["Position"]}
 
     return team_stats, player_stats
 

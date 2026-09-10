@@ -233,6 +233,64 @@ def _display_team_name(team_name):
     return TEAM_DISPLAY_NAMES.get(team_name, team_name)
 
 
+# Three-letter club codes for the Player Stats tab's 'Team' column (a full
+# name like 'Nottingham Forest' next to every single player row on a
+# league-wide leaderboard takes up a lot of width for not much benefit -
+# same "human-friendly, storage stays untouched" cosmetic-only pattern as
+# TEAM_DISPLAY_NAMES above, just a shorter code instead of a renamed
+# string). Keyed by whatever this app's OWN raw stored team name is
+# (WhoScored's own spelling, confirmed against every match saved so far in
+# this project) - _team_abbreviation() below also checks the cosmetic
+# display name as a second lookup, then falls back to an auto-generated
+# code for any club not yet in this dict, so a brand-new team never shows
+# blank - just add its real entry here once it comes up, same as every
+# other "extend as needed" table in this project (TEAM_NAME_ALIASES,
+# TEAM_DISPLAY_NAMES).
+TEAM_ABBREVIATIONS = {
+    # Premier League
+    "Arsenal": "ARS", "Aston Villa": "AVL", "Bournemouth": "BOU",
+    "AFC Bournemouth": "BOU", "Brentford": "BRE", "Brighton": "BHA",
+    "Chelsea": "CHE", "Crystal Palace": "CRY", "Everton": "EVE",
+    "Fulham": "FUL", "Ipswich": "IPS", "Ipswich Town": "IPS",
+    "Leicester": "LEI", "Leicester City": "LEI", "Liverpool": "LIV",
+    "Man City": "MCI", "Manchester City": "MCI", "Man Utd": "MUN",
+    "Manchester United": "MUN", "Newcastle": "NEW", "Newcastle United": "NEW",
+    "Nottingham Forest": "NFO", "Southampton": "SOU", "Tottenham": "TOT",
+    "Tottenham Hotspur": "TOT", "Spurs": "TOT", "West Ham": "WHU",
+    "West Ham United": "WHU", "Wolves": "WOL", "Wolverhampton Wanderers": "WOL",
+    "Sunderland": "SUN", "Burnley": "BUR", "Leeds": "LEE", "Leeds United": "LEE",
+    "Coventry": "COV", "Hull": "HUL",
+    # Champions League / European clubs seen in this project so far
+    "Barcelona": "BAR", "Feyenoord": "FEY", "Atletico": "ATM",
+    "Atletico Madrid": "ATM", "Sporting": "SCP", "Sporting CP": "SCP",
+    "Galatasaray": "GAL", "Real Madrid": "RMA", "Inter": "INT",
+    "Porto": "POR", "FC Porto": "POR", "Borussia Dortmund": "BVB",
+    "Villarreal": "VIL", "Lille": "LIL", "Real Betis": "BET",
+    "AEK Athens": "AEK", "LASK": "LAS", "Club Brugge": "BRU",
+}
+
+
+def _team_abbreviation(team_name):
+    """
+    3-letter club code for display - see TEAM_ABBREVIATIONS above. Checks
+    the raw stored name first, then the cosmetic _display_team_name()
+    version (covers a dict entry keyed by the FotMob-style name rather
+    than the raw one), then falls back to the first 3 letters of the name
+    (stripped of spaces, uppercased) - a genuinely unknown club still gets
+    a plausible-looking 3-letter code instead of blank/None, and is a
+    1-line fix to add properly once it turns up for real.
+    """
+    if not team_name or (isinstance(team_name, float) and pd.isna(team_name)):
+        return ""
+    if team_name in TEAM_ABBREVIATIONS:
+        return TEAM_ABBREVIATIONS[team_name]
+    display = _display_team_name(team_name)
+    if display in TEAM_ABBREVIATIONS:
+        return TEAM_ABBREVIATIONS[display]
+    letters = "".join(ch for ch in str(team_name) if ch.isalpha())
+    return letters[:3].upper() if letters else str(team_name)[:3].upper()
+
+
 def _team_page_url(team_name):
     """
     Relative '?team=<url-encoded name>' link to a team's Team Page (see
@@ -652,7 +710,7 @@ def _render_general_stats_table(scoring_stats):
     (Appearances/Starts/Minutes), 'Totals' (everything else non-Per-90),
     'Per 90' (every '<Stat> (Per 90)' column).
     """
-    ungrouped = [c for c in ("Player", "Age") if c in scoring_stats.columns]
+    ungrouped = [c for c in ("Player", "Position", "Age") if c in scoring_stats.columns]
     playing_time_cols = [c for c in ("Appearances", "Starts", "Minutes") if c in scoring_stats.columns]
     per90_cols = [c for c in scoring_stats.columns if c.endswith(" (Per 90)")]
     totals_cols = [c for c in scoring_stats.columns if c not in ungrouped + playing_time_cols + per90_cols]
@@ -689,11 +747,13 @@ def _convert_to_per90(df, minutes_by_player):
     Converts a Player + stat-columns season-cumulative table (see
     history_db._fetch_team_season_category_table() - backs the Team Page's
     Possession/Passing/Defensive Actions/Defensive Action Locations tables)
-    into its Per 90 equivalent: every non-Player column becomes
-    (value / that player's season Minutes) * 90, rounded to 2 decimals -
-    the exact same formula, and the same '-' for a player with 0/unknown
-    minutes, as history_db.fetch_team_season_scoring_stats()'s own Per 90
-    columns (see that function's docstring).
+    into its Per 90 equivalent: every non-Player, non-Position column
+    becomes (value / that player's season Minutes) * 90, rounded to 2
+    decimals - the exact same formula, and the same '-' for a player with
+    0/unknown minutes, as history_db.fetch_team_season_scoring_stats()'s
+    own Per 90 columns (see that function's docstring). Position (GK/DEF/
+    MID/FWD, when the table carries one) is a text label, not a stat, so
+    it's left untouched rather than divided like every other column.
 
     minutes_by_player is THAT function's own 'Minutes' column turned into a
     plain Player -> Minutes dict (built once by the caller from the General
@@ -707,11 +767,12 @@ def _convert_to_per90(df, minutes_by_player):
     """
     if df.empty:
         return df
-    stat_cols = [c for c in df.columns if c != "Player"]
+    passthrough_cols = {"Player", "Position"}
+    stat_cols = [c for c in df.columns if c not in passthrough_cols]
     records = []
     for _, row in df.iterrows():
+        rec = {c: row[c] for c in passthrough_cols if c in df.columns}
         minutes = minutes_by_player.get(row["Player"])
-        rec = {"Player": row["Player"]}
         for c in stat_cols:
             rec[c] = round(row[c] / minutes * 90, 2) if minutes and minutes > 0 else "-"
         records.append(rec)
@@ -748,7 +809,7 @@ def _convert_to_per90_league(df, minutes_lookup, team_available_minutes, stat_co
     General Stats table also carries Age/Appearances/Starts/Minutes, which
     should never themselves become a "per 90" rate - so this only ever
     touches the columns the caller explicitly names, leaving every other
-    column (including Team/Player) untouched.
+    column (including Team/Player/Position) untouched.
 
     Returns a DataFrame with the exact same columns as df, just fewer
     rows (the filtered-out players) and stat_cols converted - never '-'
@@ -1427,6 +1488,11 @@ def _render_player_stats_table(key, title, df, per90_cols):
     rows_key = f"{key}_rows_shown"
     rows_shown = st.session_state.get(rows_key, _PLAYER_STATS_ROWS_PER_PAGE)
     display_df = df.head(rows_shown).reset_index(drop=True)
+    # 3-letter club code for display only (_team_abbreviation()) - applied
+    # here, after pagination/sorting/per-90 filtering are all already done,
+    # so it never affects which rows are shown or how they're ordered.
+    if "Team" in display_df.columns:
+        display_df["Team"] = display_df["Team"].map(_team_abbreviation)
     st.dataframe(display_df, use_container_width=False, hide_index=True,
                  height=_no_scroll_height(display_df))
     if rows_shown < len(df):
@@ -1509,7 +1575,7 @@ def _render_player_stats_tab(db):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     possession = hdb.fetch_league_season_possession(db, season, competition=league)
-    possession_stat_cols = [c for c in possession.columns if c not in ("Player", "Team")]
+    possession_stat_cols = [c for c in possession.columns if c not in ("Player", "Team", "Position")]
     _render_player_stats_table(
         "player_stats_possession", "Possession",
         _totals_or_per90(possession, possession_stat_cols, "player_stats_possession"),
@@ -1518,7 +1584,7 @@ def _render_player_stats_tab(db):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     passing = hdb.fetch_league_season_passing(db, season, competition=league)
-    passing_stat_cols = [c for c in passing.columns if c not in ("Player", "Team")]
+    passing_stat_cols = [c for c in passing.columns if c not in ("Player", "Team", "Position")]
     _render_player_stats_table(
         "player_stats_passing", "Passing",
         _totals_or_per90(passing, passing_stat_cols, "player_stats_passing"),
@@ -1527,7 +1593,7 @@ def _render_player_stats_tab(db):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     defensive_actions = hdb.fetch_league_season_defensive_actions(db, season, competition=league)
-    defensive_actions_stat_cols = [c for c in defensive_actions.columns if c not in ("Player", "Team")]
+    defensive_actions_stat_cols = [c for c in defensive_actions.columns if c not in ("Player", "Team", "Position")]
     _render_player_stats_table(
         "player_stats_defensive_actions", "Defensive Actions",
         _totals_or_per90(defensive_actions, defensive_actions_stat_cols, "player_stats_defensive_actions"),
@@ -1536,7 +1602,7 @@ def _render_player_stats_tab(db):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     defensive_locations = hdb.fetch_league_season_defensive_locations(db, season, competition=league)
-    defensive_locations_stat_cols = [c for c in defensive_locations.columns if c not in ("Player", "Team")]
+    defensive_locations_stat_cols = [c for c in defensive_locations.columns if c not in ("Player", "Team", "Position")]
     _render_player_stats_table(
         "player_stats_defensive_locations", "Defensive Action Locations",
         _totals_or_per90(defensive_locations, defensive_locations_stat_cols, "player_stats_defensive_locations"),
