@@ -82,6 +82,12 @@ TEAM_NAME_ALIASES = {
     'Luton Town': ['Luton'],
     'Hull City': ['Hull'],
     'Coventry City': ['Coventry'],
+    # European competition clubs - added once a real mismatch actually
+    # turned up (Champions League matches split into two team_match_stats
+    # rows - see the Sep 2026 Atletico/Sporting League Table bug), same as
+    # every entry above. Add more here as new clashes surface.
+    'Atletico Madrid': ['Atletico', 'Atlético Madrid', 'Atleti', 'Atléti'],
+    'Sporting CP': ['Sporting', 'Sporting Lisbon', 'Sporting Clube de Portugal'],
 }
 
 
@@ -122,6 +128,49 @@ def canonical_team_name(name):
     """
     norm = _normalize_name(name)
     return _TEAM_CANONICAL_LOOKUP.get(norm, norm)
+
+
+# Same idea as TEAM_NAME_ALIASES, but for PLAYER names - WhoScored and
+# FotMob sometimes transliterate a name from a non-Latin script (Cyrillic,
+# Arabic, etc.) slightly differently. Confirmed real case: Everton's
+# Vitalii Mykolenko - WhoScored spells it 'Vitalii Mykolenko', FotMob spells
+# it 'Vitaliy Mykolenko'. _normalize_name() alone can't fix this (both
+# spellings are already plain ASCII, just a different letter), so this
+# needs an explicit alias exactly like TEAM_NAME_ALIASES - add more entries
+# here (keyed by WhoScored's own spelling, the project's canonical player
+# name - see batch_lib.build_db_stats()'s own docstring on why) as new
+# mismatches turn up. Every FotMob-sourced player_match_stats row
+# (fm_scoring/fm_plus_minus/fm_lineup/fm_cards/fm_line_breaking_passes) is
+# reconciled through this before being saved - without it, the same real
+# player ends up split across two different-spelled DB rows: one holding
+# their WhoScored-sourced stats (Possession/Passing/Defensive), the other
+# holding their FotMob-sourced stats (Minutes Played/Goals/NPxG/etc) - which
+# is exactly what caused Mykolenko to show 0 Minutes Played everywhere:
+# his real 90-minute figure was saved under the OTHER spelling entirely.
+PLAYER_NAME_ALIASES = {
+    'Vitalii Mykolenko': ['Vitaliy Mykolenko'],
+}
+
+
+_PLAYER_CANONICAL_LOOKUP = {}
+for _canonical, _aliases in PLAYER_NAME_ALIASES.items():
+    _canon_norm = _normalize_name(_canonical)
+    _PLAYER_CANONICAL_LOOKUP[_canon_norm] = _canon_norm
+    for _alias in _aliases:
+        _PLAYER_CANONICAL_LOOKUP[_normalize_name(_alias)] = _canon_norm
+
+
+def canonical_player_name(name):
+    """
+    Canonicalize a player name for cross-source matching - same convention
+    as canonical_team_name() above, just backed by PLAYER_NAME_ALIASES
+    instead of TEAM_NAME_ALIASES. Used by batch_lib.build_db_stats() to
+    reconcile FotMob's per-player namespaces onto whichever WhoScored
+    player name they belong to before saving, so one real player's stats
+    from both sources land under a single DB row instead of two.
+    """
+    norm = _normalize_name(name)
+    return _PLAYER_CANONICAL_LOOKUP.get(norm, norm)
 
 
 def compute_combined_shots(sca_out, fm_shots_df):
