@@ -88,6 +88,7 @@ TEAM_NAME_ALIASES = {
     # every entry above. Add more here as new clashes surface.
     'Atletico Madrid': ['Atletico', 'Atlético Madrid', 'Atleti', 'Atléti'],
     'Sporting CP': ['Sporting', 'Sporting Lisbon', 'Sporting Clube de Portugal'],
+    'FC Porto': ['Porto'],
 }
 
 
