@@ -991,16 +991,23 @@ def _render_pass_map(db, matches, mode):
 
 def _team_filter_picker(df, team_col, key):
     """
-    Shared 'All teams' + team dropdown for the season tabs below. A team
-    filter matters here specifically BECAUSE these tabs aggregate across
-    every published match - a player who's transferred mid-season would
+    Required Team dropdown for the season Pass Map/Passes Received/Touch
+    Map tabs below - no 'All teams' option. A specific team matters here
+    specifically BECAUSE these tabs aggregate across every published match
+    in one competition - a player who's transferred mid-season would
     otherwise have passes/touches from two different teams mixed into one
-    map with nothing to tell them apart.
+    map with nothing to tell them apart, so picking exactly one team is
+    required rather than optional.
+
+    df is always already scoped to the currently-selected League before
+    this is called (see _render_season_pass_map()/_render_season_touchmap()),
+    so `teams` here only ever lists teams that actually played in THAT
+    competition - switching League to Champions League, say, only offers
+    the clubs that played in the Champions League, not every team in the
+    database.
     """
     teams = sorted(df[team_col].dropna().unique())
-    choice = _narrow_selectbox("Team (optional filter)", ["All teams"] + teams, key=key,
-                                format_func=lambda t: t if t == "All teams" else _display_team_name(t))
-    return None if choice == "All teams" else choice
+    return _narrow_selectbox("Team", teams, key=key, format_func=_display_team_name)
 
 
 def _current_season_and_league(db, match_ids):
@@ -1085,7 +1092,7 @@ def _render_season_pass_map(db, mode):
     player_col = "passer" if mode == "passer" else "receiver"
     team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}_{league}")
 
-    scoped = all_passes if team_filter is None else all_passes[all_passes["team"] == team_filter]
+    scoped = all_passes[all_passes["team"] == team_filter]
     players = sorted(scoped[player_col].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
@@ -1141,15 +1148,10 @@ def _render_season_pass_map(db, mode):
         ]
         title_suffix = "All Passes Received"
 
-    # team_filter is the team this player's data was scoped to, if the
-    # picker above was used - otherwise (a player who's played for more
-    # than one team this season, "All teams" selected) fall back to
-    # whichever team shows up most often in their passes, rather than
-    # leaving the title's '({team})' blank.
-    player_team = _display_team_name(team_filter or (
-        player_passes["team"].mode().iloc[0] if "team" in player_passes.columns and not player_passes.empty
-        else None
-    ))
+    # team_filter is always a real, required team now (see
+    # _team_filter_picker()'s own docstring) - no "All teams"/fallback
+    # branch needed here any more.
+    player_team = _display_team_name(team_filter)
 
     # Line 2 of the title: "{current season} {league}" (e.g. "2026-27
     # Premier League") derived from these actual matches - see
@@ -1218,7 +1220,7 @@ def _render_season_touchmap(db):
         return
 
     team_filter = _team_filter_picker(all_touches, "team", key=f"season_touchmap_team_{league}")
-    scoped = all_touches if team_filter is None else all_touches[all_touches["team"] == team_filter]
+    scoped = all_touches[all_touches["team"] == team_filter]
     players = sorted(scoped["player"].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
@@ -1238,14 +1240,10 @@ def _render_season_touchmap(db):
     st.metric("Matches", n_matches)
     stat_items = [(f"{len(player_touches)} Touches", TITLE_COLOR), (f"{n_matches} Matches", TITLE_COLOR)]
 
-    # team_filter is the team this player's data was scoped to, if the
-    # picker above was used - otherwise (a player who's played for more
-    # than one team this season, "All teams" selected) fall back to
-    # whichever team shows up most often in their touches.
-    player_team = _display_team_name(team_filter or (
-        player_touches["team"].mode().iloc[0] if "team" in player_touches.columns and not player_touches.empty
-        else None
-    ))
+    # team_filter is always a real, required team now (see
+    # _team_filter_picker()'s own docstring) - no "All teams"/fallback
+    # branch needed here any more.
+    player_team = _display_team_name(team_filter)
 
     # Line 2 of the title: "{current season} {league}" - see
     # _current_season_and_league()'s own docstring; falls back to the
