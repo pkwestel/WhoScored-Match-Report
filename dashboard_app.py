@@ -1044,34 +1044,66 @@ def _current_season_and_league(db, match_ids):
 def _render_season_pass_map(db, mode):
     """
     Same chart as _render_pass_map() above, but aggregated across EVERY
-    published match instead of one - every pass a player has ever attempted
-    (mode='passer') or received (mode='receiver') in the whole database,
-    plotted on one pitch, so the shape reflects a season's worth of games
-    rather than a single one. Reads from the exact same 'passes' table -
-    the only difference is fetch_passes() is called with match_id=None.
+    published match in ONE selected competition instead of a single match -
+    every pass a player has ever attempted (mode='passer') or received
+    (mode='receiver') in that league/cup, plotted on one pitch, so the
+    shape reflects a season's worth of games in one competition rather
+    than a single match. Reads from the exact same 'passes' table - the
+    difference from _render_pass_map() is fetch_passes() being called with
+    match_id=None (every match), then narrowed down to the chosen League by
+    matching against matches.competition (same "one competition at a time"
+    scoping fetch_team_passing_pairs()/the League Table/Team Stats tables
+    already give a competition= filter for) - so a team/player who's played
+    in more than one competition this season (e.g. Premier League +
+    Champions League) never gets both mixed into one map; this Pass Map
+    requires picking exactly one, just like Pass Pairs' own League dropdown.
+
+    League is threaded into every downstream widget key (Team, Player)
+    below so switching it always hands those widgets a brand-new key with
+    no stale prior selection, instead of Streamlit erroring on a team/
+    player that doesn't exist in the newly-selected competition - same
+    convention _render_pairs_tab() already uses for its own League -> Team
+    -> Player cascade.
     """
     all_passes = hdb.fetch_passes(db)
     if all_passes.empty:
         st.info("No pass data saved yet - publish at least one match with 'Save to Database' first.")
         return
 
+    available_leagues = hdb.fetch_available_competitions(db)
+    if not available_leagues:
+        st.info("No matches saved yet - publish at least one match with 'Save to Database' first.")
+        return
+    league = _narrow_selectbox("League", available_leagues, key=f"season_passmap_league_{mode}")
+    matches = hdb.fetch_matches(db)
+    keep_ids = set(matches.loc[matches["competition"] == league, "match_id"].astype(str)) if not matches.empty else set()
+    all_passes = all_passes[all_passes["match_id"].astype(str).isin(keep_ids)]
+    if all_passes.empty:
+        st.info(f"No pass data saved yet for {league}.")
+        return
+
     player_col = "passer" if mode == "passer" else "receiver"
-    team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}")
+    team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}_{league}")
 
     scoped = all_passes if team_filter is None else all_passes[all_passes["team"] == team_filter]
     players = sorted(scoped[player_col].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    player = _narrow_selectbox("Player", players, key=f"season_passmap_player_{mode}")
+    player = _narrow_selectbox("Player", players, key=f"season_passmap_player_{mode}_{league}_{team_filter}")
 
     if mode == "passer":
         player_passes = hdb.fetch_passes(db, passer=player, team=team_filter)
     else:
         player_passes = hdb.fetch_passes(db, receiver=player, team=team_filter, completed_only=True)
+    # fetch_passes() above pulls every saved match for this player/team -
+    # re-apply the same League scope as `all_passes` so a player who's
+    # played in more than one competition doesn't have the OTHER one's
+    # passes sneak back in here.
+    player_passes = player_passes[player_passes["match_id"].astype(str).isin(keep_ids)]
 
     if player_passes.empty:
-        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player}.")
+        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player} in {league}.")
         return
 
     player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
@@ -1150,12 +1182,20 @@ def _render_season_pass_map(db, mode):
 
 def _render_season_touchmap(db):
     """
-    Touch map aggregated across every published match - every touch a
-    player's had, any event type (see whoscored_report.compute_all_touches()),
-    plotted on one pitch, shaded with a smoothed density where there's
-    enough data to support one. Only matches saved AFTER the touches table
-    existed have any rows here (see history_db.py's schema docstring), so
-    older published matches won't contribute.
+    Touch map aggregated across every published match in ONE selected
+    competition - every touch a player's had, any event type (see
+    whoscored_report.compute_all_touches()), plotted on one pitch, shaded
+    with a smoothed density where there's enough data to support one. Only
+    matches saved AFTER the touches table existed have any rows here (see
+    history_db.py's schema docstring), so older published matches won't
+    contribute.
+
+    Same League scoping as _render_season_pass_map() above (matching
+    against matches.competition) - see that function's own docstring for
+    why this matters (a team/player who's played in more than one
+    competition this season shouldn't have both mixed into one map) and
+    for the "thread League into every downstream widget key" convention
+    this mirrors.
     """
     all_touches = hdb.fetch_touches(db)
     if all_touches.empty:
@@ -1165,17 +1205,33 @@ def _render_season_touchmap(db):
         )
         return
 
-    team_filter = _team_filter_picker(all_touches, "team", key="season_touchmap_team")
+    available_leagues = hdb.fetch_available_competitions(db)
+    if not available_leagues:
+        st.info("No matches saved yet - publish at least one match with 'Save to Database' first.")
+        return
+    league = _narrow_selectbox("League", available_leagues, key="season_touchmap_league")
+    matches = hdb.fetch_matches(db)
+    keep_ids = set(matches.loc[matches["competition"] == league, "match_id"].astype(str)) if not matches.empty else set()
+    all_touches = all_touches[all_touches["match_id"].astype(str).isin(keep_ids)]
+    if all_touches.empty:
+        st.info(f"No touch data saved yet for {league}.")
+        return
+
+    team_filter = _team_filter_picker(all_touches, "team", key=f"season_touchmap_team_{league}")
     scoped = all_touches if team_filter is None else all_touches[all_touches["team"] == team_filter]
     players = sorted(scoped["player"].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    player = _narrow_selectbox("Player", players, key="season_touchmap_player")
+    player = _narrow_selectbox("Player", players, key=f"season_touchmap_player_{league}_{team_filter}")
 
     player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
+    # Re-apply the same League scope fetch_touches() above doesn't know
+    # about (it just fetches every saved match for this player/team) - see
+    # _render_season_pass_map()'s own comment on the identical step.
+    player_touches = player_touches[player_touches["match_id"].astype(str).isin(keep_ids)]
     if player_touches.empty:
-        st.info(f"No touches found for {player}.")
+        st.info(f"No touches found for {player} in {league}.")
         return
 
     n_matches = player_touches["match_id"].nunique()
