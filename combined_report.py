@@ -174,6 +174,12 @@ PLAYER_NAME_ALIASES = {
     # match, one holding fm_scoring/fm_position, the other not - the exact
     # same split-row failure mode as the Mykolenko case above.
     'Rahman Dasdamirov': ['Rəhman Daşdəmirov'],
+    # Same match, another split player - WhoScored's own name is the fuller
+    # 'Júnior Almeida' (its player_match_stats row had no fm_scoring/
+    # fm_position at all, confirming it's the WhoScored-sourced row),
+    # FotMob shortens it to just 'Almeida' (confirmed by user as the same
+    # real person).
+    'Júnior Almeida': ['Almeida'],
 }
 
 
