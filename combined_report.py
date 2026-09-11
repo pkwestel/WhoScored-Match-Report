@@ -89,6 +89,18 @@ TEAM_NAME_ALIASES = {
     'Atletico Madrid': ['Atletico', 'Atlético Madrid', 'Atleti', 'Atléti'],
     'Sporting CP': ['Sporting', 'Sporting Lisbon', 'Sporting Clube de Portugal'],
     'FC Porto': ['Porto'],
+    # PSG vs Slovan Bratislava / Stuttgart vs Viking (Sep 2026 Champions
+    # League matches) - WhoScored's short names ('PSG', 'Stuttgart', both
+    # the canonical spelling stored on matches.home_team/away_team) vs
+    # FotMob's fuller ones, confirmed via a live team_match_stats query
+    # showing 3 rows instead of 2 for each match (fm_totals split off
+    # under its own row) - this is what blanked Score/xG on the Fixtures
+    # tab for both matches (fetch_fixtures() only ever looks up the
+    # WhoScored spelling). Viking itself already matched correctly (its
+    # own row wasn't split) - only Stuttgart's mismatch needed fixing for
+    # that match's Score to reappear.
+    'PSG': ['Paris Saint-Germain'],
+    'Stuttgart': ['VfB Stuttgart'],
 }
 
 
@@ -150,6 +162,18 @@ def canonical_team_name(name):
 # his real 90-minute figure was saved under the OTHER spelling entirely.
 PLAYER_NAME_ALIASES = {
     'Vitalii Mykolenko': ['Vitaliy Mykolenko'],
+    # Sabah FK's Rahman Dasdamirov (Man Utd vs Sabah, Sep 2026 Champions
+    # League match) - WhoScored spells it plain-ASCII 'Rahman Dasdamirov',
+    # FotMob keeps the real Azerbaijani diacritics 'Rəhman Daşdəmirov'.
+    # _normalize_name()'s accent-stripping (built on Unicode NFKD
+    # decomposition) can't fix this one the way it fixes e.g. 'é' -> 'e' -
+    # Azerbaijani 'ə' is its own letter, not a decomposable accented 'a'/
+    # 'e', so it survives normalization unchanged and never matches the
+    # plain 'a'/'e' WhoScored used. Confirmed via a live player_match_stats
+    # query showing both spellings saved as two separate rows for this
+    # match, one holding fm_scoring/fm_position, the other not - the exact
+    # same split-row failure mode as the Mykolenko case above.
+    'Rahman Dasdamirov': ['Rəhman Daşdəmirov'],
 }
 
 
