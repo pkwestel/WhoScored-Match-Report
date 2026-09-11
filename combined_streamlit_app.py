@@ -152,6 +152,12 @@ if st.button("Generate Combined Report", type="primary"):
                 player_line_breaking_passes = fr.extract_player_line_breaking_passes(fm_match_json)
                 player_lineup = fr.extract_player_age_and_start(fm_match_json)
                 player_cards = fr.extract_player_cards(fm_match_json)
+                # Broad GK/DEF/MID/FWD group for every player who featured -
+                # its own 'fm_position' namespace once saved (see batch_lib.
+                # build_db_stats()'s identical call site and its own
+                # docstring on why this is a separate namespace from
+                # player_scoring/player_cards/etc).
+                player_positions = fr.extract_player_positions(fm_match_json)
                 # FotMob's own per-player Non-Penalty xG - fed into both
                 # compute_shot_breakdowns() and compute_player_scoring_stats()
                 # so they show the same figure - see extract_player_npxg()'s
@@ -211,6 +217,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "player_scoring": player_scoring,
                 "player_lineup": player_lineup,
                 "player_cards": player_cards,
+                "player_positions": player_positions,
                 "xg_breakdown": xg_breakdown,
                 "shot_breakdowns": shot_breakdowns,
                 "plus_minus": plus_minus,
