@@ -1431,6 +1431,105 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
     plt.close(fig)
 
 
+def _render_match_pairs_tab(db, mode, match_id, home_team, away_team):
+    """
+    Pass Pairs / Shot Pairs for ONE match's own report - the same left/
+    right passer<->receiver (or assister<->shot-taker) matrix and click-
+    to-drill-down Pass Map as the main dashboard's Pass Pairs/Shot Pairs
+    tabs (_render_pairs_tab() above), just scoped to this match's two
+    teams instead of a League -> Team -> Player -> Match cascade, since
+    match_id/home_team/away_team are already fixed by the match report
+    itself. Only two dropdowns here: Team (Home/Away) and Player (that
+    team's own roster for this match) - no League or Match picker.
+
+    Widget keys are all prefixed with a match_id-specific namespace (see
+    key_ns below) so they can never collide with the main dashboard's own
+    'passpairs_'/'shotpairs_' widget keys, or with a different match's
+    report - both routes are mutually exclusive per script run today (see
+    _render_pairs_tab()'s own docstring on this), but the match_id-scoped
+    prefix keeps that true even if that ever changes.
+    """
+    if mode == "pass":
+        fetch_pairs = hdb.fetch_team_passing_pairs
+        passer_col, receiver_col = "passer", "receiver"
+        count_label = "Passes Completed"
+        empty_msg = "No passing pair data saved for {team} in this match."
+        left_header, right_header = "Passes by {player}", "Passes Received by {player}"
+        left_col_label, right_col_label = "Receiver", "Passer"
+    else:
+        fetch_pairs = hdb.fetch_team_shot_pairs
+        passer_col, receiver_col = "passer", "shot_taker"
+        count_label = "Shots"
+        empty_msg = "No shot pair data saved for {team} in this match."
+        left_header, right_header = "Assists by {player}", "{player}'s Shots (by Assister)"
+        left_col_label, right_col_label = "Shot Taker", "Passer"
+
+    key_ns = f"mt{'passpairs' if mode == 'pass' else 'shotpairs'}_{match_id}"
+
+    team = _narrow_selectbox(
+        "Team", [home_team, away_team], key=f"{key_ns}_team", format_func=_display_team_name
+    )
+
+    pairs = fetch_pairs(db, team, match_id=match_id)
+    if pairs.empty:
+        st.info(empty_msg.format(team=_display_team_name(team)))
+        return
+    players = sorted(set(pairs[passer_col].dropna()) | set(pairs[receiver_col].dropna()))
+    if not players:
+        st.info(empty_msg.format(team=_display_team_name(team)))
+        return
+    player = _narrow_selectbox("Player", players, key=f"{key_ns}_player_{team}")
+
+    left = (pairs.loc[pairs[passer_col] == player, [receiver_col, "count"]]
+            .rename(columns={receiver_col: left_col_label, "count": count_label})
+            .sort_values(count_label, ascending=False)
+            .reset_index(drop=True))
+    right = (pairs.loc[pairs[receiver_col] == player, [passer_col, "count"]]
+             .rename(columns={passer_col: right_col_label, "count": count_label})
+             .sort_values(count_label, ascending=False)
+             .reset_index(drop=True))
+
+    # season_match_ids is always empty here - _render_pair_pass_map() only
+    # reads it when match_id is None (its own "Full Season" branch), and
+    # this tab always has a real match_id, so there's nothing to pass.
+    scope_key = f"{team}_{player}"
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader(left_header.format(player=player))
+        if left.empty:
+            st.info("No data for this player.")
+        else:
+            left_event = st.dataframe(
+                left, use_container_width=False, hide_index=True,
+                height=_no_scroll_height(left),
+                on_select="rerun", selection_mode="single-row",
+                key=f"{key_ns}_left_{scope_key}",
+            )
+            selected = left_event.selection.rows if left_event is not None else []
+            if selected:
+                other = left.iloc[selected[0]][left_col_label]
+                st.divider()
+                _render_pair_pass_map(db, team, passer=player, receiver=other,
+                                       match_id=match_id, season_match_ids=set())
+    with col2:
+        st.subheader(right_header.format(player=player))
+        if right.empty:
+            st.info("No data for this player.")
+        else:
+            right_event = st.dataframe(
+                right, use_container_width=False, hide_index=True,
+                height=_no_scroll_height(right),
+                on_select="rerun", selection_mode="single-row",
+                key=f"{key_ns}_right_{scope_key}",
+            )
+            selected = right_event.selection.rows if right_event is not None else []
+            if selected:
+                other = right.iloc[selected[0]][right_col_label]
+                st.divider()
+                _render_pair_pass_map(db, team, passer=other, receiver=player,
+                                       match_id=match_id, season_match_ids=set())
+
+
 # Explicit list (rather than reaching into history_db._PER90_STATS, a
 # private constant) of which General Stats columns get a Per 90 rate on
 # the league-wide Player Stats tab - deliberately excludes Age/Appearances/
@@ -1820,8 +1919,13 @@ def _render_match_detail(db, match_id):
     </div>
     """, unsafe_allow_html=True)
 
-    mt_totals, mt_players, mt_shots, mt_advanced, mt_passmap, mt_passrecv, mt_touchmap = st.tabs(
-        ["Team Totals", "Player Stats", "Shots", "Advanced Stats", "Pass Map", "Passes Received", "Touch Map"]
+    # Pass Pairs/Shot Pairs sit right after Passes Received and before Touch
+    # Map - the same relative position as the main dashboard's own tab bar
+    # (see _DASH_TABS), just one level down on a single match's report.
+    (mt_totals, mt_players, mt_shots, mt_advanced, mt_passmap, mt_passrecv,
+     mt_pass_pairs, mt_shot_pairs, mt_touchmap) = st.tabs(
+        ["Team Totals", "Player Stats", "Shots", "Advanced Stats", "Pass Map", "Passes Received",
+         "Pass Pairs", "Shot Pairs", "Touch Map"]
     )
 
     with mt_totals:
@@ -1975,6 +2079,12 @@ def _render_match_detail(db, match_id):
 
     with mt_passrecv:
         _render_pass_map(db, matches_for_this_match, mode="receiver")
+
+    with mt_pass_pairs:
+        _render_match_pairs_tab(db, "pass", match_id, row["Home Team"], row["Away Team"])
+
+    with mt_shot_pairs:
+        _render_match_pairs_tab(db, "shot", match_id, row["Home Team"], row["Away Team"])
 
     with mt_touchmap:
         _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"], row["Date"])
