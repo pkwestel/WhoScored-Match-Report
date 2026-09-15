@@ -2756,7 +2756,19 @@ else:
                 season_choice = st.selectbox("Season", ["All seasons"] + seasons, key="fixtures_season")
             with filter_cols[1]:
                 leagues = sorted(fixtures["Competition"].dropna().unique())
-                league_choice = st.selectbox("League", ["All leagues"] + leagues, key="fixtures_league")
+                league_options = ["All leagues"] + leagues
+                # Defaults to Premier League (rather than "All leagues") on
+                # first load - falls back to "All leagues" (index 0) if no
+                # Premier League match has been saved yet. Only applies the
+                # default via index= the first time the widget is created;
+                # once the user picks something else, Streamlit's own
+                # key="fixtures_league" session state takes over as normal.
+                default_league_index = (
+                    league_options.index("Premier League") if "Premier League" in league_options else 0
+                )
+                league_choice = st.selectbox(
+                    "League", league_options, index=default_league_index, key="fixtures_league"
+                )
             with filter_cols[2]:
                 weeks = sorted(fixtures["Matchweek"].dropna().unique(), key=_matchweek_sort_key)
                 week_choice = st.selectbox("Matchweek", ["All matchweeks"] + weeks, key="fixtures_matchweek")
