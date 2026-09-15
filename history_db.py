@@ -1357,7 +1357,20 @@ def fetch_player_trends(db: DB, player: str) -> pd.DataFrame:
     return df
 
 
-def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
+def fetch_shots(db: DB, match_id=None, team=None, player=None,
+                 minute_min=None, minute_max=None) -> pd.DataFrame:
+    """
+    minute_min/minute_max: optional inclusive range on this shot's EFFECTIVE
+    minute - 'minute' plus any stoppage-time 'added_time' (FotMob's own
+    bookkeeping - a 90+3 shot has minute=90, added_time=3, effective minute
+    93), not 'minute' alone, so a slider range like '80-Full Time' correctly
+    includes stoppage-time shots rather than cutting them off at 90. See
+    fetch_match_max_minute() for how a caller gets this match's own real
+    upper bound (never a fixed 90) to build that slider in the first place.
+    None (the default) for either bound means "no restriction on that side" -
+    both left None reproduces this function's original all-shots behavior
+    exactly, so every existing caller is unaffected.
+    """
     sql = "SELECT * FROM shots WHERE 1=1"
     params = []
     if match_id is not None:
@@ -1369,9 +1382,44 @@ def fetch_shots(db: DB, match_id=None, team=None, player=None) -> pd.DataFrame:
     if player is not None:
         sql += " AND player = ?"
         params.append(player)
+    if minute_min is not None:
+        sql += " AND (minute + COALESCE(added_time, 0)) >= ?"
+        params.append(minute_min)
+    if minute_max is not None:
+        sql += " AND (minute + COALESCE(added_time, 0)) <= ?"
+        params.append(minute_max)
     cur = db.execute(sql, tuple(params))
     cols = [d[0] for d in cur.description]
     return pd.DataFrame(cur.fetchall(), columns=cols)
+
+
+def fetch_match_max_minute(db: DB, match_id) -> int:
+    """
+    This match's own actual last recorded minute, across every event-level
+    table (shots/passes/touches) - the real 'Full Time' upper bound for the
+    match report's minute-range slider (see dashboard_app._minute_range_
+    slider()), rather than a fixed 90 that would either clip off a match
+    with real stoppage time or overstate one that's missing data. Shots use
+    'minute + added_time' as their effective minute (see fetch_shots()'s own
+    docstring on why); passes/touches only ever carry a plain WhoScored
+    'minute', no separate stoppage-time field. Returns 90 (a safe fallback)
+    if this match has no rows in any of the three tables yet (e.g. an older
+    match saved before they existed) - matches _no_scroll_height()-style
+    "never error, just fall back to a sane default" handling used elsewhere
+    in this project for missing/backfill-pending data.
+    """
+    shot_max = db.execute(
+        "SELECT MAX(minute + COALESCE(added_time, 0)) FROM shots WHERE match_id = ?",
+        (str(match_id),)
+    ).fetchone()[0]
+    pass_max = db.execute(
+        "SELECT MAX(minute) FROM passes WHERE match_id = ?", (str(match_id),)
+    ).fetchone()[0]
+    touch_max = db.execute(
+        "SELECT MAX(minute) FROM touches WHERE match_id = ?", (str(match_id),)
+    ).fetchone()[0]
+    candidates = [v for v in (shot_max, pass_max, touch_max) if v is not None]
+    return int(max(candidates)) if candidates else 90
 
 
 # Same column set/order as combined_report.COMBINED_SHOTS_COLUMNS - see
@@ -1407,7 +1455,7 @@ def _fmt_shots_decimal(value):
         return value
 
 
-def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
+def fetch_shot_creating_actions(db: DB, match_id, minute_min=None, minute_max=None) -> pd.DataFrame:
     """
     The match detail view's Shots tab: reconstructs exactly the table the
     combined report's own 'Shot Creating Actions' tab shows
@@ -1427,12 +1475,23 @@ def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
     a reformat of already-saved data, not a new computation, and works
     retroactively for every match saved via the combined report (no
     re-save needed).
+
+    minute_min/minute_max: same optional effective-minute range (minute +
+    added_time) as fetch_shots() - see that function's own docstring.
     """
-    cur = db.execute("""
+    sql = """
         SELECT team, player, minute, added_time, situation, body_part, outcome, xg, xgot, extra_json
         FROM shots
         WHERE match_id = ?
-    """, (str(match_id),))
+    """
+    params = [str(match_id)]
+    if minute_min is not None:
+        sql += " AND (minute + COALESCE(added_time, 0)) >= ?"
+        params.append(minute_min)
+    if minute_max is not None:
+        sql += " AND (minute + COALESCE(added_time, 0)) <= ?"
+        params.append(minute_max)
+    cur = db.execute(sql, tuple(params))
     records = []
     for team, player, minute, added_time, situation, body_part, outcome, xg, xgot, extra_json in cur.fetchall():
         extra = json.loads(extra_json) if extra_json else {}
@@ -1458,7 +1517,8 @@ def fetch_shot_creating_actions(db: DB, match_id) -> pd.DataFrame:
     return df.sort_values(['Team', 'Minute', 'Added Time'], na_position='first').reset_index(drop=True)
 
 
-def fetch_team_shot_pairs(db: DB, team, match_id=None, competition=None) -> pd.DataFrame:
+def fetch_team_shot_pairs(db: DB, team, match_id=None, competition=None,
+                           minute_min=None, minute_max=None) -> pd.DataFrame:
     """
     Shot Pairs tab: every distinct shot_taker -> passer combination for one
     team, either for a single match or summed across every one of that
@@ -1473,9 +1533,14 @@ def fetch_team_shot_pairs(db: DB, team, match_id=None, competition=None) -> pd.D
     by count descending. Empty DataFrame (right columns, no rows) if this
     team has no saved shot data - or no pass-assisted shots at all - for
     the given scope.
+
+    minute_min/minute_max: same optional effective-minute range as
+    fetch_shots() - passed straight through to that call, so a match's own
+    Shot Pairs tab can be scoped to a slider range exactly like Shots/Pass
+    Map/Touch Map.
     """
     cols = ["shot_taker", "passer", "count"]
-    shots = fetch_shots(db, match_id=match_id, team=team)
+    shots = fetch_shots(db, match_id=match_id, team=team, minute_min=minute_min, minute_max=minute_max)
     if shots.empty:
         return pd.DataFrame(columns=cols)
     if match_id is None and competition is not None:
@@ -1588,7 +1653,7 @@ def fetch_season_shot_totals(db: DB, competition=None):
 
 
 def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_only=False,
-                  team=None) -> pd.DataFrame:
+                  team=None, minute_min=None, minute_max=None) -> pd.DataFrame:
     """
     Passes for one match (pass a match_id), or across EVERY published match
     (leave match_id=None) for a season-long Pass Map/Passes Received map -
@@ -1600,6 +1665,13 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
     than endX/endY (whoscored_report.py's own dataframe convention) -
     dashboard_app.py renames them back before handing the result to
     pitch_viz.plot_pass_map(), which expects the endX/endY spelling.
+
+    minute_min/minute_max: optional inclusive range on the passes table's
+    own plain 'minute' column - unlike fetch_shots()'s effective-minute
+    combo, passes have no separate stoppage-time field to add in (WhoScored's
+    own clock already folds stoppage time into 'minute' directly). None
+    (the default) for either bound leaves that side unrestricted, same "no
+    filter" convention as fetch_shots().
     """
     sql = "SELECT * FROM passes WHERE 1=1"
     params = []
@@ -1617,6 +1689,12 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
         params.append(receiver)
     if completed_only:
         sql += " AND completed = 1"
+    if minute_min is not None:
+        sql += " AND minute >= ?"
+        params.append(minute_min)
+    if minute_max is not None:
+        sql += " AND minute <= ?"
+        params.append(minute_max)
     cur = db.execute(sql, tuple(params))
     cols = [d[0] for d in cur.description]
     df = pd.DataFrame(cur.fetchall(), columns=cols)
@@ -1635,7 +1713,8 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
     return df
 
 
-def fetch_team_passing_pairs(db: DB, team, match_id=None, competition=None) -> pd.DataFrame:
+def fetch_team_passing_pairs(db: DB, team, match_id=None, competition=None,
+                              minute_min=None, minute_max=None) -> pd.DataFrame:
     """
     Passing Pairs tab: every distinct passer -> receiver combination
     (completed passes only) for one team, either for a single match
@@ -1651,9 +1730,14 @@ def fetch_team_passing_pairs(db: DB, team, match_id=None, competition=None) -> p
     ['passer', 'receiver', 'count'], sorted by count descending. Empty
     DataFrame (right columns, no rows) if this team has no saved pass data
     for the given scope.
+
+    minute_min/minute_max: same optional range as fetch_passes() - passed
+    straight through, so a match's own Pass Pairs tab can be scoped to a
+    slider range exactly like Pass Map/Passes Received/Touch Map.
     """
     cols = ["passer", "receiver", "count"]
-    passes = fetch_passes(db, match_id=match_id, team=team, completed_only=True)
+    passes = fetch_passes(db, match_id=match_id, team=team, completed_only=True,
+                           minute_min=minute_min, minute_max=minute_max)
     if passes.empty:
         return pd.DataFrame(columns=cols)
     if match_id is None and competition is not None:
@@ -1669,12 +1753,17 @@ def fetch_team_passing_pairs(db: DB, team, match_id=None, competition=None) -> p
     return out[cols]
 
 
-def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame:
+def fetch_touches(db: DB, match_id=None, player=None, team=None,
+                   minute_min=None, minute_max=None) -> pd.DataFrame:
     """
     Touches for one match (pass a match_id), or across EVERY published match
     (leave match_id=None) for a season-long touch heat map - optionally
     filtered to one player and/or one team (same transfer-mid-season
     reasoning as fetch_passes()'s team filter).
+
+    minute_min/minute_max: same optional plain-'minute' range as
+    fetch_passes() (touches have no separate stoppage-time field either) -
+    None for either bound leaves that side unrestricted.
     """
     sql = "SELECT * FROM touches WHERE 1=1"
     params = []
@@ -1687,6 +1776,12 @@ def fetch_touches(db: DB, match_id=None, player=None, team=None) -> pd.DataFrame
     if player is not None:
         sql += " AND player = ?"
         params.append(player)
+    if minute_min is not None:
+        sql += " AND minute >= ?"
+        params.append(minute_min)
+    if minute_max is not None:
+        sql += " AND minute <= ?"
+        params.append(minute_max)
     cur = db.execute(sql, tuple(params))
     cols = [d[0] for d in cur.description]
     return pd.DataFrame(cur.fetchall(), columns=cols)

@@ -874,7 +874,49 @@ def _match_picker(matches, key):
     return options[label], label
 
 
-def _render_pass_map(db, matches, mode):
+def _minute_range_slider(key, max_minute):
+    """
+    Shared kickoff-to-full-time minute-range slider for the match report's
+    event-level tabs (Shots, Pass Map, Passes Received, Pass Pairs, Shot
+    Pairs, Touch Map) - a two-handle st.slider from 0 to this MATCH's own
+    real last recorded minute (see history_db.fetch_match_max_minute() -
+    never a fixed 90, so a match with real stoppage time isn't clipped, and
+    an older/incomplete save isn't overstated), defaulting to the full
+    match per request.
+
+    Returns (minute_min, minute_max) as real ints whenever the slider has
+    been narrowed away from its default, or (None, None) when it's still at
+    the full (0, max_minute) default - callers pass this straight into the
+    matching hdb.fetch_*(minute_min=, minute_max=) call, and (None, None)
+    is exactly that function's own "no restriction" convention, so a page
+    that never touches the slider behaves identically to before this
+    feature existed (same query, same result, no perf cost).
+
+    Draws a small 'Halftime' marker directly under the slider at the 45'
+    mark - st.slider has no native way to annotate one specific value, so
+    this is a separate, absolutely-positioned label placed at whatever %
+    of the 0-max_minute track 45 falls at (works correctly even for a
+    match_max_minute below 45, in the unlikely case of a very incomplete
+    save - the marker simply won't render past the track's own right edge
+    in that case, since the % is clamped to 100).
+    """
+    lo, hi = st.slider(
+        "Minutes", min_value=0, max_value=max_minute, value=(0, max_minute),
+        key=key, format="%d'",
+    )
+    halftime_pct = min(100.0, (45 / max_minute) * 100) if max_minute else 0.0
+    st.markdown(
+        f"<div style='position:relative; height:16px; margin-top:-18px;'>"
+        f"<div style='position:absolute; left:{halftime_pct}%; transform:translateX(-50%); "
+        f"font-size:0.75em; color:#888; white-space:nowrap;'>▲ Halftime</div></div>",
+        unsafe_allow_html=True,
+    )
+    if (lo, hi) == (0, max_minute):
+        return None, None
+    return lo, hi
+
+
+def _render_pass_map(db, matches, mode, show_minute_slider=False):
     """
     mode='passer' draws the outgoing Pass Map (every pass attempted by the
     selected player); mode='receiver' draws Passes Received (every completed
@@ -886,23 +928,36 @@ def _render_pass_map(db, matches, mode):
     saved match (the normal Pass Map/Passes Received tabs) or a single-row
     DataFrame scoped to one match (the match detail view) - the match
     dropdown just has one option in that case.
+
+    show_minute_slider: only True from the match detail view's own Pass Map/
+    Passes Received tabs (see _render_match_detail()) - a minute range only
+    means one specific thing when scoped to one real match's own clock, so
+    the season-wide call site (matches = every saved match) never shows it.
     """
     if matches.empty:
         st.info("No matches published yet.")
         return
     match_id, match_label = _match_picker(matches, key=f"passmap_match_{mode}")
 
-    # Passes for the whole match, unfiltered - used just to populate the
-    # player dropdown with only players who actually have pass data saved
-    # (older matches saved before compute_all_passes() existed won't have
-    # any rows here at all).
-    all_match_passes = hdb.fetch_passes(db, match_id)
+    minute_min = minute_max = None
+    if show_minute_slider:
+        max_minute = hdb.fetch_match_max_minute(db, match_id)
+        minute_min, minute_max = _minute_range_slider(f"passmap_minutes_{mode}_{match_id}", max_minute)
+
+    # Passes for the whole match (within the slider range, if narrowed) -
+    # used just to populate the player dropdown with only players who
+    # actually have pass data saved in that scope (older matches saved
+    # before compute_all_passes() existed won't have any rows here at all).
+    all_match_passes = hdb.fetch_passes(db, match_id, minute_min=minute_min, minute_max=minute_max)
     if all_match_passes.empty:
-        st.info(
-            f"No pass data saved for {match_label} - this match was likely published before the "
-            "Pass Map/Passes Received feature was added. Re-run 'Save to Database' for it in the "
-            "combined report app to backfill it."
-        )
+        if minute_min is None and minute_max is None:
+            st.info(
+                f"No pass data saved for {match_label} - this match was likely published before the "
+                "Pass Map/Passes Received feature was added. Re-run 'Save to Database' for it in the "
+                "combined report app to backfill it."
+            )
+        else:
+            st.info(f"No passes recorded for {match_label} in this minute range.")
         return
 
     if mode == "passer":
@@ -916,11 +971,13 @@ def _render_pass_map(db, matches, mode):
     player = _narrow_selectbox("Player", players, key=f"passmap_player_{mode}")
 
     if mode == "passer":
-        player_passes = hdb.fetch_passes(db, match_id, passer=player)
+        player_passes = hdb.fetch_passes(db, match_id, passer=player,
+                                          minute_min=minute_min, minute_max=minute_max)
     else:
         # Mirrors get_player_passes_received()'s own restriction to
         # completed passes only - an incomplete pass has no real receiver.
-        player_passes = hdb.fetch_passes(db, match_id, receiver=player, completed_only=True)
+        player_passes = hdb.fetch_passes(db, match_id, receiver=player, completed_only=True,
+                                          minute_min=minute_min, minute_max=minute_max)
 
     if player_passes.empty:
         st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player}.")
@@ -1403,7 +1460,8 @@ def _render_pairs_tab(db, mode):
                                        match_id=match_id, season_match_ids=season_match_ids)
 
 
-def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids):
+def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids,
+                           minute_min=None, minute_max=None):
     """
     Drill-down for the Pass Pairs/Shot Pairs tabs: clicking a row in either
     side table on _render_pairs_tab() shows the real Pass Map for that
@@ -1418,10 +1476,16 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
     Reuses pitch_viz.plot_pass_map() exactly like the Pass Map/Season Pass
     Map tabs (see _render_pass_map()/_render_season_pass_map()), just
     filtered to one specific pair instead of one player's every pass.
+
+    minute_min/minute_max: only meaningful (and only ever passed) when
+    match_id is not None - the per-match Pass Pairs/Shot Pairs tab's own
+    minute slider (see _render_match_pairs_tab()) - so a drill-down from a
+    minute-filtered Pair table stays consistent with that same range.
     """
     if match_id is not None:
         pair_passes = hdb.fetch_passes(db, match_id=match_id, team=team, passer=passer,
-                                        receiver=receiver, completed_only=True)
+                                        receiver=receiver, completed_only=True,
+                                        minute_min=minute_min, minute_max=minute_max)
     else:
         pair_passes = hdb.fetch_passes(db, team=team, passer=passer, receiver=receiver,
                                         completed_only=True)
@@ -1520,11 +1584,14 @@ def _render_match_pairs_tab(db, mode, match_id, home_team, away_team):
 
     key_ns = f"mt{'passpairs' if mode == 'pass' else 'shotpairs'}_{match_id}"
 
+    max_minute = hdb.fetch_match_max_minute(db, match_id)
+    minute_min, minute_max = _minute_range_slider(f"{key_ns}_minutes", max_minute)
+
     team = _narrow_selectbox(
         "Team", [home_team, away_team], key=f"{key_ns}_team", format_func=_display_team_name
     )
 
-    pairs = fetch_pairs(db, team, match_id=match_id)
+    pairs = fetch_pairs(db, team, match_id=match_id, minute_min=minute_min, minute_max=minute_max)
     if pairs.empty:
         st.info(empty_msg.format(team=_display_team_name(team)))
         return
@@ -1564,7 +1631,8 @@ def _render_match_pairs_tab(db, mode, match_id, home_team, away_team):
                 other = left.iloc[selected[0]][left_col_label]
                 st.divider()
                 _render_pair_pass_map(db, team, passer=player, receiver=other,
-                                       match_id=match_id, season_match_ids=set())
+                                       match_id=match_id, season_match_ids=set(),
+                                       minute_min=minute_min, minute_max=minute_max)
     with col2:
         st.subheader(right_header.format(player=player))
         if right.empty:
@@ -1581,7 +1649,8 @@ def _render_match_pairs_tab(db, mode, match_id, home_team, away_team):
                 other = right.iloc[selected[0]][right_col_label]
                 st.divider()
                 _render_pair_pass_map(db, team, passer=other, receiver=player,
-                                       match_id=match_id, season_match_ids=set())
+                                       match_id=match_id, season_match_ids=set(),
+                                       minute_min=minute_min, minute_max=minute_max)
 
 
 # Explicit list (rather than reaching into history_db._PER90_STATS, a
@@ -1766,12 +1835,18 @@ def _render_player_stats_tab(db):
 def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
     """Single-match touch map - same idea as _render_season_touchmap()
     above, scoped to one match_id instead of the whole database."""
-    touches = hdb.fetch_touches(db, match_id=match_id)
+    max_minute = hdb.fetch_match_max_minute(db, match_id)
+    minute_min, minute_max = _minute_range_slider(f"match_detail_touchmap_minutes_{match_id}", max_minute)
+
+    touches = hdb.fetch_touches(db, match_id=match_id, minute_min=minute_min, minute_max=minute_max)
     if touches.empty:
-        st.info(
-            "No touch data saved for this match - it was likely published before the touches table "
-            "was added. Re-run 'Save to Database' for it in the combined report app to backfill it."
-        )
+        if minute_min is None and minute_max is None:
+            st.info(
+                "No touch data saved for this match - it was likely published before the touches table "
+                "was added. Re-run 'Save to Database' for it in the combined report app to backfill it."
+            )
+        else:
+            st.info("No touches recorded in this minute range.")
         return
     players = sorted(touches["player"].dropna().unique())
     if not players:
@@ -2082,9 +2157,14 @@ def _render_match_detail(db, match_id):
         # attached, split by team with a "Top 3 Shots by xG" caption under
         # each - rather than the DB's own raw shot-table shape.
         home_team, away_team = row["Home Team"], row["Away Team"]
-        shots = hdb.fetch_shot_creating_actions(db, match_id)
+        max_minute = hdb.fetch_match_max_minute(db, match_id)
+        minute_min, minute_max = _minute_range_slider(f"mt_shots_minutes_{match_id}", max_minute)
+        shots = hdb.fetch_shot_creating_actions(db, match_id, minute_min=minute_min, minute_max=minute_max)
         if shots.empty:
-            st.info("No shots saved for this match.")
+            if minute_min is None and minute_max is None:
+                st.info("No shots saved for this match.")
+            else:
+                st.info("No shots recorded in this minute range.")
         else:
             for t in [home_team, away_team]:
                 # Markdown heading + link (st.subheader itself can't hold a
@@ -2129,10 +2209,10 @@ def _render_match_detail(db, match_id):
     matches_for_this_match = matches_for_this_match[matches_for_this_match["match_id"] == match_id]
 
     with mt_passmap:
-        _render_pass_map(db, matches_for_this_match, mode="passer")
+        _render_pass_map(db, matches_for_this_match, mode="passer", show_minute_slider=True)
 
     with mt_passrecv:
-        _render_pass_map(db, matches_for_this_match, mode="receiver")
+        _render_pass_map(db, matches_for_this_match, mode="receiver", show_minute_slider=True)
 
     with mt_pass_pairs:
         _render_match_pairs_tab(db, "pass", match_id, row["Home Team"], row["Away Team"])
