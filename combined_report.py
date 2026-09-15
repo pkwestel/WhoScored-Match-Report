@@ -101,6 +101,17 @@ TEAM_NAME_ALIASES = {
     # that match's Score to reappear.
     'PSG': ['Paris Saint-Germain'],
     'Stuttgart': ['VfB Stuttgart'],
+    # Bayern vs Bodo/Glimt (Sep 2026 Champions League match) - same fix,
+    # two separate mismatches in the same match. WhoScored's short 'Bayern'
+    # vs FotMob's fuller 'Bayern München' (same pattern as PSG/Stuttgart
+    # above); WhoScored's ASCII-transliterated 'Bodoe/Glimt' vs FotMob's
+    # real Norwegian spelling 'Bodø/Glimt' (same pattern as the Rahman
+    # Dasdamirov player-name mismatch - see PLAYER_NAME_ALIASES below, 'ø'
+    # doesn't decompose via Unicode NFKD the way e.g. 'é' does, so
+    # _normalize_name() alone can't fix it). Confirmed via a live
+    # team_match_stats query showing 4 rows instead of 2 for this match.
+    'Bayern': ['Bayern München'],
+    'Bodoe/Glimt': ['Bodø/Glimt'],
 }
 
 
