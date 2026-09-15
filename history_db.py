@@ -2930,8 +2930,36 @@ def _fetch_league_season_table(db: DB, season, competition, per_team_fetcher, so
 
 
 def fetch_league_season_scoring_stats(db: DB, season, competition=None) -> pd.DataFrame:
-    """League-wide General Stats leaderboard - see _fetch_league_season_table()'s own docstring."""
-    return _fetch_league_season_table(db, season, competition, fetch_team_season_scoring_stats, "Minutes")
+    """
+    League-wide General Stats leaderboard - see _fetch_league_season_table()'s own docstring.
+
+    Sorted by Goals descending, per request (rather than Minutes, the
+    default "most involved player first" sort every other league-wide
+    table still uses) - this is the one leaderboard where "who's the most
+    productive scorer" is the more useful default view than "who's played
+    the most".
+
+    Also carries a derived 'G-PK' column (non-penalty goals - Goals minus
+    PK, i.e. penalties actually SCORED, not PK Attempted), inserted right
+    after Assists, per request - same derived-column idea as fetch_player_
+    scoring_stats()'s own G-PK (see _insert_g_pk_column()), just computed
+    directly here rather than reusing that helper: _insert_g_pk_column()
+    exists to handle a single match's own '-' placeholder (an older match
+    missing the 'fm_scoring' namespace entirely), which never happens here
+    - every row past _fetch_league_season_table() already carries a real
+    per-player season SUM (0 if this player never scored/took a penalty,
+    never a missing-namespace '-'), so a plain Goals - PK subtraction is
+    always safe. G-PK deliberately isn't added to _PLAYER_STATS_GENERAL_
+    PER90_COLS (dashboard_app.py) - same "plain counts, not a per-90 rate"
+    treatment already given to PK/PK Attempted/Sprints/Yellow Cards/Red
+    Cards on this exact table.
+    """
+    df = _fetch_league_season_table(db, season, competition, fetch_team_season_scoring_stats, "Goals")
+    if df.empty or "Goals" not in df.columns or "PK" not in df.columns:
+        return df
+    df = df.copy()
+    df.insert(df.columns.get_loc("Assists") + 1, "G-PK", df["Goals"] - df["PK"])
+    return df
 
 
 def fetch_league_season_possession(db: DB, season, competition=None) -> pd.DataFrame:
