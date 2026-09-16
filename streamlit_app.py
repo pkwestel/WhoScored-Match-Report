@@ -50,6 +50,39 @@ st.write(
     "per-player Pass Map."
 )
 
+# A minute range is entirely optional and defaults to the full match (0-120,
+# generous enough to cover both halves' added time) - scraping always pulls
+# the WHOLE match regardless of this selection (there's no way to have
+# WhoScored return only part of a match), but every stat table below, and
+# the downloaded workbook, will be scoped to exactly this range once
+# Generate Report is clicked. The real match length isn't known until AFTER
+# scraping, which is why this defaults to a generous 0-120 rather than the
+# match's own actual max minute (unlike dashboard_app.py's equivalent
+# slider, which already knows a saved match's real length).
+MINUTE_SLIDER_MAX = 120
+HALFTIME_MINUTE = 45
+
+st.markdown("**Minute range** (optional - leave at the full range for the whole match)")
+minute_lo, minute_hi = st.slider(
+    "Minute range", min_value=0, max_value=MINUTE_SLIDER_MAX, value=(0, MINUTE_SLIDER_MAX),
+    key="minute_range", format="%d'", label_visibility="collapsed",
+)
+_halftime_pct = (HALFTIME_MINUTE / MINUTE_SLIDER_MAX) * 100
+st.markdown(
+    f"<div style='position:relative; height:18px; margin-top:-14px;'>"
+    f"<div style='position:absolute; left:{_halftime_pct}%; transform:translateX(-50%); "
+    f"font-size:0.75em; color:#888; white-space:nowrap;'>&#9650; Halftime</div></div>",
+    unsafe_allow_html=True,
+)
+# None/None (rather than 0/120) at the full default range - every windowed
+# compute_*() call below treats None as "no filter, full match", exactly
+# matching this app's ORIGINAL un-windowed behavior with zero risk of an
+# off-by-one at the exact 0 or 120 boundary.
+if (minute_lo, minute_hi) == (0, MINUTE_SLIDER_MAX):
+    minute_min, minute_max = None, None
+else:
+    minute_min, minute_max = minute_lo, minute_hi
+
 url = st.text_input(
     "WhoScored match URL",
     placeholder="https://www.whoscored.com/matches/1903410/live/...",
@@ -65,42 +98,70 @@ if st.button("Generate Report", type="primary"):
             home_name = match_info.get("home_name")
             away_name = match_info.get("away_name")
 
+            # df_windowed is used ONLY by the handful of functions that are
+            # safe to feed a pre-filtered slice directly (no cross-row/
+            # history dependency of their own - see each function's own
+            # docstring). Every other call below passes the FULL df plus
+            # this same minute_min/minute_max pair, so that function can
+            # do its own "classify on full context, then filter" - passing
+            # df_windowed to one of THOSE would silently corrupt results
+            # right at the window's edge (progressive-pass rolling
+            # baseline, SCA backward chains, possession-sequence
+            # boundaries, carry detection, receiver look-ahead).
+            if minute_min is None and minute_max is None:
+                df_windowed = df
+            else:
+                df_windowed = df
+                if minute_min is not None:
+                    df_windowed = df_windowed[df_windowed['minute'] >= minute_min]
+                if minute_max is not None:
+                    df_windowed = df_windowed[df_windowed['minute'] <= minute_max]
+
             with st.spinner("Computing progressive passes..."):
-                _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
+                _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(
+                    df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing passes received..."):
-                passes_received = wr.compute_passes_received(df)
+                passes_received = wr.compute_passes_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing passing pairs..."):
-                passing_pairs = wr.compute_passing_pairs(df)
+                passing_pairs = wr.compute_passing_pairs(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing carries..."):
-                team_carries, player_carries, carries_df = wr.compute_carries(df)
+                team_carries, player_carries, carries_df = wr.compute_carries(
+                    df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing shot-creating actions..."):
-                sca_out = wr.compute_sca(df)
+                sca_out = wr.compute_sca(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing shot pairs..."):
                 shot_pairs = wr.compute_shot_pairs(sca_out)
             with st.spinner("Computing touches..."):
-                team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
+                team_summary, player_third = wr.compute_touches(df_windowed, team_carries, player_carries,
                                                                   passes_received, progressive_received)
             with st.spinner("Computing passing..."):
-                passing_out = wr.compute_passing(df, player_totals, sca_out)
+                passing_out = wr.compute_passing(df_windowed, player_totals, sca_out)
             with st.spinner("Computing possession sequences..."):
-                chains_df, team_sequences = wr.compute_sequences(df)
+                chains_df, team_sequences = wr.compute_sequences(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing field tilt and PPDA..."):
                 field_tilt = wr.compute_field_tilt(team_summary)
-                ppda = wr.compute_ppda(df)
+                ppda = wr.compute_ppda(df_windowed)
             with st.spinner("Computing defensive stats..."):
-                defensive_stats = wr.compute_defensive_stats(df)
-                defensive_actions = wr.compute_defensive_actions(df)
-                defensive_action_location = wr.compute_defensive_action_location(df)
+                defensive_stats = wr.compute_defensive_stats(df_windowed, full_df=df)
+                defensive_actions = wr.compute_defensive_actions(
+                    df_windowed, full_df=df, minute_min=minute_min, minute_max=minute_max)
+                defensive_action_location = wr.compute_defensive_action_location(df_windowed)
             with st.spinner("Computing corners..."):
-                corners = wr.compute_corners(df)
+                corners = wr.compute_corners(df_windowed)
             with st.spinner("Computing totals..."):
                 totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
                                                 chains_df, team_sequences, field_tilt, ppda,
                                                 defensive_stats, corners, home_name, away_name)
                 against_totals = wr.compute_against_totals(totals_out)
             with st.spinner("Computing On/Off splits..."):
+                # extract_player_windows/carries_df are always the FULL-
+                # match versions here (never df_windowed) - compute_on_off
+                # needs each player's TRUE on-pitch window to correctly
+                # intersect it with minute_min/minute_max itself; see that
+                # function's own docstring.
                 player_windows = wr.extract_player_windows(df)
-                on_off = wr.compute_on_off(df, player_windows, carries_df)
+                on_off = wr.compute_on_off(df, player_windows, carries_df,
+                                            minute_min=minute_min, minute_max=minute_max)
 
             wb = wr.build_workbook(
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
@@ -111,7 +172,10 @@ if st.button("Generate Report", type="primary"):
             wb.save(buf)
             buf.seek(0)
 
-            filename = f"{wr.sanitize_filename(home_name)}_vs_{wr.sanitize_filename(away_name)}.xlsx"
+            filename = f"{wr.sanitize_filename(home_name)}_vs_{wr.sanitize_filename(away_name)}"
+            if minute_min is not None or minute_max is not None:
+                filename += f"_{minute_lo}-{minute_hi}min"
+            filename += ".xlsx"
 
             # Stashed in session_state (rather than used directly below) so
             # the report - and the workbook download button - survive the
@@ -136,11 +200,21 @@ if st.button("Generate Report", type="primary"):
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_events": len(df),
+                "minute_min": minute_min,
+                "minute_max": minute_max,
             }
 
         except Exception as e:
             st.error(f"Something went wrong: {e}")
             st.code(traceback.format_exc())
+
+if st.session_state.get("report") and (
+        st.session_state["report"].get("minute_min") is not None
+        or st.session_state["report"].get("minute_max") is not None):
+    _r = st.session_state["report"]
+    _lo = _r["minute_min"] if _r["minute_min"] is not None else 0
+    _hi = _r["minute_max"] if _r["minute_max"] is not None else MINUTE_SLIDER_MAX
+    st.info(f"Showing minutes {_lo}'-{_hi}' only - not the full match.")
 
 # Pass Map pitch drawing (draw_pitch/plot_pass_map) now lives in pitch_viz.py
 # so dashboard_app.py can reuse the exact same drawing code - see that

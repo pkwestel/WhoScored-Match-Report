@@ -566,14 +566,31 @@ def _compute_progressive_flags(df):
     return pd.DataFrame(prog_pass_records)
 
 
-def compute_progressive_passes(df):
+def compute_progressive_passes(df, minute_min=None, minute_max=None):
     """
     Only OPEN PLAY completed passes can be flagged as progressive - see
     _compute_progressive_flags() above for the full rolling-window
     definition/logic this reuses.
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report (see streamlit_app.py's minute slider). Deliberately applied
+    AFTER _compute_progressive_flags(df) runs on the full, unsliced df -
+    progressive classification depends on a rolling baseline built up from
+    kickoff (see that function's own docstring), so pre-slicing df before
+    classifying would seed the wrong baseline and corrupt results right at
+    the window's start. Filtering the already-classified per-pass rows by
+    minute afterward, before aggregating into player_totals/team_totals/
+    player_received, is the only correct way to window this stat. None
+    (the default) keeps this function's original full-match behavior
+    exactly, so every other caller (batch_lib.py, combined_report.py, the
+    Pass Map's own live use) is unaffected.
     """
     prog_passes_all = _compute_progressive_flags(df)
     prog_passes = prog_passes_all[prog_passes_all['is_progressive']].copy()
+    if minute_min is not None:
+        prog_passes = prog_passes[prog_passes['minute'] >= minute_min]
+    if minute_max is not None:
+        prog_passes = prog_passes[prog_passes['minute'] <= minute_max]
     prog_passes_out = prog_passes[
         ['minute', 'second', 'team', 'player', 'x', 'y', 'endX', 'endY', 'progress_yd', 'ends_in_box']
     ]
@@ -591,23 +608,37 @@ def compute_progressive_passes(df):
     return prog_passes_out, player_totals, team_totals, player_received
 
 
-def compute_passes_received(df):
+def compute_passes_received(df, minute_min=None, minute_max=None):
     """
     Passes Received per player: completed passes where this player was the
     receiver, using the same next-event heuristic as _pass_receiver_map()
     (WhoScored/Opta has no explicit receiver field on pass events).
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. _pass_receiver_map(df) always runs on the FULL, unsliced df
+    first (never pre-filtered) - it identifies a pass's receiver via a
+    one-row look-AHEAD (work['playerName'].shift(-1)), so a pass right at
+    the window's edge needs the true next event, which may sit just
+    outside the window, to be classified correctly. The minute filter is
+    applied afterward, to the already-resolved per-pass rows, before the
+    final groupby aggregation. None (the default, both here and below)
+    preserves this function's original full-match behavior exactly.
     """
     receiver_map = _pass_receiver_map(df)
     work = df.sort_index().copy()
     work['receiver'] = receiver_map
     pass_mask = (work['type.displayName'] == 'Pass') & (work['outcomeType.displayName'] == 'Successful')
     received = work[pass_mask].dropna(subset=['receiver'])
+    if minute_min is not None:
+        received = received[received['minute'] >= minute_min]
+    if minute_max is not None:
+        received = received[received['minute'] <= minute_max]
     return (received.groupby(['team', 'receiver']).size()
             .reset_index(name='passes_received')
             .rename(columns={'receiver': 'player'}))
 
 
-def compute_passing_pairs(df):
+def compute_passing_pairs(df, minute_min=None, minute_max=None):
     """
     Passing Pairs tab: every distinct passer -> receiver combination
     (completed passes only, any pass type - open play, corners, free kicks,
@@ -616,12 +647,20 @@ def compute_passing_pairs(df):
     _pass_receiver_map()/compute_passes_received() - WhoScored/Opta pass
     events carry no explicit receiver field. Sorted within each team by
     count, descending, so the most frequent combinations come first.
+
+    minute_min/minute_max: same windowed-report filter as compute_passes_
+    received() above, and for the same reason applied AFTER _pass_receiver_
+    map(df) runs on the full df, not before.
     """
     receiver_map = _pass_receiver_map(df)
     work = df.sort_index().copy()
     work['receiver'] = receiver_map
     pass_mask = (work['type.displayName'] == 'Pass') & (work['outcomeType.displayName'] == 'Successful')
     completed = work[pass_mask].dropna(subset=['receiver'])
+    if minute_min is not None:
+        completed = completed[completed['minute'] >= minute_min]
+    if minute_max is not None:
+        completed = completed[completed['minute'] <= minute_max]
     pairs = (completed.groupby(['team', 'playerName', 'receiver']).size()
              .reset_index(name='count')
              .rename(columns={'playerName': 'passer'}))
@@ -819,7 +858,7 @@ def _add_cumulative_mins(df):
     return d
 
 
-def compute_carries(df):
+def compute_carries(df, minute_min=None, minute_max=None):
     """
     WhoScored/Opta data has no explicit "carry" event, so carries are
     inferred from gaps between a team's consecutive logged actions - this
@@ -841,6 +880,19 @@ def compute_carries(df):
     is_progressive, into_final_third, into_box) - kept around so
     compute_on_off() can window carries down to a specific player's own
     on-pitch time, which the two aggregate tables alone can't do.
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. The forward-look carry-detection walk (df.iloc[idx+1..]) always
+    runs on the FULL, unsliced df first - it depends on contiguous
+    positional ordering of the complete event log (see the loop below), so
+    slicing df to a window before detecting carries would either run off
+    the end of the truncated data near the window's edge or misalign the
+    per-period cumulative-minute offsets _add_cumulative_mins() computes.
+    The filter is applied afterward, to the already-detected carries_df (by
+    its own cumulative_mins column), with team_carries/player_carries then
+    re-aggregated from that filtered subset - never by re-running this
+    detection loop on a pre-sliced df. None (the default) preserves this
+    function's original full-match behavior exactly.
     """
     d = _add_cumulative_mins(df)
     n = len(d)
@@ -915,18 +967,29 @@ def compute_carries(df):
     carries_df = pd.DataFrame(carry_records) if carry_records else pd.DataFrame(
         columns=['team', 'player', 'cumulative_mins', 'is_progressive', 'into_final_third', 'into_box'])
 
-    team_carries = carries_df.groupby('team').agg(
+    # carries_df returned to callers (e.g. compute_on_off()) is ALWAYS the
+    # full-match version, unfiltered - only the team_carries/player_carries
+    # aggregates below get windowed, since compute_on_off() needs the full
+    # carries_df to build its own per-player on-pitch window independent of
+    # whatever minute range this report as a whole is scoped to.
+    windowed = carries_df
+    if minute_min is not None:
+        windowed = windowed[windowed['cumulative_mins'] >= minute_min]
+    if minute_max is not None:
+        windowed = windowed[windowed['cumulative_mins'] <= minute_max]
+
+    team_carries = windowed.groupby('team').agg(
         progressive_carries=('is_progressive', 'sum'),
         carries_into_final_third=('into_final_third', 'sum'),
         carries_into_box=('into_box', 'sum'),
-    ).reset_index() if len(carries_df) else pd.DataFrame(
+    ).reset_index() if len(windowed) else pd.DataFrame(
         columns=['team', 'progressive_carries', 'carries_into_final_third', 'carries_into_box'])
 
-    player_carries = carries_df.groupby(['team', 'player']).agg(
+    player_carries = windowed.groupby(['team', 'player']).agg(
         progressive_carries=('is_progressive', 'sum'),
         carries_into_final_third=('into_final_third', 'sum'),
         carries_into_box=('into_box', 'sum'),
-    ).reset_index() if len(carries_df) else pd.DataFrame(
+    ).reset_index() if len(windowed) else pd.DataFrame(
         columns=['team', 'player', 'progressive_carries', 'carries_into_final_third', 'carries_into_box'])
 
     # carries_df (the raw, one-row-per-carry data, with each carry's own
@@ -977,7 +1040,20 @@ def is_own_goal(row):
     return row['type.displayName'] == 'Goal' and 'Own goal' in qual_names(row['qualifiers_parsed'])
 
 
-def compute_sca(df):
+def compute_sca(df, minute_min=None, minute_max=None):
+    """
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. The backward-chain walk below (j = shot_i - 1, decrementing)
+    always runs against the FULL, unsliced df first - a shot near the
+    window's start might need to look back past the window boundary to
+    find its true SCA1/SCA2, and slicing df before this walk would either
+    break the df.loc[j] lookups (this relies on df's original, contiguous
+    index) or silently truncate the backward search at the window edge,
+    misclassifying or losing legitimate SCA passes. The filter is applied
+    afterward, to the finished per-shot sca_rows (by each shot's own
+    'minute'), not before. None (the default) preserves this function's
+    original full-match behavior exactly.
+    """
     # Own goals carry WhoScored's 'isShot' flag like any other Goal event,
     # but they aren't a shot taken by the credited team - exclude them so
     # they don't count as a shot or get their own SCA row.
@@ -1043,7 +1119,12 @@ def compute_sca(df):
             rec[f'sca{rank}_action'] = classify_action(arow)
         sca_rows.append(rec)
 
-    return pd.DataFrame(sca_rows)
+    sca_out = pd.DataFrame(sca_rows)
+    if minute_min is not None and not sca_out.empty:
+        sca_out = sca_out[sca_out['minute'] >= minute_min]
+    if minute_max is not None and not sca_out.empty:
+        sca_out = sca_out[sca_out['minute'] <= minute_max]
+    return sca_out
 
 
 def compute_shot_pairs(sca_out):
@@ -1271,7 +1352,8 @@ SEQUENCE_SUC_EVTS_IN_CHAIN = 2
 
 
 def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
-                       chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN):
+                       chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN,
+                       minute_min=None, minute_max=None):
     """
     Possession sequences per team, using the same windowed possession-chain
     algorithm found in the open-source WhoScored report notebooks behind
@@ -1290,6 +1372,20 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     closest (24/13 sequences, 9.69/5.97 average) without an exact source to
     match bit-for-bit. "Passes" here counts ALL pass attempts in a sequence,
     not just completed ones - that was also the closest-matching definition.
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. The possession_id assignment below always runs on the FULL,
+    unsliced df first - a chain is a continuous run of same-team events,
+    and slicing df mid-chain would corrupt chain boundaries right at the
+    window's edge (a chain that was really still running would look like
+    it started/ended exactly at the cut). Once every event has a real
+    possession_id, each chain is tagged with the MINUTE of its first event
+    (chains_df's own 'minute' column, added below) so chains_df/
+    team_sequences can be filtered to "chains that started within this
+    window" afterward - this is the only place a minute range is applied.
+    None (the default) preserves this function's original full-match
+    behavior exactly, including chains_df's column shape (the 'minute'
+    column is new but additive, so no existing caller breaks).
     """
     work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
     work = work.sort_index().reset_index(drop=True)
@@ -1355,9 +1451,20 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     pass_mask = work['type.displayName'] == 'Pass'
     passes_per_chain = work[pass_mask].groupby('possession_id').size()
     chain_team = work.groupby('possession_id')['possession_team'].first()
+    # Each chain's own 'minute' is the minute of its FIRST event - used
+    # only to let a windowed report filter to "chains that started within
+    # this range" (see this function's own docstring on why a chain can't
+    # be classified any other way once minute_min/minute_max are set).
+    chain_minute = work.groupby('possession_id')['minute'].min()
     chains_df = pd.DataFrame({'passes': passes_per_chain}).reindex(chain_team.index).fillna(0)
     chains_df['team'] = chain_team
+    chains_df['minute'] = chain_minute
     chains_df = chains_df.reset_index(drop=True)
+
+    if minute_min is not None:
+        chains_df = chains_df[chains_df['minute'] >= minute_min]
+    if minute_max is not None:
+        chains_df = chains_df[chains_df['minute'] <= minute_max]
 
     if len(chains_df):
         long_chains = chains_df[chains_df['passes'] >= min_passes]
@@ -1469,7 +1576,7 @@ def _guess_goalkeepers(df):
     return gks
 
 
-def compute_defensive_stats(df):
+def compute_defensive_stats(df, full_df=None):
     """
     Six defensive counting stats per team, all read directly from discrete
     WhoScored event types/qualifiers (no heuristics needed, unlike PPDA/
@@ -1488,6 +1595,18 @@ def compute_defensive_stats(df):
     22 candidate formulas against two real matches at once rather than one -
     see the version-history comment above DEF_ACTION_HEIGHT_TYPES for the
     exact numbers, and diagnose_def_action_height.py for the search itself.
+
+    full_df: optional full-match event df, used ONLY for goalkeeper
+    identification (_guess_goalkeepers()) when df itself is a minute-
+    windowed slice for a windowed report. A keeper's Save events can be
+    sparse or entirely absent within a narrow window, which would cause
+    _guess_goalkeepers() to misidentify (or fail to identify) the keeper
+    and wrongly leave their events in the Defensive Action Height average -
+    identifying the keeper from the FULL match instead avoids that, while
+    every other stat here still counts only events within df's own range.
+    None (the default) falls back to df itself, exactly matching this
+    function's original full-match behavior when df already IS the full
+    match (every existing caller).
     """
     teams = [t for t in df['team'].dropna().unique()]
 
@@ -1507,7 +1626,7 @@ def compute_defensive_stats(df):
         blocked_shots[t] = shots_blocked[shots_blocked['team'] == opp].shape[0] if opp else 0
 
     da = df[df['type.displayName'].isin(DEF_ACTION_HEIGHT_TYPES)]
-    gk_names = _guess_goalkeepers(df)
+    gk_names = _guess_goalkeepers(full_df if full_df is not None else df)
     da = da[~da.apply(lambda r: gk_names.get(r['team']) == r['playerName'], axis=1)]
     def_action_height = (da.groupby('team')['x'].mean() * (PITCH_LEN_M / 100)).round(2)
 
@@ -1529,7 +1648,7 @@ def compute_corners(df):
     return corners.groupby('team').size().rename('Corners')
 
 
-def compute_defensive_actions(df):
+def compute_defensive_actions(df, full_df=None, minute_min=None, minute_max=None):
     """
     Per-player totals for the Defensive Actions tab, one table per team:
     Tackles and Interceptions are direct event counts; Passes Blocked
@@ -1544,6 +1663,21 @@ def compute_defensive_actions(df):
     Man Utd, 5 for Crystal Palace in this match). Every player who appears
     anywhere in the match gets a row (zeros where they had none of these
     four actions), matching the Passing/Touches tabs' inclusiveness.
+
+    full_df/minute_min/minute_max: for a windowed report, df here can
+    safely be an already-minute-filtered slice for Tackles/Interceptions/
+    Passes Blocked (simple per-event counts, no cross-row dependency). But
+    the Shots Blocked blocker-pairing walks ONE ROW AHEAD (work.iloc[idx+1])
+    on the raw, positionally-contiguous event log to find each blocked
+    shot's paired 'Save' event - a blocked shot right at the window's edge
+    could lose its paired Save event entirely if df were already sliced.
+    So that specific piece always runs on full_df (falling back to df when
+    full_df isn't given, i.e. every existing caller), capturing each
+    blocked shot's own minute, then filters those blocker rows by
+    minute_min/minute_max afterward before aggregating - the same "full
+    context first, filter the output after" pattern used throughout this
+    module. None (the default, all three) preserves this function's
+    original full-match behavior exactly.
     """
     all_players = (df.dropna(subset=['playerName', 'team'])
                     .drop_duplicates(['team', 'playerName'])[['team', 'playerName']]
@@ -1556,7 +1690,7 @@ def compute_defensive_actions(df):
     passes_blocked = (df[df['type.displayName'] == 'BlockedPass'].groupby(['team', 'playerName']).size()
                        .reset_index(name='Passes Blocked').rename(columns={'playerName': 'player'}))
 
-    work = df.sort_index().reset_index(drop=True)
+    work = (full_df if full_df is not None else df).sort_index().reset_index(drop=True)
     shots = work[work['isShot'] == True].copy()
     shots['qn'] = shots['qualifiers_parsed'].apply(qual_names)
     blocked_idx = shots[shots['qn'].apply(lambda s: 'Blocked' in s)].index
@@ -1565,9 +1699,16 @@ def compute_defensive_actions(df):
         if idx + 1 < len(work):
             nxt = work.iloc[idx + 1]
             if nxt['type.displayName'] == 'Save' and pd.notna(nxt.get('team')) and pd.notna(nxt.get('playerName')):
-                blocker_rows.append({'team': nxt['team'], 'player': nxt['playerName']})
-    shots_blocked = (pd.DataFrame(blocker_rows).groupby(['team', 'player']).size()
-                      .reset_index(name='Shots Blocked')) if blocker_rows else pd.DataFrame(
+                blocker_rows.append({'team': nxt['team'], 'player': nxt['playerName'],
+                                      'minute': work.at[idx, 'minute']})
+    blocker_df = pd.DataFrame(blocker_rows) if blocker_rows else pd.DataFrame(
+        columns=['team', 'player', 'minute'])
+    if minute_min is not None:
+        blocker_df = blocker_df[blocker_df['minute'] >= minute_min]
+    if minute_max is not None:
+        blocker_df = blocker_df[blocker_df['minute'] <= minute_max]
+    shots_blocked = (blocker_df.groupby(['team', 'player']).size()
+                      .reset_index(name='Shots Blocked')) if len(blocker_df) else pd.DataFrame(
         columns=['team', 'player', 'Shots Blocked'])
 
     out = all_players
@@ -1814,7 +1955,7 @@ def extract_player_windows(df):
     return pd.DataFrame(rows, columns=columns)
 
 
-def compute_on_off(df, player_windows, carries_df):
+def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=None):
     """
     On/Off tab: for every player, team totals - Shots, Total Touches, Own/
     Middle/Final Third Touches, Attacking Box Touches, Carries into Final
@@ -1884,6 +2025,24 @@ def compute_on_off(df, player_windows, carries_df):
     Returns one DataFrame, sorted by Team then descending Minutes Played -
     split into two tables, one per team, when written to the
     workbook/UI (see build_workbook()).
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. df/player_windows/carries_df are always the FULL, unsliced
+    match versions (this function's row-masking logic below is already
+    vectorized per-player, so it never needed df itself pre-sliced) -
+    instead, each player's own on-pitch window (start_minute, end_minute)
+    is intersected with (minute_min, minute_max) before building that
+    player's in_window mask, so every stat only counts events within BOTH
+    "this player was on the pitch" AND "this report's requested minute
+    range." A player with no overlap at all between their own window and
+    the requested range still gets a row (matching every other table in
+    this project's "every player who appeared gets a row" convention), just
+    with every count at 0. Minutes Played is recomputed as the length of
+    the INTERSECTED window (not the full-match value) whenever a minute
+    range is active, since reporting a player's full-match minutes next to
+    every other now-windowed stat would be misleading. None (the default,
+    both) preserves this function's original full-match behavior exactly,
+    including the original Minutes Played value.
     """
     for_cols = ['Shots For', 'Total Touches For', 'Own Third For', 'Middle Third For',
                 'Final Third For', 'Attacking Box For', 'Carries into Final Third For',
@@ -1916,6 +2075,18 @@ def compute_on_off(df, player_windows, carries_df):
         team = prow['Team']
         opp = opponent.get(team)
         start, end, subbed_off = prow['start_minute'], prow['end_minute'], prow['subbed_off']
+
+        # Intersect this player's own on-pitch window with the report's
+        # requested minute range, if any - see this function's own
+        # docstring above. When neither bound is set this is a no-op
+        # (start/end pass through unchanged, Minutes Played keeps its
+        # original full-match value).
+        if minute_min is None and minute_max is None:
+            minutes_played = prow['Minutes Played']
+        else:
+            start = start if minute_min is None else max(start, minute_min)
+            end = end if minute_max is None else min(end, minute_max)
+            minutes_played = round(max(0.0, end - start), 1)
 
         if subbed_off:
             in_window = lambda mins: (mins >= start) & (mins < end)
@@ -1950,7 +2121,7 @@ def compute_on_off(df, player_windows, carries_df):
         records.append({
             'Team': team,
             'Player': prow['Player'],
-            'Minutes Played': prow['Minutes Played'],
+            'Minutes Played': minutes_played,
             'Shots For': int((own['isShot'] == True).sum()),
             'Total Touches For': int(len(own_touches)),
             'Own Third For': int((own_touches['pitch_third'] == 'Own third').sum()),
