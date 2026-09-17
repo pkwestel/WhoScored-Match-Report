@@ -225,6 +225,7 @@ def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
 # into any hdb.fetch_*()/query-param call.
 TEAM_DISPLAY_NAMES = {
     "Porto": "FC Porto",
+    "RBL": "RB Leipzig",
 }
 
 
@@ -992,6 +993,8 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
     away_team = _display_team_name(matches.loc[matches["match_id"] == match_id, "away_team"].iloc[0])
     match_date_raw = matches.loc[matches["match_id"] == match_id, "match_date"].iloc[0]
     match_date, _ = _split_date_and_kickoff(match_date_raw)
+    competition_raw = matches.loc[matches["match_id"] == match_id, "competition"].iloc[0]
+    competition = competition_raw if pd.notna(competition_raw) else None
     player_team = (_display_team_name(player_passes["team"].iloc[0])
                     if "team" in player_passes.columns and not player_passes.empty else None)
 
@@ -1026,7 +1029,7 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
         title_suffix = "Passes Received"
 
     fig = plot_pass_map(player_passes, player, player_team, home_team, away_team, stat_items,
-                         title_suffix=title_suffix, match_date=match_date)
+                         title_suffix=title_suffix, match_date=match_date, competition=competition)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -1520,16 +1523,19 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
         away_team = _display_team_name(match_row["away_team"].iloc[0]) if not match_row.empty else None
         match_date = (_split_date_and_kickoff(match_row["match_date"].iloc[0])[0]
                       if not match_row.empty else None)
+        competition_raw = match_row["competition"].iloc[0] if not match_row.empty else None
+        competition = competition_raw if pd.notna(competition_raw) else None
         subtitle = None
     else:
         home_team = away_team = None
         match_date = None
+        competition = None
         subtitle = (_current_season_and_league(db, pair_passes["match_id"].unique().tolist())
                     or f"Season - {n_matches} match(es)")
 
     fig = plot_pass_map(pair_passes, receiver, _display_team_name(team), home_team, away_team, stat_items,
                          title_suffix=f"Passes Received from {passer}",
-                         subtitle=subtitle, match_date=match_date)
+                         subtitle=subtitle, match_date=match_date, competition=competition)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -1832,7 +1838,7 @@ def _render_player_stats_tab(db):
     )
 
 
-def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
+def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None, competition=None):
     """Single-match touch map - same idea as _render_season_touchmap()
     above, scoped to one match_id instead of the whole database."""
     max_minute = hdb.fetch_match_max_minute(db, match_id)
@@ -1860,7 +1866,7 @@ def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None):
 
     fig = plot_touch_map(player_touches, player, player_team=player_team,
                           home_name=_display_team_name(home_team), away_name=_display_team_name(away_team),
-                          match_date=date_part)
+                          match_date=date_part, competition=competition)
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
     png_buf.seek(0)
@@ -2221,7 +2227,8 @@ def _render_match_detail(db, match_id):
         _render_match_pairs_tab(db, "shot", match_id, row["Home Team"], row["Away Team"])
 
     with mt_touchmap:
-        _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"], row["Date"])
+        _render_match_touchmap(db, match_id, row["Home Team"], row["Away Team"], row["Date"],
+                                competition=row["Competition"])
 
 
 def _render_team_page(db, team, season=None):

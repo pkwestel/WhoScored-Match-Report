@@ -163,10 +163,24 @@ PASS_MAP_FONT = "Arial"
 # top-right corner logo, kept as one shared file rather than two copies.
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kwest_thoughts_logo_v3.png")
 
+# Second corner logo, top-RIGHT, drawn only when the chart's own player is on
+# Man Utd (see _is_man_utd() below) - per request. Same folder/same-size
+# convention as LOGO_PATH above.
+MANU_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "man_utd_crest.png")
 
-def _load_logo():
+# Shared corner-logo sizing (both LOGO_PATH's top-left placement and
+# MANU_LOGO_PATH's top-right placement use these same two numbers, per
+# request that the Man Utd crest be "the same size as the Kwest Thoughts
+# logo") - hoisted to module level (rather than a local var inside each
+# plot_*() function) so _draw_title_block() can also read them, to place the
+# match date directly under whichever logo sits in the top-right corner.
+LOGO_H_IN = 0.65
+LOGO_MARGIN_IN = 0.12
+
+
+def _load_logo(path):
     """
-    Read the logo image fresh each call - NOT cached across reruns. (An
+    Read a corner-logo image fresh each call - NOT cached across reruns. (An
     earlier version cached the result in a module-level dict; if the very
     first load failed - e.g. before the file existed locally - that failure
     was cached forever for the life of the Streamlit process, so the logo
@@ -176,13 +190,55 @@ def _load_logo():
 
     Returns None (and shows a one-time warning with the exact path tried) if
     the file is missing/unreadable, so a bad path is visible instead of
-    silently doing nothing.
+    silently doing nothing. Shared by both LOGO_PATH (top-left, every chart)
+    and MANU_LOGO_PATH (top-right, Man Utd charts only).
     """
     try:
-        return mpimg.imread(LOGO_PATH)
+        return mpimg.imread(path)
     except Exception as e:
-        st.warning(f"Pass Map logo not found/readable at {LOGO_PATH} ({e}) - skipping it.")
+        st.warning(f"Pass Map logo not found/readable at {path} ({e}) - skipping it.")
         return None
+
+
+# Man Utd name-variant markers (see _RED_CLUB_MARKERS below for the same
+# "match by lowercase substring, not exact spelling" reasoning) - used only
+# to decide whether to draw the top-right Man Utd crest, kept separate from
+# _RED_CLUB_MARKERS since that list is about a broader "red clubs" color
+# choice, not specifically Man Utd.
+_MANU_MARKERS = ["man utd", "man united", "manchester united"]
+
+
+def _is_man_utd(team_name):
+    """True when team_name is some spelling of Manchester United - see
+    _MANU_MARKERS above. False (never crashes) for None/empty."""
+    if not team_name:
+        return False
+    name = team_name.strip().lower()
+    return any(marker in name for marker in _MANU_MARKERS)
+
+
+def _draw_corner_logo(fig, fig_w, fig_h, logo_img, side="left"):
+    """
+    Draws one corner logo at the shared LOGO_H_IN/LOGO_MARGIN_IN size (fixed
+    inches, not a fraction of the figure, so it stays "small" regardless of
+    the pitch's own aspect ratio) - shared by the top-left Kwest Thoughts
+    logo (every chart) and the top-right Man Utd crest (Man Utd charts
+    only - see _is_man_utd()). No-ops cleanly if logo_img is None (the
+    corresponding _load_logo() call failed/file missing).
+    """
+    if logo_img is None:
+        return
+    aspect = logo_img.shape[1] / logo_img.shape[0]  # width / height, in pixels
+    logo_w_in = LOGO_H_IN * aspect
+    left_in = LOGO_MARGIN_IN if side == "left" else fig_w - LOGO_MARGIN_IN - logo_w_in
+    logo_ax = fig.add_axes([
+        left_in / fig_w,
+        1 - (LOGO_MARGIN_IN + LOGO_H_IN) / fig_h,
+        logo_w_in / fig_w,
+        LOGO_H_IN / fig_h,
+    ])
+    logo_ax.imshow(logo_img)
+    logo_ax.axis("off")
 
 
 def _to_m_x(x):
@@ -295,37 +351,54 @@ def draw_pitch(ax):
 
 
 # Title block layout, in inches from the top of the figure - shared by
-# plot_pass_map() and plot_touch_map() via _draw_title_block() below. Line 3
-# sits noticeably further from Line 2 than Line 2 does from Line 1 (per
-# request to "skip a line" there), and TOP_PAD_IN leaves a little extra
-# clearance below Line 3 so it reads as sitting just above the pitch rather
-# than touching it.
-_TITLE_LINE1_Y_IN = 0.32   # "{Player Name} ({Team})"
-_TITLE_LINE2_Y_IN = 0.66   # "vs {Opponent} (H/A)", or the caller's own subtitle (season views)
-_TITLE_LINE3_Y_IN = 0.98   # title_suffix ("Pass Map" / "All Passes" / "All Touches" / ...) -
-                           # tightened up from Line 2 (was 1.28, a wide "skipped line" gap -
-                           # shrunk per request so the map title sits closer to the line above it)
-_TITLE_DATE_Y_IN = 0.30    # top-right corner match date, roughly level with Line 1
-_TITLE_TOP_PAD_IN = 1.12   # total reserved top margin - see callers' fig_h calculation. Distance
-                           # from Line 3 down to the pitch itself is (this - _TITLE_LINE3_Y_IN),
-                           # also tightened (was 1.55, a 0.27in gap below Line 3) per request
+# plot_pass_map() and plot_touch_map() via _draw_title_block() below.
+#
+# Order (top to bottom - per request, title_suffix/opponent swapped from
+# this project's original layout so the chart's own name reads first):
+#   Line 1: {Player Name} ({Team})
+#   Line 2: {title_suffix}              <- e.g. "Passes Received"
+#   Line 3: vs {Opponent} (H/A)         <- or the caller's own subtitle (season views)
+#   Line 4: ({Competition})             <- e.g. "(Premier League)", only when given
+#
+# Lines 1 and 4 sit at the exact same Y positions this project's previous
+# 3-line block used for its own first and last line (0.32in / 0.98in) - per
+# request NOT to grow the gap between the title block and the pitch below
+# it - with the 4 lines now evenly spaced across that same total span
+# (0.22in per gap) rather than the old uneven 0.34in/0.32in spacing, so the
+# new competition line fits inside the SAME reserved vertical budget rather
+# than pushing _TITLE_TOP_PAD_IN out any further.
+_TITLE_LINE1_Y_IN = 0.32
+_TITLE_LINE2_Y_IN = 0.54
+_TITLE_LINE3_Y_IN = 0.76
+_TITLE_LINE4_Y_IN = 0.98
+_TITLE_TOP_PAD_IN = 1.12   # total reserved top margin - see callers' fig_h calculation. UNCHANGED
+                           # from before this reorder - see the comment above on why.
+
+# Match date sits just under the top-right corner logo (Kwest Thoughts'
+# usual top-left one has no top-right counterpart unless this is a Man Utd
+# chart - see _is_man_utd()/MANU_LOGO_PATH above) - reserving the same
+# vertical space either way keeps the date in the same spot regardless of
+# which team's chart this is, rather than jumping around depending on
+# whether a logo happens to be drawn there.
+_TITLE_DATE_Y_IN = LOGO_MARGIN_IN + LOGO_H_IN + 0.15
 
 
 def _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
-                       subtitle, title_suffix, match_date):
+                       subtitle, title_suffix, match_date, competition=None):
     """
-    Draws the shared 3-line title (plus an optional top-right date) used by
+    Draws the shared 4-line title (plus an optional top-right date) used by
     both plot_pass_map() and plot_touch_map():
 
         {Player Name} ({Team})          <- colored per _team_name_color()
+        {title_suffix}                  <- e.g. "Pass Map"
         vs {Opponent} (H/A)             <- smaller, plain TITLE_COLOR
-        [blank line]
-        {title_suffix}                  <- e.g. "Pass Map", just above the pitch
+        ({Competition})                 <- e.g. "(Premier League)", only when given
 
     with the match date (if given) in small text in the figure's top-right
-    corner.
+    corner, just under wherever the top-right logo would sit (see
+    _TITLE_DATE_Y_IN above).
 
-    Line 2 defaults to "vs {opponent} (H/A)" when home_name/away_name are
+    Line 3 defaults to "vs {opponent} (H/A)" when home_name/away_name are
     both given AND no explicit subtitle was passed - player_team is matched
     against home_name/away_name to figure out which one is the opponent and
     whether this was a home or away match for them. Passing an explicit
@@ -333,30 +406,41 @@ def _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name
     season-aggregated view where there's no single opponent/home-or-away to
     name (see dashboard_app.py's season tabs) - match_date should also be
     omitted (None) in that case, since there's no one fixture date either.
+
+    competition (e.g. "Premier League") is wrapped in parentheses here and
+    drawn as Line 4 - omitted entirely (leaving a blank final line, same as
+    an empty Line 3 today) when not given, which every season-view caller
+    and the live WhoScored-only report currently do (neither has a single
+    competition value to show - season views already fold the league name
+    into their own subtitle instead, see dashboard_app.py's season tabs).
     """
     title_line = f"{player_name} ({player_team})" if player_team else player_name
     fig.text(0.5, 1 - _TITLE_LINE1_Y_IN / fig_h, title_line, color=_team_name_color(player_team),
               fontsize=20, fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
 
+    fig.text(0.5, 1 - _TITLE_LINE2_Y_IN / fig_h, title_suffix, color=TITLE_COLOR, fontsize=15,
+              fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
+
     if subtitle is not None:
-        line2 = subtitle
+        line3 = subtitle
     elif home_name and away_name:
         if player_team == home_name:
-            line2 = f"vs {away_name} (H)"
+            line3 = f"vs {away_name} (H)"
         elif player_team == away_name:
-            line2 = f"vs {home_name} (A)"
+            line3 = f"vs {home_name} (A)"
         else:
             # Genuine team-name mismatch (player_team matches neither side) -
             # falls back to the plain "{home} vs {away}" this project has
             # always shown in that case, rather than guessing wrong.
-            line2 = f"{home_name} vs {away_name}"
+            line3 = f"{home_name} vs {away_name}"
     else:
-        line2 = ""
-    fig.text(0.5, 1 - _TITLE_LINE2_Y_IN / fig_h, line2, color=TITLE_COLOR, fontsize=13,
+        line3 = ""
+    fig.text(0.5, 1 - _TITLE_LINE3_Y_IN / fig_h, line3, color=TITLE_COLOR, fontsize=13,
               fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
 
-    fig.text(0.5, 1 - _TITLE_LINE3_Y_IN / fig_h, title_suffix, color=TITLE_COLOR, fontsize=15,
-              fontweight="bold", fontname=PASS_MAP_FONT, ha="center", va="center")
+    if competition:
+        fig.text(0.5, 1 - _TITLE_LINE4_Y_IN / fig_h, f"({competition})", color=TITLE_COLOR,
+                  fontsize=11, fontweight="normal", fontname=PASS_MAP_FONT, ha="center", va="center")
 
     if match_date:
         fig.text(0.97, 1 - _TITLE_DATE_Y_IN / fig_h, match_date, color=TITLE_COLOR, fontsize=9,
@@ -364,7 +448,7 @@ def _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name
 
 
 def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, stat_items,
-                   title_suffix="Pass Map", subtitle=None, match_date=None):
+                   title_suffix="Pass Map", subtitle=None, match_date=None, competition=None):
     """
     Shared drawing code for both the outgoing Pass Map and the Passes
     Received map - same pitch/logo/watermark, same per-category coloring
@@ -375,15 +459,16 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     track the same stats (e.g. "Completion %" doesn't apply to a received-
     passes view, where everything shown is already complete by definition).
 
-    Title is 3 lines (see _draw_title_block()'s docstring for the full
+    Title is 4 lines (see _draw_title_block()'s docstring for the full
     layout): "{player_name} ({player_team})" colored per _team_name_color(),
-    then "vs {opponent} (H/A)" (or an explicit subtitle override - pass
-    home_name=None, away_name=None, subtitle="Season - N matches" for a
-    season-long map aggregated across several matches, where there's no one
-    fixture/opponent to name - see dashboard_app.py's season tabs), then
-    title_suffix just above the pitch. match_date (if given) is drawn small
-    in the top-right corner - omit it for season views, which have no
-    single fixture date either.
+    then title_suffix, then "vs {opponent} (H/A)" (or an explicit subtitle
+    override - pass home_name=None, away_name=None, subtitle="Season - N
+    matches" for a season-long map aggregated across several matches, where
+    there's no one fixture/opponent to name - see dashboard_app.py's season
+    tabs), then "({competition})" if given. match_date (if given) is drawn
+    small in the top-right corner, under the Man Utd crest when player_team
+    is Man Utd (see _is_man_utd()) - omit match_date for season views, which
+    have no single fixture date either.
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
@@ -406,23 +491,12 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     ax = fig.add_axes([0.03, bottom_frac, 0.94, axes_h_frac])
     draw_pitch(ax)
 
-    # Small logo, top-left corner of the whole figure (fixed inches, not a
-    # fraction of the figure, so its size stays "small" regardless of the
-    # pitch's own aspect ratio).
-    logo_img = _load_logo()
-    if logo_img is not None:
-        logo_h_in = 0.65
-        margin_in = 0.12
-        aspect = logo_img.shape[1] / logo_img.shape[0]  # width / height, in pixels
-        logo_w_in = logo_h_in * aspect
-        logo_ax = fig.add_axes([
-            margin_in / fig_w,
-            1 - (margin_in + logo_h_in) / fig_h,
-            logo_w_in / fig_w,
-            logo_h_in / fig_h,
-        ])
-        logo_ax.imshow(logo_img)
-        logo_ax.axis("off")
+    # Top-left Kwest Thoughts logo (every chart), top-right Man Utd crest
+    # (only when this chart's own player is on Man Utd - see _is_man_utd()),
+    # both at the same fixed size (see _draw_corner_logo()/LOGO_H_IN).
+    _draw_corner_logo(fig, fig_w, fig_h, _load_logo(LOGO_PATH), side="left")
+    if _is_man_utd(player_team):
+        _draw_corner_logo(fig, fig_w, fig_h, _load_logo(MANU_LOGO_PATH), side="right")
 
     for category in PASS_CATEGORY_DRAW_ORDER:
         cat_passes = passes_df[passes_df["category"] == category]
@@ -440,7 +514,7 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
                        linewidths=1.3, alpha=alpha, zorder=3)
 
     _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
-                       subtitle, title_suffix, match_date)
+                       subtitle, title_suffix, match_date, competition)
 
     # Stat line: moved below the pitch (per request - the color key that
     # used to live down here is gone entirely). Caller decides exactly which
@@ -456,7 +530,8 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
 
 
 def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, away_name=None,
-                    title_suffix="Touch Map", subtitle=None, stat_items=None, match_date=None):
+                    title_suffix="Touch Map", subtitle=None, stat_items=None, match_date=None,
+                    competition=None):
     """
     Touch map: every (x, y) touch location in touches_df plotted on the
     pitch, shaded with a smoothed density estimate (scipy's gaussian_kde,
@@ -468,14 +543,16 @@ def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, aw
     single match or, with rows from several match_ids concatenated
     together, a season-long map over the exact same pitch).
 
-    Title is the same 3-line block as plot_pass_map() (see
+    Title is the same 4-line block as plot_pass_map() (see
     _draw_title_block()'s docstring) - home_name/away_name build the
-    default "vs {opponent} (H/A)" second line for a single match; pass
-    subtitle= directly instead for a season view (e.g. "Season - 12
-    matches"), where there's no one fixture/opponent to name, and leave
-    match_date=None there too (no single fixture date). stat_items defaults
-    to a single "N Touches" stat if not given - pass your own list of
-    (text, color) tuples for anything more specific.
+    default "vs {opponent} (H/A)" line for a single match; pass subtitle=
+    directly instead for a season view (e.g. "Season - 12 matches"), where
+    there's no one fixture/opponent to name, and leave match_date=None
+    there too (no single fixture date). competition (e.g. "Premier League")
+    draws as its own "(Premier League)" line - omit for season views, which
+    already fold the league name into their own subtitle. stat_items
+    defaults to a single "N Touches" stat if not given - pass your own list
+    of (text, color) tuples for anything more specific.
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
@@ -492,20 +569,9 @@ def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, aw
     ax = fig.add_axes([0.03, bottom_frac, 0.94, axes_h_frac])
     draw_pitch(ax)
 
-    logo_img = _load_logo()
-    if logo_img is not None:
-        logo_h_in = 0.65
-        margin_in = 0.12
-        aspect = logo_img.shape[1] / logo_img.shape[0]
-        logo_w_in = logo_h_in * aspect
-        logo_ax = fig.add_axes([
-            margin_in / fig_w,
-            1 - (margin_in + logo_h_in) / fig_h,
-            logo_w_in / fig_w,
-            logo_h_in / fig_h,
-        ])
-        logo_ax.imshow(logo_img)
-        logo_ax.axis("off")
+    _draw_corner_logo(fig, fig_w, fig_h, _load_logo(LOGO_PATH), side="left")
+    if _is_man_utd(player_team):
+        _draw_corner_logo(fig, fig_w, fig_h, _load_logo(MANU_LOGO_PATH), side="right")
 
     xs = _to_m_y(touches_df["y"].to_numpy(dtype=float))
     ys = _to_m_x(touches_df["x"].to_numpy(dtype=float))
@@ -539,7 +605,7 @@ def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, aw
                    edgecolors="white", linewidths=0.8, zorder=2)
 
     _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
-                       subtitle, title_suffix, match_date)
+                       subtitle, title_suffix, match_date, competition)
 
     if stat_items is None:
         stat_items = [(f"{len(touches_df)} Touches", TITLE_COLOR)]
