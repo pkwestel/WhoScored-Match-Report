@@ -185,6 +185,7 @@ if st.button("Generate Report", type="primary"):
                 "df": df,
                 "home_name": home_name,
                 "away_name": away_name,
+                "match_date": match_info.get("match_date"),
                 "totals_out": totals_out,
                 "against_totals": against_totals,
                 "player_third": player_third,
@@ -227,6 +228,7 @@ report = st.session_state.get("report")
 if report:
     df = report["df"]
     home_name, away_name = report["home_name"], report["away_name"]
+    match_date = report.get("match_date")
     totals_out = report["totals_out"]
     against_totals = report["against_totals"]
     player_third = report["player_third"]
@@ -361,7 +363,7 @@ if report:
                     (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
                 fig = plot_pass_map(player_passes, selected_player, selected_player_team, home_name,
-                                     away_name, stat_items, title_suffix="Pass Map")
+                                     away_name, stat_items, title_suffix="Pass Map", match_date=match_date)
 
                 # Rendered as a fixed-width image (rather than st.pyplot's
                 # default full-column-width behavior) so the pitch shows up
@@ -424,7 +426,8 @@ if report:
                     (f"{key_passes_pr} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
                 fig_pr = plot_pass_map(passes_received, selected_player_pr, selected_player_pr_team,
-                                        home_name, away_name, stat_items_pr, title_suffix="Passes Received")
+                                        home_name, away_name, stat_items_pr, title_suffix="Passes Received",
+                                        match_date=match_date)
 
                 png_buf_pr = io.BytesIO()
                 fig_pr.savefig(png_buf_pr, format="png", dpi=150, facecolor=fig_pr.get_facecolor())

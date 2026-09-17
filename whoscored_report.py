@@ -446,7 +446,28 @@ def scrape_match(match_centre_url):
         lambda q: q if isinstance(q, list) else (ast.literal_eval(q) if isinstance(q, str) else [])
     )
 
-    match_info = {'home_name': home_name, 'away_name': away_name}
+    # Kickoff date, read directly from matchCentreData like home_name/
+    # away_name above - tried as a small set of candidate keys (WhoScored's
+    # own field name for this isn't confirmed against a real live scrape in
+    # this project yet, unlike the well-tested home/away team name reading
+    # above) since public WhoScored-scraping references disagree on the
+    # exact key ('startDate' is the most commonly cited one). Formatted to
+    # a plain "DD Mon YYYY" string (dropping the kickoff time itself, which
+    # this project's other date displays don't show inline either) -
+    # returns None (silently, no warning) if every candidate key is
+    # missing/unparseable, so a wrong guess here degrades to "no date
+    # shown" rather than crashing the whole scrape.
+    match_date = None
+    for date_key in ("startDate", "startTime", "matchDate"):
+        raw_date = match_json.get(date_key)
+        if raw_date:
+            try:
+                match_date = pd.to_datetime(raw_date).strftime("%d %b %Y")
+                break
+            except (ValueError, TypeError):
+                continue
+
+    match_info = {'home_name': home_name, 'away_name': away_name, 'match_date': match_date}
     return df, match_info
 
 
