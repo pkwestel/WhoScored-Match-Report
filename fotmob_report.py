@@ -1055,12 +1055,23 @@ def compute_totals(match_json, shots_df, home_name, away_name):
     matters in practice: the shot map alone can undercount goals (own
     goals aren't on the scoring team's own shot list) or lag behind the
     real final score (an incomplete/mid-match scrape).
+
+    Outcome == 'Own Goal' rows are excluded from Shots / Shots on Target /
+    Total xG / Total post-shot xG, the same treatment Penalties get on the
+    Shot Breakdown tab (see compute_shot_breakdowns()) - an own goal is a
+    defender accidentally diverting the ball into their own net, not a shot
+    the team it's attributed to took at goal, so it shouldn't inflate that
+    team's shot volume or shot-map-derived xG. (Goals is unaffected either
+    way since it's overridden by extract_final_score() above/below, and
+    Outcome == 'Own Goal' never matched the 'Goal' equality check to begin
+    with.)
     """
     teams_order = [t for t in [home_name, away_name] if t] or sorted(shots_df['Team'].dropna().unique())
     totals = pd.DataFrame({'team': teams_order}).set_index('team')
 
     if not shots_df.empty:
-        agg = shots_df.groupby('Team').agg(
+        countable = shots_df[shots_df['Outcome'] != 'Own Goal']
+        agg = countable.groupby('Team').agg(
             Shots=('Outcome', 'size'),
             **{'Shots on Target': ('On Target', 'sum')},
             Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
@@ -1735,7 +1746,10 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
     second, separately-sourced count of the same events. PK Attempted is
     every shot with Situation == 'Penalty'; PK is those of those with
     Outcome == 'Goal' (same penalty definition as PENALTY_XG elsewhere in
-    this module).
+    this module). Outcome == 'Own Goal' rows are excluded from Shots here
+    too, same reasoning/treatment as compute_totals() and
+    compute_shot_breakdowns() - the player it's attributed to (whoever
+    deflected it in) didn't take a shot at goal.
 
     Assists/PS-xG ('Expected goals on target (xGOT)') have no shot-map
     equivalent - they're FotMob's own per-player figures, matched by stat
@@ -1814,11 +1828,12 @@ def compute_player_scoring_stats(match_json, shots_df, player_xa=None, player_mi
                else pd.DataFrame(columns=['Team', 'Player', 'NPxG']))
 
     if shots_df is not None and not shots_df.empty:
-        shot_agg = shots_df.groupby(['Team', 'Player']).agg(
+        countable_shots = shots_df[shots_df['Outcome'] != 'Own Goal']
+        shot_agg = countable_shots.groupby(['Team', 'Player']).agg(
             Shots=('Outcome', 'size'),
             Goals=('Outcome', lambda s: int((s == 'Goal').sum())),
         ).reset_index()
-        pens = shots_df[shots_df['Situation'] == 'Penalty']
+        pens = countable_shots[countable_shots['Situation'] == 'Penalty']
         if not pens.empty:
             pk_agg = pens.groupby(['Team', 'Player']).agg(
                 **{'PK Attempted': ('Outcome', 'size'),
@@ -2139,6 +2154,11 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
     drops out of its breakdown entirely, since after this exclusion it would
     only ever show up as an all-zero row.
 
+    Outcome == 'Own Goal' rows get the same exclusion treatment as
+    Penalties, for the same reason (not a shot in the run-of-play sense) -
+    excluded from Shots/Goals, and their own xG value backed out of each
+    group's Total xG the same way a penalty's flat xG value is.
+
     Returns an ordered dict: {'By Player': df, 'By Situation': df, 'By Body
     Part': df}, each sorted by team then descending shot count.
     """
@@ -2159,7 +2179,8 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
             else:
                 work['xG'] = work['xG'].fillna(0.0)
                 is_pen = work['Situation'] == 'Penalty'
-                non_pen = work[~is_pen]
+                is_own_goal = work['Outcome'] == 'Own Goal'
+                non_pen = work[~(is_pen | is_own_goal)]
 
                 if non_pen.empty:
                     agg = pd.DataFrame(columns=cols)
@@ -2167,6 +2188,7 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
                     group_keys = ['Team', group_col]
                     total_xg_all = work.groupby(group_keys)['xG'].sum()
                     pen_counts = is_pen.groupby([work['Team'], work[group_col]]).sum()
+                    own_goal_xg = work[is_own_goal].groupby(group_keys)['xG'].sum()
 
                     agg = non_pen.groupby(group_keys).agg(
                         Shots=('Outcome', 'size'),
@@ -2174,7 +2196,8 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
                     ).reset_index()
                     agg = agg.set_index(group_keys)
                     non_pen_xg = (total_xg_all.reindex(agg.index).fillna(0.0)
-                                  - PENALTY_XG * pen_counts.reindex(agg.index).fillna(0))
+                                  - PENALTY_XG * pen_counts.reindex(agg.index).fillna(0)
+                                  - own_goal_xg.reindex(agg.index).fillna(0.0))
                     agg['Total xG'] = non_pen_xg.clip(lower=0).round(2)
                     agg = agg.reset_index()
                     agg = agg[cols]
@@ -2265,6 +2288,11 @@ def compute_xg_breakdown(shots_df, home_name, away_name):
     and the phase columns (xG only) are independent cuts of the same shot
     map, not mutually exclusive categories of each other - e.g. a set piece
     goal in the 2nd half adds to both '2nd Half xG' and 'Set Piece xG'.
+
+    Outcome == 'Own Goal' rows are excluded up front, same reasoning as
+    compute_totals()/compute_shot_breakdowns() - not a shot the team it's
+    attributed to took at goal, so it shouldn't add to that team's shot
+    count or xG in any of these cuts either.
     """
     teams_order = [t for t in [home_name, away_name] if t] or sorted(shots_df['Team'].dropna().unique())
     count_cols = ['1st Half Shots', '2nd Half Shots']
@@ -2277,7 +2305,7 @@ def compute_xg_breakdown(shots_df, home_name, away_name):
         out[c] = 0.0
 
     if not shots_df.empty:
-        work = shots_df.copy()
+        work = shots_df[shots_df['Outcome'] != 'Own Goal'].copy()
         work['xG'] = work['xG'].fillna(0.0)
 
         first_half_mask = work['Period'] == 'FirstHalf'
