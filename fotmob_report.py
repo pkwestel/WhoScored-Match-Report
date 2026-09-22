@@ -2021,6 +2021,16 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     == 'Penalty') - the same treatment as the Shot Breakdown tab, and for
     the same reason: a penalty isn't a shot in the run-of-play sense.
 
+    Own goals (Outcome == 'Own Goal') get a two-part treatment. They're
+    excluded from Shots/Shots Against/xG/xG Against entirely, same as a
+    Penalty - whoever it's attributed to (the player who deflected it in)
+    didn't take a shot at goal, so it shouldn't inflate either team's shot
+    volume. But unlike a Penalty, an own goal IS a real goal, so it still
+    has to count somewhere: an own-goal row attributed to a player's own
+    team adds to that player's Goals Against (their team conceded), and an
+    own-goal row attributed to the opponent adds to that player's Goals For
+    (the opponent scored on themselves, which benefits this team).
+
     xG For/Against is NOT a simple sum of each shot's own xG value. Shots
     by the SAME team at the exact same effective minute (Minute + Added
     Time) are treated as a potential sequence - see _combine_sequence_
@@ -2052,6 +2062,12 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
     work['Added Time'] = work['Added Time'].fillna(0)
     work['_effective_minute'] = work['Minute'] + work['Added Time']
 
+    # Own-goal rows are pulled out into their own frame (for Goals For/
+    # Against below) and excluded from the Shots/xG side of `work` entirely
+    # - not a shot in the run-of-play sense, same as a Penalty.
+    own_goal_work = work[work['Outcome'] == 'Own Goal']
+    work = work[work['Outcome'] != 'Own Goal']
+
     # Sequence-combine xG (see _combine_sequence_group()) per (Team,
     # effective minute) - a chain only breaks WITHIN one minute's own
     # shot list, so this is computed once for the whole match and simply
@@ -2081,12 +2097,19 @@ def compute_plus_minus(shots_df, player_windows, home_name=None, away_name=None)
         own_seq = seq[(seq['Team'] == team) & mask(seq['_effective_minute'])]
         opp_seq = seq[(seq['Team'] == opp) & mask(seq['_effective_minute'])] if opp else seq.iloc[0:0]
 
+        # Own goals: a row attributed to this player's own team is a goal
+        # THEY conceded (Goals Against); a row attributed to the opponent
+        # is a goal the opponent scored on themselves (Goals For).
+        own_og = own_goal_work[(own_goal_work['Team'] == team) & mask(own_goal_work['_effective_minute'])]
+        opp_og = (own_goal_work[(own_goal_work['Team'] == opp) & mask(own_goal_work['_effective_minute'])]
+                  if opp else own_goal_work.iloc[0:0])
+
         records.append({
             'Team': team,
             'Player': prow['Player'],
             'Minutes Played': prow['Minutes Played'],
-            'Goals For': int((own_shots['Outcome'] == 'Goal').sum()),
-            'Goals Against': int((opp_shots['Outcome'] == 'Goal').sum()),
+            'Goals For': int((own_shots['Outcome'] == 'Goal').sum()) + int(len(opp_og)),
+            'Goals Against': int((opp_shots['Outcome'] == 'Goal').sum()) + int(len(own_og)),
             'Shots': int(len(own_shots)),
             'Shots Against': int(len(opp_shots)),
             'xG': round(own_seq['seq_xG'].sum(), 2),
