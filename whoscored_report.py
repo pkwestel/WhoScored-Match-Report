@@ -142,6 +142,7 @@ import os
 import re
 import json
 import ast
+import bisect
 from collections import deque
 
 import pandas as pd
@@ -1660,6 +1661,174 @@ def compute_defensive_stats(df, full_df=None):
     out['Blocked Shots'] = pd.Series(blocked_shots)
     out['Defensive Action Height (m)'] = def_action_height
     return out
+
+
+# ============================================================
+# 5d3. DEFENSIVE LINE HEIGHT (defenders-only, open-play alternative to
+#      Defensive Action Height above)
+# ============================================================
+# WhoScored's own position codes, mapped to the same broad GK/DEF/MID/FWD
+# buckets FotMob's extract_player_positions() uses (fotmob_report.py) - kept
+# consistent with that mapping so a team's DEF group means the same thing
+# regardless of which source ends up supplying it below. A defensive
+# midfielder (DMC/DML/DMR) is bucketed as MID, not DEF, matching FotMob's
+# own confirmed convention of usualPosition==1 meaning "defender/full-back"
+# specifically, not "anyone who plays a defensive role."
+_WS_POSITION_BUCKETS = {
+    'GK': 'GK',
+    'DR': 'DEF', 'DC': 'DEF', 'DL': 'DEF', 'DCR': 'DEF', 'DCL': 'DEF',
+    'DMR': 'MID', 'DMC': 'MID', 'DML': 'MID',
+    'MR': 'MID', 'MC': 'MID', 'ML': 'MID',
+    'AMR': 'MID', 'AMC': 'MID', 'AML': 'MID',
+    'FW': 'FWD', 'FWR': 'FWD', 'FWL': 'FWD', 'ST': 'FWD',
+}
+
+
+def _map_ws_position(raw_position):
+    if not raw_position:
+        return None
+    return _WS_POSITION_BUCKETS.get(str(raw_position).strip().upper())
+
+
+def _extract_whoscored_positions(match_json):
+    """
+    Best-effort per-player broad position (GK/DEF/MID/FWD), read from
+    WhoScored's own home/away roster arrays in match_json - NOT the event
+    stream, which carries no position field at all (see
+    _guess_goalkeepers()'s own docstring). Tried first for compute_
+    defensive_line_height() below, falling back to FotMob's own extract_
+    player_positions() (fotmob_report.py) when this comes back empty.
+
+    HONESTY NOTE - READ BEFORE RELYING ON THIS: unlike _fotmob_published_xg()
+    or extract_final_score() in fotmob_report.py (both confirmed against a
+    real captured JSON dump), this hasn't been verified against a real live
+    matchCentreData payload - there was no way to open a browser and inspect
+    it from the environment this was written in. It's built against the
+    commonly-documented WhoScored schema (top-level 'home'/'away' dicts,
+    each with a 'players' list, each player carrying 'name' and 'position'
+    fields using codes like 'GK'/'DC'/'DR'/'DL'/'DMC'/'MC'/'AMC'/'FW').
+    Returns an empty dict (not a crash) if this shape isn't found, so the
+    caller falls through to the FotMob fallback automatically. If this
+    comes back empty for a match you know has real lineup data, that's
+    expected first-try friction for an unverified guess - share the raw
+    match_json (or just match_json['home']/['away']) so this can be
+    corrected against real data, the same way every other WhoScored schema
+    surprise in this project got fixed.
+    """
+    positions = {}
+    if not isinstance(match_json, dict):
+        return positions
+    for side in ('home', 'away'):
+        team_obj = match_json.get(side)
+        if not isinstance(team_obj, dict):
+            continue
+        players = team_obj.get('players')
+        if not isinstance(players, list):
+            continue
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            name = p.get('name')
+            bucket = _map_ws_position(p.get('position'))
+            if name and bucket:
+                positions[name] = bucket
+    return positions
+
+
+# Same qualifier set as OPEN_PLAY_EXCLUDE_QUALIFIERS above (a corner, direct/
+# indirect free kick, throw-in, goal kick, or keeper throw), but used for a
+# DIFFERENT kind of exclusion here. OPEN_PLAY_EXCLUDE_QUALIFIERS classifies a
+# single pass by whether that one pass itself was a restart (used for
+# Progressive Passes/the Passing tab's open-play columns) - fine for judging
+# one pass, but a defensive line's positioning is distorted for the whole
+# set-piece phase that follows a restart (backs pushed up for a corner,
+# dropping deep to defend one), not just the exact instant of the restart
+# pass. DEAD_BALL_WINDOW_SECONDS below defines how long that phase is
+# assumed to last.
+DEAD_BALL_RESTART_QUALIFIERS = OPEN_PLAY_EXCLUDE_QUALIFIERS
+# First-pass approximation, NOT tuned against a published benchmark (unlike
+# Defensive Action Height's formula above, which was grid-searched against
+# two real matches) - there's no public source for "how long does a set-
+# piece phase distort a back line" to check this against. 10 seconds is
+# meant to roughly cover a restart's delivery plus the immediate first
+# knock-down/clearance, without swallowing a long stretch of genuine open
+# play that just happens to trace back to a corner a while ago. Treat this
+# as adjustable once there's a real match to eyeball it against.
+DEAD_BALL_WINDOW_SECONDS = 10.0
+
+
+def compute_defensive_line_height(df, match_json=None, fm_positions=None, full_df=None):
+    """
+    Alternative to Defensive Action Height (m) above: mean X position
+    (converted to metres) of each team's DEFENDERS specifically - every
+    touch/event they're involved in, not just defensive actions - during
+    open play only. Where Defensive Action Height approximates a team's
+    defensive line from WHERE its tackles/interceptions/clearances happen
+    (any player, any moment), this instead asks where the actual back line
+    stands on average, which is the more standard definition of "defensive
+    line height" in football analytics.
+
+    Defender identification tries WhoScored's own roster data first (see
+    _extract_whoscored_positions() - UNVERIFIED against a real live scrape,
+    see its own docstring), falling back to FotMob's own confirmed Position
+    extraction (fm_positions - a ['Team','Player','Position'] DataFrame from
+    fotmob_report.py's extract_player_positions(), passed in by callers that
+    have both sources available, e.g. the combined batch pipeline). A
+    caller with neither source (e.g. the standalone WhoScored-only live
+    report, which never touches FotMob) only gets the WhoScored attempt - if
+    that comes back empty too, this returns an empty result rather than
+    guessing.
+
+    "Open play only" excludes any event happening within DEAD_BALL_WINDOW_
+    SECONDS of a corner/free kick/throw-in/goal kick/keeper throw being
+    taken (by either team) - see DEAD_BALL_RESTART_QUALIFIERS/DEAD_BALL_
+    WINDOW_SECONDS above for why this is a wider window than the single-
+    event open-play check used elsewhere (Progressive Passes, the Passing
+    tab), and for the honest caveat that this window length is a first-pass
+    approximation, not a tuned/benchmarked one.
+
+    full_df: optional full-match event df, used only to find every restart
+    event and build the dead-ball window (so a minute-windowed report still
+    correctly excludes a set-piece phase that started just before the
+    window began). None (the default) falls back to df itself.
+
+    Returns a Series named 'Defensive Line Height (m)', indexed by team -
+    empty if no defenders could be identified from either source.
+    """
+    reference = full_df if full_df is not None else df
+    if reference.empty:
+        return pd.Series(name='Defensive Line Height (m)', dtype=float)
+
+    ws_positions = _extract_whoscored_positions(match_json)
+    defenders = {name for name, pos in ws_positions.items() if pos == 'DEF'}
+    if not defenders and fm_positions is not None and not fm_positions.empty:
+        defenders = set(fm_positions.loc[fm_positions['Position'] == 'DEF', 'Player'])
+    if not defenders:
+        return pd.Series(name='Defensive Line Height (m)', dtype=float)
+
+    ref = _add_cumulative_mins(reference)
+    ref['qn'] = ref['qualifiers_parsed'].apply(qual_names)
+    restart_times = sorted(
+        ref.loc[ref['qn'].apply(lambda s: bool(DEAD_BALL_RESTART_QUALIFIERS & s)), 'cumulative_mins']
+    )
+
+    window_mins = DEAD_BALL_WINDOW_SECONDS / 60.0
+
+    def _in_dead_ball_window(t):
+        i = bisect.bisect_right(restart_times, t) - 1
+        if i < 0:
+            return False
+        return (t - restart_times[i]) <= window_mins
+
+    work = df[df['playerName'].isin(defenders)].copy()
+    if work.empty:
+        return pd.Series(name='Defensive Line Height (m)', dtype=float)
+    work = _add_cumulative_mins(work)
+    work = work[~work['cumulative_mins'].apply(_in_dead_ball_window)]
+
+    height = (work.groupby('team')['x'].mean() * (PITCH_LEN_M / 100)).round(2)
+    height.name = 'Defensive Line Height (m)'
+    return height
 
 
 def compute_corners(df):
