@@ -468,7 +468,13 @@ def scrape_match(match_centre_url):
             except (ValueError, TypeError):
                 continue
 
-    match_info = {'home_name': home_name, 'away_name': away_name, 'match_date': match_date}
+    # match_json itself is carried along too (not just the fields already
+    # pulled out above) so callers can pass it to compute_defensive_stats()
+    # for its own best-effort defender-position lookup (see
+    # _extract_whoscored_positions()) without scrape_match()'s signature/
+    # return arity needing to change for every existing caller.
+    match_info = {'home_name': home_name, 'away_name': away_name, 'match_date': match_date,
+                  'match_json': match_json}
     return df, match_info
 
 
@@ -1598,7 +1604,7 @@ def _guess_goalkeepers(df):
     return gks
 
 
-def compute_defensive_stats(df, full_df=None):
+def compute_defensive_stats(df, full_df=None, match_json=None, fm_positions=None):
     """
     Six defensive counting stats per team, all read directly from discrete
     WhoScored event types/qualifiers (no heuristics needed, unlike PPDA/
@@ -1607,28 +1613,43 @@ def compute_defensive_stats(df, full_df=None):
     from Tackle and Interception event counts; Blocked Passes counts
     'BlockedPass' events (the blocking team's own event); Blocked Shots
     counts the OPPONENT's shot attempts carrying a 'Blocked' qualifier,
-    credited to this team (the side that did the blocking). Defensive
-    Action Height is the MEAN x position (converted to metres) of this
-    team's Tackle/Interception/Clearance/BallRecovery/Challenge events,
-    EXCLUDING that team's own goalkeeper (see _guess_goalkeepers()) - the
-    one metric here that's tuned/approximate rather than an exact event
-    count, since the source's precise definition isn't public. This
-    specific formula (mean, no Aerial, no GK) was chosen by grid-searching
-    22 candidate formulas against two real matches at once rather than one -
-    see the version-history comment above DEF_ACTION_HEIGHT_TYPES for the
-    exact numbers, and diagnose_def_action_height.py for the search itself.
+    credited to this team (the side that did the blocking).
 
-    full_df: optional full-match event df, used ONLY for goalkeeper
-    identification (_guess_goalkeepers()) when df itself is a minute-
-    windowed slice for a windowed report. A keeper's Save events can be
-    sparse or entirely absent within a narrow window, which would cause
-    _guess_goalkeepers() to misidentify (or fail to identify) the keeper
-    and wrongly leave their events in the Defensive Action Height average -
-    identifying the keeper from the FULL match instead avoids that, while
-    every other stat here still counts only events within df's own range.
-    None (the default) falls back to df itself, exactly matching this
-    function's original full-match behavior when df already IS the full
-    match (every existing caller).
+    Defensive Action Height (m) now PRIMARILY comes from compute_defensive_
+    line_height() - defenders' own average position (every touch/event, not
+    just defensive actions), open play only - by request, since that's a
+    more standard notion of "defensive line height" than this column's
+    original definition. See compute_defensive_line_height()'s own docstring
+    for exactly how defenders are identified (WhoScored's own roster data
+    first, via match_json; FotMob's confirmed Position extraction as a
+    fallback, via fm_positions) and how "open play" is defined there.
+
+    FALLBACK: for any team compute_defensive_line_height() can't produce a
+    value for (no match_json/fm_positions passed in at all, or neither
+    source could identify that team's defenders), this column falls back to
+    the ORIGINAL formula - MEAN x position (converted to metres) of that
+    team's Tackle/Interception/Clearance/BallRecovery/Challenge events,
+    EXCLUDING that team's own goalkeeper (see _guess_goalkeepers()) - kept
+    exactly as before so a caller that doesn't pass match_json/fm_positions
+    (or a match where neither position source resolves) still gets a usable
+    number rather than a blank column. This formula (mean, no Aerial, no GK)
+    was chosen by grid-searching 22 candidate formulas against two real
+    matches at once rather than one - see the version-history comment above
+    DEF_ACTION_HEIGHT_TYPES for the exact numbers, and diagnose_def_action_
+    height.py for the search itself.
+
+    full_df: optional full-match event df, used for goalkeeper
+    identification (_guess_goalkeepers()) AND as compute_defensive_line_
+    height()'s own full-match reference (for finding every restart event to
+    build its dead-ball window) when df itself is a minute-windowed slice
+    for a windowed report. None (the default) falls back to df itself,
+    exactly matching this function's original full-match behavior when df
+    already IS the full match (every existing caller).
+
+    match_json / fm_positions: optional, passed straight through to
+    compute_defensive_line_height() - see its own docstring. Omitting both
+    (the default) means every team falls back to the original formula
+    above, unchanged from this function's prior behavior.
     """
     teams = [t for t in df['team'].dropna().unique()]
 
@@ -1651,6 +1672,14 @@ def compute_defensive_stats(df, full_df=None):
     gk_names = _guess_goalkeepers(full_df if full_df is not None else df)
     da = da[~da.apply(lambda r: gk_names.get(r['team']) == r['playerName'], axis=1)]
     def_action_height = (da.groupby('team')['x'].mean() * (PITCH_LEN_M / 100)).round(2)
+
+    # Per team: prefer compute_defensive_line_height()'s value where it has
+    # one, otherwise keep the original defensive-action-based value above -
+    # combine_first() takes the LEFT side's value wherever it has one, so
+    # line_height goes first here.
+    line_height = compute_defensive_line_height(df, match_json=match_json, fm_positions=fm_positions,
+                                                 full_df=full_df)
+    def_action_height = line_height.combine_first(def_action_height)
 
     out = pd.DataFrame({
         'Tackles': tackles,
@@ -2834,7 +2863,7 @@ def main():
     ppda = compute_ppda(df)
 
     print("Computing defensive stats...")
-    defensive_stats = compute_defensive_stats(df)
+    defensive_stats = compute_defensive_stats(df, match_json=match_info.get('match_json'))
     defensive_actions = compute_defensive_actions(df)
     defensive_action_location = compute_defensive_action_location(df)
 

@@ -89,6 +89,7 @@ if st.button("Generate Combined Report", type="primary"):
                 df, match_info = wr.scrape_match(ws_url.strip())
             ws_home_name = match_info.get("home_name")
             ws_away_name = match_info.get("away_name")
+            ws_match_json = match_info.get("match_json")
 
             with st.spinner("Computing WhoScored tables..."):
                 _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
@@ -103,7 +104,7 @@ if st.button("Generate Combined Report", type="primary"):
                 chains_df, team_sequences = wr.compute_sequences(df)
                 field_tilt = wr.compute_field_tilt(team_summary)
                 ppda = wr.compute_ppda(df)
-                defensive_stats = wr.compute_defensive_stats(df)
+                defensive_stats = wr.compute_defensive_stats(df, match_json=ws_match_json)
                 defensive_actions = wr.compute_defensive_actions(df)
                 defensive_action_location = wr.compute_defensive_action_location(df)
                 corners = wr.compute_corners(df)

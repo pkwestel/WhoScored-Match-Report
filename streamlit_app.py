@@ -97,6 +97,7 @@ if st.button("Generate Report", type="primary"):
                 df, match_info = wr.scrape_match(url.strip())
             home_name = match_info.get("home_name")
             away_name = match_info.get("away_name")
+            match_json = match_info.get("match_json")
 
             # df_windowed is used ONLY by the handful of functions that are
             # safe to feed a pre-filtered slice directly (no cross-row/
@@ -142,7 +143,7 @@ if st.button("Generate Report", type="primary"):
                 field_tilt = wr.compute_field_tilt(team_summary)
                 ppda = wr.compute_ppda(df_windowed)
             with st.spinner("Computing defensive stats..."):
-                defensive_stats = wr.compute_defensive_stats(df_windowed, full_df=df)
+                defensive_stats = wr.compute_defensive_stats(df_windowed, full_df=df, match_json=match_json)
                 defensive_actions = wr.compute_defensive_actions(
                     df_windowed, full_df=df, minute_min=minute_min, minute_max=minute_max)
                 defensive_action_location = wr.compute_defensive_action_location(df_windowed)
