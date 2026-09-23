@@ -2620,7 +2620,7 @@ else:
         # previous behavior) left a lot of dead space to its right.
         totals_category = _narrow_selectbox(
             "Category", ["Shots", "Passing", "Touches", "Defensive Actions",
-                         "Defensive Action Location"],
+                         "Defensive Action Location", "Team Style"],
             key="team_totals_category"
         )
         if totals_category == "Shots":
@@ -2727,6 +2727,22 @@ else:
                 defensive_location_totals["Team"] = defensive_location_totals["Team"].map(_display_team_name)
                 st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(defensive_location_totals))
+        elif totals_category == "Team Style":
+            team_style_totals = hdb.fetch_season_team_style_totals(db, competition=selected_league)
+            if team_style_totals.empty:
+                st.info(
+                    "No Team Style stats saved yet - publish at least one match with 'Save to Database' "
+                    "first."
+                )
+            else:
+                team_style_totals["Team"] = team_style_totals["Team"].map(_display_team_name)
+                st.dataframe(team_style_totals, use_container_width=False, hide_index=True,
+                             height=_no_scroll_height(team_style_totals))
+                st.caption(
+                    "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across this "
+                    "team's saved matches (not summed). 10+ Pass Sequences shows both a season total and "
+                    "a per-game average."
+                )
 
     elif _active_tab == "fixtures":
         fixtures = hdb.fetch_fixtures(db)

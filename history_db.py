@@ -3140,6 +3140,105 @@ def fetch_season_defensive_location_totals(db: DB, competition=None) -> pd.DataF
         "Team").reset_index(drop=True)
 
 
+def fetch_season_team_style_totals(db: DB, competition=None) -> pd.DataFrame:
+    """
+    Season-cumulative version of the match report's Team Style table (see
+    _ADVANCED_STATS_TABLES's 'Team Style' entry and fetch_advanced_stats_
+    tables()) - one row per team, sourced from team_match_stats.extra_
+    json's 'ws_totals' namespace (whoscored_report.compute_totals()'s
+    output; the same source the single-match Advanced Stats tab reads).
+
+    Field Tilt %/PPDA/Passes per Sequence/Def Line Height are all rate-like
+    numbers that don't make sense summed across matches, so by request each
+    is shown as a plain average across this team's matches - e.g. a team
+    with Field Tilt of 70.4%/51.3%/65.5% across three matches shows 62.4%
+    ((70.4+51.3+65.5)/3, rounded to 1 decimal place same as the match-level
+    table's own formatting). Each of the four stats tracks its own count of
+    matches with a real (non-missing) value and divides by THAT count, not
+    a shared "games played" figure - a match missing one specific stat
+    (an older save, or PPDA/Def Line Height genuinely absent for a match
+    with zero qualifying events) is skipped for that stat's own average
+    only, rather than counted as a 0 that would drag the average down, or
+    conflated with a different stat's own availability.
+
+    10+ Pass Sequences is a counting stat, not a rate, so by request it
+    gets TWO columns instead of one average: a season TOTAL (summed, same
+    treatment as every other counting stat elsewhere in this dropdown) and
+    a Per Game rate (that total divided by however many of this team's
+    matches have a 10+ Pass Sequences value saved at all).
+
+    competition: optional matches.competition filter (see the League
+    Overview tab's league dropdown) - None (the default) includes every
+    saved match regardless of competition.
+    """
+    cols = ["Team", "Field Tilt %", "PPDA", "10+ Pass Sequences (Total)",
+            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Def Line Height (m)"]
+    valid_ids = _match_ids_for_competition(db, competition)
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    stats = {}
+
+    def _row(team):
+        return stats.setdefault(team, {
+            "field_tilt_sum": 0.0, "field_tilt_n": 0,
+            "ppda_sum": 0.0, "ppda_n": 0,
+            "seq_total": 0, "seq_n": 0,
+            "passes_per_seq_sum": 0.0, "passes_per_seq_n": 0,
+            "def_line_sum": 0.0, "def_line_n": 0,
+        })
+
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws = extra.get("ws_totals")
+        if not ws:
+            continue
+        row = _row(team)
+
+        field_tilt = ws.get("Field Tilt %")
+        if field_tilt is not None:
+            row["field_tilt_sum"] += float(field_tilt)
+            row["field_tilt_n"] += 1
+
+        ppda = ws.get("PPDA")
+        if ppda is not None:
+            row["ppda_sum"] += float(ppda)
+            row["ppda_n"] += 1
+
+        seq = ws.get("10+ Pass Sequences")
+        if seq is not None:
+            row["seq_total"] += seq
+            row["seq_n"] += 1
+
+        pps = ws.get("Avg Passes per Sequence")
+        if pps is not None:
+            row["passes_per_seq_sum"] += float(pps)
+            row["passes_per_seq_n"] += 1
+
+        dlh = ws.get("Defensive Action Height (m)")
+        if dlh is not None:
+            row["def_line_sum"] += float(dlh)
+            row["def_line_n"] += 1
+
+    if not stats:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for team, row in stats.items():
+        records.append({
+            "Team": team,
+            "Field Tilt %": round(row["field_tilt_sum"] / row["field_tilt_n"], 1) if row["field_tilt_n"] else 0.0,
+            "PPDA": round(row["ppda_sum"] / row["ppda_n"], 2) if row["ppda_n"] else 0.0,
+            "10+ Pass Sequences (Total)": row["seq_total"],
+            "10+ Pass Sequences (Per Game)": round(row["seq_total"] / row["seq_n"], 2) if row["seq_n"] else 0.0,
+            "Passes per Sequence": (
+                round(row["passes_per_seq_sum"] / row["passes_per_seq_n"], 2) if row["passes_per_seq_n"] else 0.0
+            ),
+            "Def Line Height (m)": round(row["def_line_sum"] / row["def_line_n"], 1) if row["def_line_n"] else 0.0,
+        })
+    return pd.DataFrame(records, columns=cols).sort_values("Team").reset_index(drop=True)
+
+
 # Duplicated from whoscored_report.py's own third()/in_box() pitch-zone
 # logic (same reasoning as pitch_viz.py duplicating PITCH_LEN_M/PITCH_WID_M
 # rather than importing whoscored_report.py - see that file's own
