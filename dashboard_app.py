@@ -2587,17 +2587,34 @@ else:
         # selection - a second competition needs no further code changes,
         # just matches saved under a different Competition value.
         available_leagues = hdb.fetch_available_competitions(db)
-        if available_leagues:
-            league_col, _spacer = st.columns([1, 3])
+        # Season dropdown - scopes the same League Table + Team Stats
+        # tables to one season (see history_db._season_label()), same
+        # "index=0 is the most recent" convention as the Team Page/Player
+        # Stats tabs' own season dropdowns (fetch_available_seasons()
+        # already sorts most-recent-first). Without this, a match saved
+        # from an entirely different season (e.g. one added years before
+        # this project's current data) would get silently counted into
+        # whatever's currently on screen - a league table in particular is
+        # meant to be one season's worth of results, not every match ever
+        # saved.
+        available_seasons = hdb.fetch_available_seasons(db)
+        if available_leagues or available_seasons:
+            league_col, season_col, _spacer = st.columns([1, 1, 2])
             with league_col:
-                selected_league = st.selectbox(
-                    "League", available_leagues,
-                    index=0, key="league_overview_league",
+                selected_league = (
+                    st.selectbox("League", available_leagues, index=0, key="league_overview_league")
+                    if available_leagues else None
+                )
+            with season_col:
+                selected_season = (
+                    st.selectbox("Season", available_seasons, index=0, key="league_overview_season")
+                    if available_seasons else None
                 )
         else:
             selected_league = None
+            selected_season = None
 
-        league_table = hdb.fetch_league_table(db, competition=selected_league)
+        league_table = hdb.fetch_league_table(db, competition=selected_league, season=selected_season)
         if league_table.empty:
             st.info(
                 "No completed match results saved yet - publish at least one match with 'Save to "
@@ -2624,7 +2641,8 @@ else:
             key="team_totals_category"
         )
         if totals_category == "Shots":
-            shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(db, competition=selected_league)
+            shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(
+                db, competition=selected_league, season=selected_season)
             if shot_for_df.empty and shot_against_df.empty:
                 st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
             else:
@@ -2678,7 +2696,8 @@ else:
                 st.dataframe(shot_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(shot_totals))
         elif totals_category == "Passing":
-            passing_totals = hdb.fetch_season_passing_totals(db, competition=selected_league)
+            passing_totals = hdb.fetch_season_passing_totals(
+                db, competition=selected_league, season=selected_season)
             if passing_totals.empty:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
@@ -2686,7 +2705,8 @@ else:
                 st.dataframe(passing_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(passing_totals))
         elif totals_category == "Touches":
-            touches_totals = hdb.fetch_season_touches_totals(db, competition=selected_league)
+            touches_totals = hdb.fetch_season_touches_totals(
+                db, competition=selected_league, season=selected_season)
             if touches_totals.empty:
                 st.info(
                     "No touch data saved yet. This needs matches saved AFTER the touches table was "
@@ -2704,7 +2724,8 @@ else:
                     "unaffected and cover every match with saved touch data."
                 )
         elif totals_category == "Defensive Actions":
-            defensive_totals = hdb.fetch_season_defensive_totals(db, competition=selected_league)
+            defensive_totals = hdb.fetch_season_defensive_totals(
+                db, competition=selected_league, season=selected_season)
             if defensive_totals.empty:
                 st.info(
                     "No defensive stats saved yet - publish at least one match with 'Save to Database' "
@@ -2716,7 +2737,7 @@ else:
                              height=_no_scroll_height(defensive_totals))
         elif totals_category == "Defensive Action Location":
             defensive_location_totals = hdb.fetch_season_defensive_location_totals(
-                db, competition=selected_league)
+                db, competition=selected_league, season=selected_season)
             if defensive_location_totals.empty:
                 st.info(
                     "No defensive action location data saved yet. This namespace was added partway "
@@ -2728,7 +2749,8 @@ else:
                 st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(defensive_location_totals))
         elif totals_category == "Team Style":
-            team_style_totals = hdb.fetch_season_team_style_totals(db, competition=selected_league)
+            team_style_totals = hdb.fetch_season_team_style_totals(
+                db, competition=selected_league, season=selected_season)
             if team_style_totals.empty:
                 st.info(
                     "No Team Style stats saved yet - publish at least one match with 'Save to Database' "
