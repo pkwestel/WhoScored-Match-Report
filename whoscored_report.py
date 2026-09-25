@@ -1065,7 +1065,12 @@ def body_part(row):
 
 
 def is_own_goal(row):
-    return row['type.displayName'] == 'Goal' and 'Own goal' in qual_names(row['qualifiers_parsed'])
+    # Confirmed against real WhoScored match-centre data (Fulham vs Man Utd,
+    # 2026-09, Lisandro Martinez's 62' own goal): the qualifier is the
+    # PascalCase, no-space string 'OwnGoal' - not 'Own goal' (which never
+    # matches real data and silently no-op'd this exclusion everywhere it
+    # was used).
+    return row['type.displayName'] == 'Goal' and 'OwnGoal' in qual_names(row['qualifiers_parsed'])
 
 
 def compute_sca(df, minute_min=None, minute_max=None):
@@ -2276,13 +2281,21 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
     d = _add_cumulative_mins(df)
     d['pitch_third'] = d['x'].apply(third)
     d['in_att_box'] = in_box(d['x'], d['y'])
+    # Own goals carry WhoScored's 'isShot' flag like any other Goal event,
+    # but aren't a shot taken by the credited team - same treatment as
+    # compute_sca()'s own_goal_mask/is_own_goal() above. Excluded from
+    # Shots For/Against and the Blocked Shots derivation below via this
+    # 'is_real_shot' column, WITHOUT touching Total Touches For/Against -
+    # an own goal is still a genuine touch on the ball, just not a shot.
+    own_goal_mask = d.apply(is_own_goal, axis=1)
+    d['is_real_shot'] = (d['isShot'] == True) & ~own_goal_mask
 
     passes = _classify_passes(df)
 
     # Blocked Shots For: the OPPONENT's own shot attempts carrying a
     # 'Blocked' qualifier - same definition as compute_defensive_stats()'s
     # Totals-tab Blocked Shots column (see this function's own docstring).
-    blocked_shot_events = d[d['isShot'] == True].copy()
+    blocked_shot_events = d[d['is_real_shot']].copy()
     blocked_shot_events['qn'] = blocked_shot_events['qualifiers_parsed'].apply(qual_names)
     blocked_shot_events = blocked_shot_events[blocked_shot_events['qn'].apply(lambda s: 'Blocked' in s)]
 
@@ -2341,7 +2354,7 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
             'Team': team,
             'Player': prow['Player'],
             'Minutes Played': minutes_played,
-            'Shots For': int((own['isShot'] == True).sum()),
+            'Shots For': int(own['is_real_shot'].sum()),
             'Total Touches For': int(len(own_touches)),
             'Own Third For': int((own_touches['pitch_third'] == 'Own third').sum()),
             'Middle Third For': int((own_touches['pitch_third'] == 'Middle third').sum()),
@@ -2356,7 +2369,7 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
             'Interceptions For': interceptions_for,
             'Blocked Passes For': blocked_passes_for,
             'Blocked Shots For': blocked_shots_for,
-            'Shots Against': int((opp_events['isShot'] == True).sum()),
+            'Shots Against': int(opp_events['is_real_shot'].sum()),
             'Total Touches Against': int(len(opp_touches)),
             'Own Third Against': int((opp_touches['pitch_third'] == 'Own third').sum()),
             'Middle Third Against': int((opp_touches['pitch_third'] == 'Middle third').sum()),
@@ -2654,7 +2667,7 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " a Tackle or Interception winning the ball still counts as an SCA, but a BallRecovery (picking up a"
         " loose ball rather than winning a contested one) does not - it's skipped over, not counted, so the"
         " search keeps looking further back for the real contributing action. Own goals (a 'Goal' event"
-        " carrying WhoScored's 'Own goal' qualifier) are excluded entirely - they carry the same 'isShot'"
+        " carrying WhoScored's 'OwnGoal' qualifier) are excluded entirely - they carry the same 'isShot'"
         " flag as a real shot in the raw data, but they aren't a shot taken by the team credited with the"
         " goal, so they don't count as a shot and don't get a row on this tab.",
         "",
