@@ -3210,6 +3210,27 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
     a Per Game rate (that total divided by however many of this team's
     matches have a 10+ Pass Sequences value saved at all).
 
+    Total Number of Sprints and Line Breaking Passes are also counting
+    stats, not rates, so - like 10+ Pass Sequences (Total) - they're summed
+    across every one of this team's matches rather than averaged:
+      - Total Number of Sprints is read directly from team_match_stats.
+        extra_json's 'fm_totals' namespace ('Number of sprints' -
+        FotMob's own already-team-level figure, the same source the match
+        report's own Physical advanced-stats table uses; see
+        _ADVANCED_STATS_TABLES above). FotMob already publishes this as a
+        team total, so no per-player aggregation is needed.
+      - Line Breaking Passes has no such team-level FotMob figure -
+        fm_totals never carries it, it's only ever published per player
+        (player_match_stats.extra_json's 'fm_line_breaking_passes'
+        namespace, saved by batch_lib.build_db_stats() from the match
+        report's Shot Breakdown 'By Player' table). So this sums every
+        one of this team's players' own 'Line Breaking Passes' value for
+        each match instead, arriving at the same team-match total a
+        per-player sum on the match report's own Passing tab would give.
+        A match with neither namespace saved for a team simply doesn't
+        contribute to either total (same "can't distinguish missing from
+        zero" limitation already noted above for the other fields).
+
     competition: optional matches.competition filter (see the League
     Overview tab's league dropdown) - None (the default) includes every
     saved match regardless of competition.
@@ -3219,9 +3240,9 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
     saved match regardless of season.
     """
     cols = ["Team", "Field Tilt %", "PPDA", "10+ Pass Sequences (Total)",
-            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Def Line Height (m)"]
+            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Def Line Height (m)",
+            "Total Number of Sprints", "Line Breaking Passes"]
     valid_ids = _match_ids_for_competition(db, competition, season)
-    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
     stats = {}
 
     def _row(team):
@@ -3231,41 +3252,74 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
             "seq_total": 0, "seq_n": 0,
             "passes_per_seq_sum": 0.0, "passes_per_seq_n": 0,
             "def_line_sum": 0.0, "def_line_n": 0,
+            "sprints_total": 0,
+            "lbp_total": 0,
         })
 
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
     for match_id, team, extra_json in cur.fetchall():
         if valid_ids is not None and str(match_id) not in valid_ids:
             continue
         extra = json.loads(extra_json) if extra_json else {}
         ws = extra.get("ws_totals")
-        if not ws:
+        fm = extra.get("fm_totals")
+        if not ws and not fm:
             continue
         row = _row(team)
 
-        field_tilt = ws.get("Field Tilt %")
-        if field_tilt is not None:
-            row["field_tilt_sum"] += float(field_tilt)
-            row["field_tilt_n"] += 1
+        if ws:
+            field_tilt = ws.get("Field Tilt %")
+            if field_tilt is not None:
+                row["field_tilt_sum"] += float(field_tilt)
+                row["field_tilt_n"] += 1
 
-        ppda = ws.get("PPDA")
-        if ppda is not None:
-            row["ppda_sum"] += float(ppda)
-            row["ppda_n"] += 1
+            ppda = ws.get("PPDA")
+            if ppda is not None:
+                row["ppda_sum"] += float(ppda)
+                row["ppda_n"] += 1
 
-        seq = ws.get("10+ Pass Sequences")
-        if seq is not None:
-            row["seq_total"] += seq
-            row["seq_n"] += 1
+            seq = ws.get("10+ Pass Sequences")
+            if seq is not None:
+                row["seq_total"] += seq
+                row["seq_n"] += 1
 
-        pps = ws.get("Avg Passes per Sequence")
-        if pps is not None:
-            row["passes_per_seq_sum"] += float(pps)
-            row["passes_per_seq_n"] += 1
+            pps = ws.get("Avg Passes per Sequence")
+            if pps is not None:
+                row["passes_per_seq_sum"] += float(pps)
+                row["passes_per_seq_n"] += 1
 
-        dlh = ws.get("Defensive Action Height (m)")
-        if dlh is not None:
-            row["def_line_sum"] += float(dlh)
-            row["def_line_n"] += 1
+            dlh = ws.get("Defensive Action Height (m)")
+            if dlh is not None:
+                row["def_line_sum"] += float(dlh)
+                row["def_line_n"] += 1
+
+        if fm:
+            sprints = fm.get("Number of sprints")
+            if sprints is not None:
+                try:
+                    row["sprints_total"] += int(round(float(sprints)))
+                except (TypeError, ValueError):
+                    pass
+
+    # Line Breaking Passes: no team-level namespace exists for this one -
+    # summed from every player's own player_match_stats row instead (see
+    # docstring above).
+    player_cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, team, extra_json in player_cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        lbp_ns = extra.get("fm_line_breaking_passes")
+        if not lbp_ns:
+            continue
+        lbp = lbp_ns.get("Line Breaking Passes")
+        if lbp is None:
+            continue
+        row = _row(team)
+        try:
+            row["lbp_total"] += int(round(float(lbp)))
+        except (TypeError, ValueError):
+            pass
 
     if not stats:
         return pd.DataFrame(columns=cols)
@@ -3282,6 +3336,8 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
                 round(row["passes_per_seq_sum"] / row["passes_per_seq_n"], 2) if row["passes_per_seq_n"] else 0.0
             ),
             "Def Line Height (m)": round(row["def_line_sum"] / row["def_line_n"], 1) if row["def_line_n"] else 0.0,
+            "Total Number of Sprints": row["sprints_total"],
+            "Line Breaking Passes": row["lbp_total"],
         })
     return pd.DataFrame(records, columns=cols).sort_values("Team").reset_index(drop=True)
 

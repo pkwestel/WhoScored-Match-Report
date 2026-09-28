@@ -2763,7 +2763,8 @@ else:
                 st.caption(
                     "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across this "
                     "team's saved matches (not summed). 10+ Pass Sequences shows both a season total and "
-                    "a per-game average."
+                    "a per-game average. Total Number of Sprints and Line Breaking Passes are season "
+                    "totals (summed, not averaged)."
                 )
 
     elif _active_tab == "fixtures":
