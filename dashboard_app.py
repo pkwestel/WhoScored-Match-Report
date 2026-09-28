@@ -2254,8 +2254,14 @@ def _render_team_page(db, team, season=None):
     season is whatever _team_page_url() baked into the link (currently
     always None, since that link never sets a season) - falls back to this
     team's most recent season if not given/not a real season.
+
+    Passes team into fetch_available_seasons() so a season in _HIDDEN_
+    SEASONS (see that function's docstring) only ever shows up in the
+    dropdown above when this IS the Man Utd Team Page - every other team's
+    own page gets the same hidden-seasons-excluded list League Overview/
+    the Player Stats tab already get.
     """
-    seasons = hdb.fetch_available_seasons(db)
+    seasons = hdb.fetch_available_seasons(db, team=team)
     if not seasons:
         st.info("No matches published yet.")
         return

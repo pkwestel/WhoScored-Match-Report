@@ -689,6 +689,36 @@ def _season_label(date_str):
     return f"{start_year}/{(start_year + 1) % 100:02d}"
 
 
+# Season(s) to keep out of general view - per explicit request, matches from
+# these seasons now exist in the database, but should stay hidden from every
+# page EXCEPT the Man Utd Team Page (League Overview, the Player Stats tab,
+# the Fixtures tab, and every OTHER team's own Team Page should all behave as
+# if these seasons don't exist at all). Not a data-quality decision - the
+# matches are presumably fine - purely a "don't show this yet" visibility
+# rule, so it's kept as its own small, clearly-labeled set rather than
+# folded into any filtering logic that implies something's wrong with the
+# data itself. Add/remove season labels here (see _season_label() for the
+# 'YYYY/YY' format) if this list ever needs to change.
+_HIDDEN_SEASONS = {"2023/24"}
+
+# Man Utd name-variant markers - duplicated from pitch_viz._MANU_MARKERS/
+# _is_man_utd() rather than imported (same "small helper duplicated across
+# files instead of a cross-module import" reasoning as this file's own
+# _pitch_third()/_in_box() duplication of whoscored_report.py's third()/
+# in_box() - see fetch_season_touches_totals()'s comment above). Used only
+# to decide whether _HIDDEN_SEASONS should stay hidden for a given team.
+_MANU_MARKERS = ["man utd", "man united", "manchester united"]
+
+
+def _is_man_utd(team_name):
+    """True when team_name is some spelling of Manchester United - see
+    _MANU_MARKERS above. False (never crashes) for None/empty."""
+    if not team_name:
+        return False
+    name = str(team_name).strip().lower()
+    return any(marker in name for marker in _MANU_MARKERS)
+
+
 def fetch_fixtures(db: DB) -> pd.DataFrame:
     """
     One row per match, shaped for dashboard_app.py's Fixtures tab: match_id
@@ -706,6 +736,12 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
     which are None for anything saved before those existed. Season needs no
     backfill at all since it's derived from match_date, which every match
     has always had.
+
+    Matches from any season in _HIDDEN_SEASONS are dropped entirely, no
+    matter which teams played in them - the Fixtures tab has no per-team
+    scoping (unlike the Team Page), so there's no way to make an exception
+    for Man Utd here the way fetch_available_seasons()/fetch_team_match_log()
+    do; those matches simply don't exist as far as this tab is concerned.
     """
     matches = fetch_matches(db)
     cols = ["match_id", "Date", "Competition", "Matchweek", "Season", "Home Team", "Home xG",
@@ -740,13 +776,13 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
             "Away Team": m["away_team"],
             "Referee": m.get("referee"),
         })
+    out = pd.DataFrame(records, columns=cols)
+    out = out[~out["Season"].isin(_HIDDEN_SEASONS)]
     # Ascending by Date - oldest match first, newest at the bottom - even
     # though fetch_matches() itself (used above) is newest-first (that order
     # suits other callers, e.g. season-cumulative tables that want to short-
     # circuit on recent matches). A match with no date at all sorts last.
-    return (pd.DataFrame(records, columns=cols)
-            .sort_values("Date", na_position="last")
-            .reset_index(drop=True))
+    return out.sort_values("Date", na_position="last").reset_index(drop=True)
 
 
 def fetch_team_match_log(db: DB, team, season, competition=None) -> pd.DataFrame:
@@ -1917,18 +1953,29 @@ def ordinal(n):
     return f"{n}{suffix}"
 
 
-def fetch_available_seasons(db: DB) -> list:
+def fetch_available_seasons(db: DB, team=None) -> list:
     """
     Every season label (see _season_label()) with at least one saved match,
-    most recent first - backs the Team Page's season dropdown. Just one
-    entry today (this project only has one season's worth of data so far),
-    but the dropdown is wired up now so a second season needs no UI changes
-    later, just more saved matches.
+    most recent first - backs the Team Page's season dropdown, the League
+    Overview tab's season dropdown, and the Player Stats tab's season
+    dropdown.
+
+    Any season in _HIDDEN_SEASONS is left out of this list UNLESS team is
+    some spelling of Manchester United (see _is_man_utd()) - per request,
+    those seasons should only ever be visible/selectable on the Man Utd
+    Team Page, nowhere else. team is None (the default) for every caller
+    except _render_team_page() (which passes whichever team's page is
+    being viewed), so League Overview/Player Stats - which have no single
+    "current team" to check - always get the hidden-seasons-excluded list,
+    and every OTHER team's own Team Page does too (only a Man Utd page
+    passes a team that makes _is_man_utd() true).
     """
     matches = fetch_matches(db)
     if matches.empty:
         return []
     seasons = matches["match_date"].apply(_season_label).dropna().unique().tolist()
+    if not _is_man_utd(team):
+        seasons = [s for s in seasons if s not in _HIDDEN_SEASONS]
     return sorted(seasons, reverse=True)
 
 
