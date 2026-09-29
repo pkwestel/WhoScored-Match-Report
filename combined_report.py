@@ -112,6 +112,16 @@ TEAM_NAME_ALIASES = {
     # team_match_stats query showing 4 rows instead of 2 for this match.
     'Bayern': ['Bayern München'],
     'Bodoe/Glimt': ['Bodø/Glimt'],
+    # PSV vs Shakhtar (Sep 2026 Champions League match) - same fix again.
+    # WhoScored's short 'Shakhtar' vs FotMob's fuller 'Shakhtar Donetsk'
+    # (same pattern as Stuttgart/Bayern above) - confirmed via a live
+    # team_match_stats query showing 3 rows instead of 2 for this match:
+    # PSV's own row already matched fine (both sources say 'PSV Eindhoven'),
+    # but Shakhtar's fm_totals (including the real Total xG, 0.62) landed
+    # under its own separate 'Shakhtar Donetsk' row instead of merging into
+    # the 'Shakhtar' row fetch_fixtures() actually reads - which is what
+    # blanked Shakhtar's xG on the Fixtures tab.
+    'Shakhtar': ['Shakhtar Donetsk'],
 }
 
 
