@@ -226,6 +226,7 @@ def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
 TEAM_DISPLAY_NAMES = {
     "Porto": "FC Porto",
     "RBL": "RB Leipzig",
+    "Shakhtar": "Shakhtar Donetsk",
 }
 
 
@@ -268,6 +269,7 @@ TEAM_ABBREVIATIONS = {
     "Porto": "POR", "FC Porto": "POR", "Borussia Dortmund": "BVB",
     "Villarreal": "VIL", "Lille": "LIL", "Real Betis": "BET",
     "AEK Athens": "AEK", "LASK": "LAS", "Club Brugge": "BRU",
+    "Shakhtar": "SHK", "Shakhtar Donetsk": "SHK", "PSV Eindhoven": "PSV",
 }
 
 
