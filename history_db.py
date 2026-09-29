@@ -719,7 +719,7 @@ def _is_man_utd(team_name):
     return any(marker in name for marker in _MANU_MARKERS)
 
 
-def fetch_fixtures(db: DB) -> pd.DataFrame:
+def fetch_fixtures(db: DB, include_hidden_seasons=False) -> pd.DataFrame:
     """
     One row per match, shaped for dashboard_app.py's Fixtures tab: match_id
     (kept for the clickable link to the match detail view, not meant to be
@@ -737,11 +737,16 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
     backfill at all since it's derived from match_date, which every match
     has always had.
 
-    Matches from any season in _HIDDEN_SEASONS are dropped entirely, no
-    matter which teams played in them - the Fixtures tab has no per-team
-    scoping (unlike the Team Page), so there's no way to make an exception
-    for Man Utd here the way fetch_available_seasons()/fetch_team_match_log()
-    do; those matches simply don't exist as far as this tab is concerned.
+    Matches from any season in _HIDDEN_SEASONS are dropped unless
+    include_hidden_seasons=True (default False) - the Fixtures tab itself
+    never passes it, so those matches stay fully hidden there regardless of
+    which teams played in them (that tab has no per-team scoping to make an
+    exception with in the first place). fetch_team_match_log() below is the
+    one caller that passes True, and only when the team it's building a log
+    for is Man Utd (see _is_man_utd()) - the same "hidden everywhere except
+    the Man Utd Team Page" rule fetch_available_seasons() already applies,
+    just threaded through here too so that page's own Match Log table isn't
+    silently emptied out for a season its season dropdown otherwise offers.
     """
     matches = fetch_matches(db)
     cols = ["match_id", "Date", "Competition", "Matchweek", "Season", "Home Team", "Home xG",
@@ -777,7 +782,8 @@ def fetch_fixtures(db: DB) -> pd.DataFrame:
             "Referee": m.get("referee"),
         })
     out = pd.DataFrame(records, columns=cols)
-    out = out[~out["Season"].isin(_HIDDEN_SEASONS)]
+    if not include_hidden_seasons:
+        out = out[~out["Season"].isin(_HIDDEN_SEASONS)]
     # Ascending by Date - oldest match first, newest at the bottom - even
     # though fetch_matches() itself (used above) is newest-first (that order
     # suits other callers, e.g. season-cumulative tables that want to short-
@@ -800,8 +806,15 @@ def fetch_team_match_log(db: DB, team, season, competition=None) -> pd.DataFrame
     convention (None includes every competition together). The Team Page
     passes its own selected Competition through here too, so the match log
     always lists only the matches actually counted in the tables above it.
+
+    Passes include_hidden_seasons=True into fetch_fixtures() when team is
+    Man Utd (see _is_man_utd()), so a hidden season that's only reachable
+    via the Man Utd Team Page's own season dropdown (see fetch_available_
+    seasons()) still gets a populated Match Log table there instead of
+    coming back empty - fetch_fixtures() would otherwise strip those
+    matches out before this function ever gets to filter by team/season.
     """
-    fixtures = fetch_fixtures(db)
+    fixtures = fetch_fixtures(db, include_hidden_seasons=_is_man_utd(team))
     if fixtures.empty:
         return fixtures
     scoped = fixtures[

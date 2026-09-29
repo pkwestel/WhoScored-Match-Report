@@ -1983,8 +1983,16 @@ def _render_match_detail(db, match_id):
     in the database. There's no original .xlsx workbook kept anywhere (see
     this module's own docstring) - this is a from-scratch render of the
     same underlying data, not a re-download of the file that was uploaded.
+
+    include_hidden_seasons=True here (unlike the Fixtures tab's own plain
+    fetch_fixtures(db) call): this is a direct "show me THIS match_id"
+    lookup, not a season-scoped browsing view - the only place that can
+    link to a hidden-season match at all is the Man Utd Team Page's own
+    Match Log (see fetch_team_match_log()), so a match opened from there
+    should actually open, not 404 as "Match not found" the moment it's
+    clicked.
     """
-    fixtures = hdb.fetch_fixtures(db)
+    fixtures = hdb.fetch_fixtures(db, include_hidden_seasons=True)
     row = fixtures[fixtures["match_id"] == match_id]
     if row.empty:
         st.error("Match not found.")
