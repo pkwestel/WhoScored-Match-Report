@@ -122,6 +122,14 @@ TEAM_NAME_ALIASES = {
     # the 'Shakhtar' row fetch_fixtures() actually reads - which is what
     # blanked Shakhtar's xG on the Fixtures tab.
     'Shakhtar': ['Shakhtar Donetsk'],
+    # Como vs RBL (Sep 2026 European match) - same fix again. WhoScored's
+    # abbreviated 'RBL' vs FotMob's fuller 'RB Leipzig' (same pattern as
+    # every entry above) - confirmed via a live team_match_stats query
+    # showing 3 rows instead of 2 for this match: Como's own row already
+    # matched fine, but RBL's fm_totals (including the real Total xG, 1.36)
+    # landed under its own separate 'RB Leipzig' row instead of merging
+    # into the 'RBL' row fetch_fixtures() actually reads.
+    'RBL': ['RB Leipzig'],
 }
 
 
