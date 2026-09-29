@@ -1675,10 +1675,11 @@ def _render_player_stats_table(key, title, df, per90_cols):
     """
     One table on the Player Stats tab (General Stats/Possession/Passing/
     Defensive Actions/Defensive Action Locations) - shared rendering for
-    all 5: a subheader + Per 90 toggle on one row, a 30-row cap with a
-    "Show More" button beneath (adds _PLAYER_STATS_ROWS_PER_PAGE more rows
-    per click - a plain session_state counter keyed to `key`, so each of
-    the 5 tables expands independently), and the table itself.
+    all 5: a subheader + Per 90 toggle on one row, a "Sort by" column
+    picker on a second row, a 30-row cap with a "Show More" button beneath
+    (adds _PLAYER_STATS_ROWS_PER_PAGE more rows per click - a plain
+    session_state counter keyed to `key`, so each of the 5 tables expands
+    independently), and the table itself.
 
     df must already carry the columns to show in Totals view (Team right
     after Player, per _fetch_league_season_table()'s own convention);
@@ -1686,6 +1687,21 @@ def _render_player_stats_table(key, title, df, per90_cols):
     should convert when the toggle is on - the 4 simple category tables
     pass every stat column they have, General Stats passes just
     _PLAYER_STATS_GENERAL_PER90_COLS (see that constant's own comment).
+
+    SORTING (see _PLAYER_STATS_ROWS_PER_PAGE/rows_shown below): this
+    function sorts the FULL df - every player in this league/season, not
+    just whichever page is currently on screen - by whichever column the
+    "Sort by" dropdown has selected, THEN truncates to rows_shown. This is
+    deliberately a real widget rather than relying on st.dataframe's own
+    built-in click-a-column-header sort: that native sort only ever
+    reorders whatever rows were already sent to the browser (display_df,
+    already capped at rows_shown) - it can't reach back into row 31+ to
+    pull in whoever actually leads a different stat. Confirmed bug this
+    fixes: switching "categories" (sorting by a different stat) previously
+    just reshuffled the same 30 players already on screen instead of
+    re-deriving the true top 30 for that stat from the whole league.
+    Native header-click sort still works on top of this, but only ever
+    reorders the current page - the caption below says so.
     """
     header_col, toggle_col = st.columns([5, 1])
     with header_col:
@@ -1713,6 +1729,33 @@ def _render_player_stats_table(key, title, df, per90_cols):
         st.info("No data saved yet for this league/season.")
         return
 
+    # Sort-by widget - every numeric stat column is a candidate, plus
+    # 'Player'/'Team' (alphabetical) so those are reachable too. Defaults to
+    # per90_cols[0] (this table's own natural "leaderboard" stat - e.g.
+    # Goals for General Stats, matching fetch_league_season_scoring_stats()'s
+    # own default sort) the first time this table renders, then remembers
+    # whatever the user picked via session_state, same pattern as rows_key
+    # below.
+    sortable_cols = [c for c in df.columns if c != "Position"]
+    default_sort_col = per90_cols[0] if per90_cols and per90_cols[0] in sortable_cols else (
+        sortable_cols[0] if sortable_cols else None
+    )
+    sort_col_key = f"{key}_sort_col"
+    sort_dir_key = f"{key}_sort_asc"
+    if sort_col_key not in st.session_state or st.session_state[sort_col_key] not in sortable_cols:
+        st.session_state[sort_col_key] = default_sort_col
+
+    sort_col_widget, sort_dir_widget, _spacer = st.columns([2, 1, 3])
+    with sort_col_widget:
+        sort_col = st.selectbox("Sort by", sortable_cols, key=sort_col_key)
+    with sort_dir_widget:
+        ascending = st.checkbox(
+            "Ascending", key=sort_dir_key,
+            help="Off (default) shows highest first - on shows lowest first.",
+        )
+
+    df = df.sort_values(sort_col, ascending=ascending, na_position="last", kind="mergesort")
+
     rows_key = f"{key}_rows_shown"
     rows_shown = st.session_state.get(rows_key, _PLAYER_STATS_ROWS_PER_PAGE)
     display_df = df.head(rows_shown).reset_index(drop=True)
@@ -1723,6 +1766,10 @@ def _render_player_stats_table(key, title, df, per90_cols):
         display_df["Team"] = display_df["Team"].map(_team_abbreviation)
     st.dataframe(display_df, use_container_width=False, hide_index=True,
                  height=_no_scroll_height(display_df))
+    st.caption(
+        "Clicking a column header re-sorts only the rows currently shown below - use the \"Sort by\" "
+        "dropdown above to re-rank every player in the league by a different stat."
+    )
     if rows_shown < len(df):
         if st.button(f"Show More ({rows_shown} of {len(df)})", key=f"{key}_show_more"):
             st.session_state[rows_key] = rows_shown + _PLAYER_STATS_ROWS_PER_PAGE
@@ -2786,17 +2833,23 @@ else:
         if fixtures.empty:
             st.info("No matches published yet - run the combined report app and use 'Save to Database'.")
         else:
-            # Three independent filters, each defaulting to "All" so the tab
-            # opens showing every match exactly as before - League exists
-            # mainly for whenever more than one competition gets saved here
-            # (matches.competition is the free-text field on the "Save to
-            # Database" form, so it already supports that; today it's
-            # basically always "Premier League"). Matchweek/Season are None
-            # for matches saved before those fields existed (Matchweek is a
-            # genuinely new scraped field - see fotmob_report.extract_
-            # matchweek() - so needs a re-save to backfill; Season is
-            # derived from match_date, which every match already has, so it
-            # never needs backfilling).
+            # Three independent filters - League/Matchweek default to "All"
+            # (League exists mainly for whenever more than one competition
+            # gets saved here - matches.competition is the free-text field
+            # on the "Save to Database" form, so it already supports that;
+            # today it's basically always "Premier League"), but Season
+            # defaults to the CURRENT season (the most recent one with a
+            # saved match - see hdb._season_label()) rather than "All
+            # seasons", per request: with several seasons now saved, "all
+            # seasons at once" was a confusing/cluttered default view, and
+            # a Fixtures tab is normally checked for "what's the current
+            # season looking like" first. "All seasons" is still the first
+            # option in the dropdown, so switching back to it is one click
+            # away. Matchweek is None for matches saved before that field
+            # existed (a genuinely new scraped field - see fotmob_report.
+            # extract_matchweek() - so needs a re-save to backfill); Season
+            # is derived from match_date, which every match already has, so
+            # it never needs backfilling.
             # Narrow columns for each dropdown (rather than 3 equal thirds),
             # sized roughly to their longest option's actual text width - a
             # full-width selectbox left a lot of empty space next to short
@@ -2813,7 +2866,18 @@ else:
 
             with filter_cols[0]:
                 seasons = sorted(fixtures["Season"].dropna().unique(), reverse=True)
-                season_choice = st.selectbox("Season", ["All seasons"] + seasons, key="fixtures_season")
+                season_options = ["All seasons"] + seasons
+                # Defaults to the most recent season (seasons is already
+                # sorted most-recent-first, same convention as hdb.fetch_
+                # available_seasons()) rather than "All seasons" - only
+                # applies the first time this widget is created, exactly
+                # like the League dropdown's own default_league_index just
+                # below; once the user picks something else, Streamlit's
+                # own key="fixtures_season" session state takes over.
+                default_season_index = 1 if seasons else 0
+                season_choice = st.selectbox(
+                    "Season", season_options, index=default_season_index, key="fixtures_season"
+                )
             with filter_cols[1]:
                 leagues = sorted(fixtures["Competition"].dropna().unique())
                 league_options = ["All leagues"] + leagues
@@ -2845,7 +2909,18 @@ else:
                 st.info("No matches match this filter.")
             else:
                 _render_fixtures_like_table(scoped)
-                st.caption(f"{len(scoped)} of {len(fixtures)} match(es) shown.")
+                # Every row in `scoped` is actually rendered above - there's
+                # no pagination/row cap on this table (unlike the Player
+                # Stats tab's own tables) - so this is purely a filter
+                # summary, not a "X of Y shown, rest hidden" indicator:
+                # len(fixtures) is every match saved (across every season/
+                # league/matchweek), and len(scoped) is how many of those
+                # match the three dropdowns above. Worded explicitly as
+                # "matching these filters" to avoid reading like a
+                # truncated view.
+                st.caption(
+                    f"{len(scoped)} match(es) matching these filters (out of {len(fixtures)} saved in total)."
+                )
 
     elif _active_tab == "player_stats":
         _render_player_stats_tab(db)
