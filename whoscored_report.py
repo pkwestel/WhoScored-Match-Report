@@ -225,6 +225,24 @@ _FIXTURE_DATE_HEADER_RE = re.compile(
 # runner that should only auto-run matches that have actually been played.
 _FIXTURE_FINISHED_STATUS_WORDS = {"FT", "AET", "PENS", "PEN"}
 
+# Used by _click_prev_month() to detect when the match LIST itself has
+# actually updated, not just the small calendar label - confirmed necessary
+# by diagnose_fixtures_finished_markup.py (2026-10-01): clicking "previous
+# month" changes the "#toggleCalendar" label text quickly, but the real
+# match cards underneath it are swapped in by a separate, slower AJAX call.
+# A run that only waited for the label (the original _click_prev_month)
+# would return control to get_fixture_urls() while the page was still
+# showing the OLD month's matches, which then parses as "0 match cards
+# found" with no error - exactly the failure seen in production on
+# 2026-10-01 (label correctly said "Aug 2026", but 0 Match-module_match__
+# divs were found). Matches both "/live/" and "/show/" match-centre links,
+# same as every other match-link scan in this file.
+_MATCH_HREF_RE = re.compile(r'/matches/\d+/(?:live|show)/[^"\'#\s]+')
+
+
+def _match_href_set(driver):
+    return set(_MATCH_HREF_RE.findall(driver.page_source))
+
 
 def _accept_fixtures_cookie_banner(driver):
     """
@@ -327,29 +345,59 @@ def _click_prev_month(driver, timeout=15, max_attempts=3):
     full timeout) before raising. This won't paper over every possible
     version of WhoScored's own inconsistency, but it directly addresses
     the "sometimes a click just doesn't register" case confirmed above.
+
+    Waits for the LABEL to change first, then separately waits for the
+    actual match-list content (the set of /matches/.../live|show/... hrefs
+    on the page) to change too, before declaring success - confirmed
+    necessary by diagnose_fixtures_finished_markup.py: the label and the
+    real match cards update via two separate, differently-timed calls, and
+    a caller that reads page_source right after only the label changes
+    gets a page that still shows the OLD month's matches (0 Match-module_
+    match__ cards is the actual production failure this caused - see
+    get_fixture_urls()'s own docstring). If the label changes but the
+    content never catches up within `timeout`, this attempt is treated as
+    failed and retried from scratch (fresh before/after label AND content
+    snapshots), same as a click that didn't register at all.
     """
     last_before = None
     for attempt in range(1, max_attempts + 1):
         before = _wait_for_calendar_ready(driver)
         last_before = before
+        before_hrefs = _match_href_set(driver)
         btn = driver.find_element(By.ID, "dayChangeBtn-prev")
         ActionChains(driver).move_to_element(btn).click().perform()
+
         start = time.time()
+        after = None
         while time.time() - start < timeout:
             after = _current_calendar_month_label(driver)
             if after and after != before:
+                break
+            time.sleep(0.5)
+        if not (after and after != before):
+            # Label itself never changed - this attempt's click didn't
+            # register at all (WhoScored's own calendar widget is
+            # confirmed to sometimes miss a click); try again.
+            continue
+
+        # Label changed - now separately wait for the match-list content
+        # to actually catch up before trusting this click as fully done.
+        content_start = time.time()
+        while time.time() - content_start < timeout:
+            if _match_href_set(driver) != before_hrefs:
                 return after
             time.sleep(0.5)
-        # This attempt's click didn't register - try again (WhoScored's own
-        # calendar widget is confirmed to sometimes miss a click) rather
-        # than giving up immediately.
+        # Label changed but content never did within the timeout - treat
+        # as a failed attempt and retry from scratch rather than returning
+        # control with a stale page.
 
     raise RuntimeError(
-        f"Clicked WhoScored's previous-month arrow {max_attempts} time(s) but the displayed month "
-        f"never changed (still showing {last_before!r}). This could mean: WhoScored's page changed "
-        "since this click mechanism was last confirmed; this particular browser session has already "
-        "been navigated to its earliest available month (if so, try a smaller months_back); or this "
-        "is a worse case of the same click-registration inconsistency Pauly confirmed by hand (where "
+        f"Clicked WhoScored's previous-month arrow {max_attempts} time(s) but either the displayed "
+        f"month never changed (still showing {last_before!r}), or it changed but the match-list "
+        "content underneath it never caught up. This could mean: WhoScored's page changed since this "
+        "click mechanism was last confirmed; this particular browser session has already been "
+        "navigated to its earliest available month (if so, try a smaller months_back); or this is a "
+        "worse case of the same click-registration inconsistency Pauly confirmed by hand (where "
         "getting to a specific month sometimes needs clicking past it and back). Re-run "
         "diagnose_fixtures_month.py against a real Fixtures page to check before trusting months_back= "
         "on get_fixture_urls() again."
