@@ -342,31 +342,30 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
     page. Built to support a "run the whole weekend's matches" batch
     workflow, so you don't have to copy/paste each match URL by hand.
 
-    REAL PAGE STRUCTURE THIS IS BUILT AGAINST: confirmed by fetching two
-    real pages - an upcoming/not-yet-played fixtures page, and (separately)
-    a real month of ALREADY-PLAYED Premier League results. Neither has any
-    embedded JSON like the match-centre page scrape_match() reads above -
-    fixtures are plain server-rendered HTML. Each match has a short status
-    token as standalone text immediately before it ("FT" for a finished
-    match - confirmed directly from the real results page; something else -
-    a kickoff time, "--", etc. - for a not-yet-played one), followed by a
-    link to the match itself and then two
-    <a href="/teams/<id>/show/<team-slug>"> links giving the home then away
-    team name as their visible text. Date headers appear as standalone text
-    ("Saturday, May 02 2026") preceding each day's block of matches. This
-    function walks the parsed HTML in document order, tracking the most
-    recent date header and status token, and pairing each match link with
-    the two team links that follow it.
-
-    On the real already-played results page, a finished match's own link
-    already points straight at the "/live/" match-centre URL
-    scrape_match() needs - this used to be an unconfirmed guess (the
-    fixture list was assumed to only expose a "/show/" preview-page link),
-    but real data now confirms it directly. A not-yet-played match's link
-    still uses "/show/", which this function rewrites to the equivalent
-    "/live/" URL for consistency - though with only_finished=True (the
-    default) that rewritten URL is normally filtered out before you'd ever
-    use it, since it points at a match that hasn't happened yet.
+    REAL PAGE STRUCTURE THIS IS BUILT AGAINST (v2 - rewritten 2026-10-01):
+    the previous version of this function was built against a plain,
+    non-JS HTTP fetch of this page, which turned out to return different,
+    simpler markup than what a REAL browser session actually renders -
+    confirmed by a live diagnostic run (non-headless Chrome, after
+    clicking back to a month with real finished matches) that showed the
+    true client-rendered structure instead: each match is a
+    '<div class="Match-module_match__<hash>">' card inside a day's own
+    '<div class="Accordion-module_accordion__<hash>">' section (whose
+    '<div class="Accordion-module_header__<hash>">' holds the plain-text
+    date header, e.g. "Friday, Aug 21 2026" - unchanged format from
+    before). Inside each match card: a '<div class="Match-module_left__
+    <hash>">' whose first <span> holds the status text ("FT" for a
+    finished match, a kickoff time like "12:30" otherwise); an
+    '<a id="statsBtn-<match_id>">' whose href always points at the real
+    "/live/<slug>" match-centre URL regardless of whether the match has
+    been played yet (more reliable than the separate 'scoresBtn-<id>'
+    anchor, which uses "/show/<slug>" until the match is actually played);
+    and a '<div class="Match-module_teams__<hash>">' containing exactly
+    two '<a class="Match-module_teamNameText__<hash>">' links (home then
+    away, in document order) to each team's own page. Class names use
+    CSS-module hashes that WILL change on WhoScored's own future
+    redeploys, so this function matches on PREFIX only (e.g. any class
+    starting with "Match-module_match__"), never the full hashed name.
 
     only_finished: if True (default), keeps only matches whose status token
     is a recognized "finished" marker (see _FIXTURE_FINISHED_STATUS_WORDS).
@@ -395,7 +394,17 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
             status_cb(msg)
 
     _status(f"Opening {fixtures_url} ...")
-    with get_driver() as driver:
+    # track_network=True is the only way this project's get_driver() (see
+    # utils/driver.py) avoids launching headless Chrome - confirmed
+    # directly (2026-10-01) that headless mode caused the month-click
+    # mechanism to behave inconsistently (label and/or match content
+    # sometimes failing to update at all, or updating out of sync with
+    # each other), while a real, non-headless run worked correctly every
+    # time. Used unconditionally here (not just when months_back>0) since
+    # the underlying cause - WhoScored's page behaving differently for a
+    # headless session - could just as easily affect the months_back=0
+    # default path too.
+    with get_driver(track_network=True) as driver:
         driver.get(fixtures_url)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
@@ -409,67 +418,62 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
 
     soup = BeautifulSoup(page_source, "html.parser")
 
+    def _class_startswith(prefix):
+        return lambda c: c and c.startswith(prefix)
+
     all_matches = []
     seen_urls = set()
     current_date = None
-    pending_status = None  # most recent short status token seen, consumed by the next match link
-    pending = None  # the match dict currently waiting on its two team-name links
 
     for el in soup.descendants:
         if isinstance(el, NavigableString):
             text = str(el).strip()
-            if not text:
-                continue
-            if _FIXTURE_DATE_HEADER_RE.match(text):
+            if text and _FIXTURE_DATE_HEADER_RE.match(text):
                 current_date = text
-                continue
-            # A short, single-token line (no spaces) is this match's status
-            # ("FT", a kickoff time, "--", ...) - but only capture it while
-            # we're between matches. In between a match's own two team links,
-            # WhoScored also shows the team's score as a bare digit
-            # ("Brentford" / "1" / "West Ham") - ignoring stray text while
-            # `pending` is set keeps a score digit like that from being
-            # mistaken for the NEXT match's status.
-            if pending is None and " " not in text and len(text) <= 12:
-                pending_status = text
             continue
 
-        if getattr(el, "name", None) != "a":
+        if getattr(el, "name", None) != "div":
             continue
-        href = (el.get("href") or "").split("#", 1)[0].rstrip("/")
-
-        m = re.match(r"^/matches/(\d+)/(?:live|show)/([^/]+)$", href)
-        if m:
-            match_id, slug = m.groups()
-            match_url = f"https://www.whoscored.com/matches/{match_id}/live/{slug}"
-            if match_url in seen_urls:
-                # A later "comments"/"stats" link back to a match already
-                # recorded (both the /show/ and /live/ variants normalize to
-                # the same match_url above) - not a new match.
-                continue
-            seen_urls.add(match_url)
-            pending = {
-                "match_url": match_url,
-                "status": pending_status,
-                "date": current_date,
-                "home_name": None,
-                "away_name": None,
-            }
-            all_matches.append(pending)
-            pending_status = None
+        classes = el.get("class") or []
+        if not any(c.startswith("Match-module_match__") for c in classes):
             continue
 
-        if pending is not None and re.match(r"^/teams/\d+/show/", href):
-            if pending["home_name"] is None:
-                pending["home_name"] = el.get_text(strip=True)
-            elif pending["away_name"] is None:
-                pending["away_name"] = el.get_text(strip=True)
-                pending = None  # both team names found, stop touching this match
+        # This div IS one match card - extract everything from its own
+        # subtree. See this function's docstring for the confirmed real
+        # markup this is built against.
+        stats_a = el.find("a", id=lambda i: i and i.startswith("statsBtn-"))
+        if stats_a is None or not stats_a.get("href"):
+            continue  # couldn't find a reliable match URL for this card - skip rather than guess
+        href = stats_a["href"].split("#", 1)[0].rstrip("/")
+        match_url = href if href.startswith("http") else f"https://www.whoscored.com{href}"
+        if match_url in seen_urls:
+            continue
+        seen_urls.add(match_url)
+
+        left_div = el.find("div", class_=_class_startswith("Match-module_left__"))
+        status_span = left_div.find("span") if left_div else None
+        status = status_span.get_text(strip=True) if status_span else None
+
+        teams_div = el.find("div", class_=_class_startswith("Match-module_teams__"))
+        team_as = (
+            teams_div.find_all("a", class_=_class_startswith("Match-module_teamNameText__"))
+            if teams_div else []
+        )
+        home_name = team_as[0].get_text(strip=True) if len(team_as) >= 1 else None
+        away_name = team_as[1].get_text(strip=True) if len(team_as) >= 2 else None
+
+        all_matches.append({
+            "match_url": match_url,
+            "status": status,
+            "date": current_date,
+            "home_name": home_name,
+            "away_name": away_name,
+        })
 
     if not all_matches:
         raise RuntimeError(
-            "Couldn't find any fixture links on this page (looked for "
-            "/matches/<id>/live/... or /show/... anchors). WhoScored may have "
+            "Couldn't find any match cards on this page (looked for div elements "
+            "whose class starts with 'Match-module_match__'). WhoScored may have "
             "changed this page's structure since get_fixture_urls() was last "
             "checked against it, or this URL doesn't show a fixture list at "
             "all. Paste match URLs manually instead of using auto-detect for "
