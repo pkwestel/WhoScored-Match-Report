@@ -104,6 +104,17 @@ fixtures_url = st.text_input(
          "box below instead.",
 )
 only_finished = st.checkbox("Only keep matches that look finished", value=True)
+months_back = st.number_input(
+    "Months back from WhoScored's own default",
+    min_value=0, value=0, step=1,
+    help="WhoScored's month-navigation arrows are pure client-side JS - the Fixtures URL above is "
+         "IDENTICAL no matter which month you've clicked back to in your own browser tab (confirmed: "
+         "two real WhoScored URLs, one copied while viewing an earlier month and one while viewing a "
+         "later one, came back byte-for-byte the same). So auto-detect always lands on whatever month "
+         "WhoScored itself defaults to on a fresh page load, regardless of what you'd navigated to. "
+         "Leave at 0 for that default month, or set this to how many months earlier you actually want "
+         "(e.g. 1 for last month) - this clicks WhoScored's own '<' arrow that many times first.",
+)
 manual_urls_text = st.text_area(
     "Paste additional (or alternate) WhoScored match URLs, one per line",
     height=100,
@@ -115,7 +126,11 @@ if st.button("Build match list", type="primary"):
     matches = []
     if fixtures_url.strip():
         try:
-            matches = wr.get_fixture_urls(fixtures_url.strip(), only_finished=only_finished)
+            fixtures_status = st.empty()
+            matches = wr.get_fixture_urls(
+                fixtures_url.strip(), only_finished=only_finished,
+                months_back=int(months_back), status_cb=fixtures_status.write,
+            )
             st.success(f"Auto-detected {len(matches)} match(es) from the fixtures page.")
         except Exception as e:
             st.warning(f"Auto-detect didn't work ({e}) - continuing with manually pasted URLs only.")

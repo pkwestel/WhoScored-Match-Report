@@ -140,6 +140,7 @@ adjusting - see `scrape_match()` below.
 import sys
 import os
 import re
+import time
 import json
 import ast
 import bisect
@@ -149,6 +150,7 @@ import pandas as pd
 import numpy as np
 from bs4 import BeautifulSoup, NavigableString
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -224,7 +226,80 @@ _FIXTURE_DATE_HEADER_RE = re.compile(
 _FIXTURE_FINISHED_STATUS_WORDS = {"FT", "AET", "PENS", "PEN"}
 
 
-def get_fixture_urls(fixtures_url, only_finished=True):
+def _accept_fixtures_cookie_banner(driver):
+    """
+    WhoScored's cookie-consent banner ("We value your privacy... Accept
+    all...") sits on the Fixtures page on a cold load. Harmless no-op if
+    it's not present (already dismissed earlier in this session, etc.) -
+    confirmed against a real Fixtures page, 2026-10-01 diagnostic run.
+    """
+    try:
+        candidates = driver.find_elements(
+            By.XPATH,
+            "//*[self::button or self::a or self::div[@role='button']]"
+            "[contains(translate(normalize-space(text()),'ACEPT','acept'),'accept')]",
+        )
+    except Exception:
+        return
+    for el in candidates:
+        try:
+            if "accept" in (el.text or "").strip().lower():
+                el.click()
+                return
+        except Exception:
+            continue
+
+
+def _current_calendar_month_label(driver):
+    """
+    Reads WhoScored's own month/date-range label directly off the
+    Fixtures page's calendar control (e.g. "May 2026") - via textContent,
+    NOT Selenium's WebElement.text, which never picks up this particular
+    span (confirmed against real data: it's consistently invisible to
+    .text even though getComputedStyle shows it as display:block/
+    visibility:visible - some icon-font/accessibility quirk in how
+    WhoScored built this control, not a timing issue). Returns None if
+    the control can't be found at all (page structure may have changed).
+    """
+    try:
+        el = driver.find_element(By.CSS_SELECTOR, "#toggleCalendar span.toggleDatePicker")
+        return driver.execute_script("return arguments[0].textContent;", el)
+    except Exception:
+        return None
+
+
+def _click_prev_month(driver, timeout=10):
+    """
+    Clicks WhoScored's own "<" (previous month) control on the Fixtures
+    page and waits for the displayed month label to actually change
+    before returning it - confirmed real selector + click method against
+    a live Premier League Fixtures page (2026-10-01 diagnostic run): the
+    button has a stable id="dayChangeBtn-prev", but needs an ActionChains
+    move-then-click. A plain el.click() raises "element not interactable"
+    on this element (and every one of its ancestor divs, up to the whole
+    calendar container) even though getComputedStyle reports it as fully
+    visible; a JS-dispatched click() is silently accepted but never
+    actually changes the month. Only ActionChains(driver).move_to_element
+    (...).click().perform() was confirmed to work.
+    """
+    before = _current_calendar_month_label(driver)
+    btn = driver.find_element(By.ID, "dayChangeBtn-prev")
+    ActionChains(driver).move_to_element(btn).click().perform()
+    start = time.time()
+    while time.time() - start < timeout:
+        after = _current_calendar_month_label(driver)
+        if after and after != before:
+            return after
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"Clicked WhoScored's previous-month arrow but the displayed month never changed within "
+        f"{timeout}s (still showing {before!r}). WhoScored's page may have changed since this was "
+        "last confirmed - re-run diagnose_fixtures_month.py against a real Fixtures page to check "
+        "before trusting months_back= on get_fixture_urls() again."
+    )
+
+
+def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=None):
     """
     Scraper for a WhoScored competition fixtures/results page (e.g. the
     Premier League's own "Fixtures" tab) - returns a list of {match_url,
@@ -260,13 +335,41 @@ def get_fixture_urls(fixtures_url, only_finished=True):
 
     only_finished: if True (default), keeps only matches whose status token
     is a recognized "finished" marker (see _FIXTURE_FINISHED_STATUS_WORDS).
+
+    months_back: WhoScored's month-navigation arrows on this page are pure
+    client-side JS - the URL is IDENTICAL no matter which month you've
+    clicked back to in your own separate browser tab (confirmed directly:
+    Pauly pasted two real WhoScored URLs, one copied while viewing August
+    2025 and one while viewing September 2025, and they were byte-for-byte
+    the same). That means a fresh driver.get(fixtures_url) always lands on
+    whatever month WhoScored itself defaults to, regardless of what you'd
+    navigated to. months_back=0 (default) preserves that original
+    behavior exactly. months_back=N clicks WhoScored's own "<" (previous
+    month) control N times first - see _click_prev_month()'s docstring
+    for the confirmed real click mechanism - before reading the page, so
+    get_fixture_urls() can go back to a specific earlier month instead of
+    always whatever's currently showing.
+
+    status_cb: optional callable(str) for progress messages (e.g. "Now
+    showing May 2026 (2/3)...") - same pattern as batch_lib's status_cb,
+    useful since months_back > 0 can take several seconds per click.
     """
-    print(f"Opening {fixtures_url} ...")
+    def _status(msg):
+        print(msg)
+        if status_cb:
+            status_cb(msg)
+
+    _status(f"Opening {fixtures_url} ...")
     with get_driver() as driver:
         driver.get(fixtures_url)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
+        if months_back:
+            _accept_fixtures_cookie_banner(driver)
+            for i in range(months_back):
+                new_label = _click_prev_month(driver)
+                _status(f"Navigated back to {new_label} ({i + 1}/{months_back})...")
         page_source = driver.page_source
 
     soup = BeautifulSoup(page_source, "html.parser")
@@ -1073,6 +1176,53 @@ def is_own_goal(row):
     return row['type.displayName'] == 'Goal' and 'OwnGoal' in qual_names(row['qualifiers_parsed'])
 
 
+def find_fouled_player(df, foul_idx, committer_team):
+    """
+    WhoScored logs a foul TWICE - once from the committer's side (the row
+    already in hand: outcome 'Unsuccessful', isTouch False) and once from
+    the fouled player's own side: same event type 'Foul', same minute and
+    second, on the OTHER team, but outcome 'Successful' and isTouch True.
+    Both rows carry the 'OppositeRelatedEvent' qualifier linking them, and
+    their x/y are mirrored (x2 ~= 100-x1, y2 ~= 100-y1) since each side's
+    coordinates face its own attacking direction.
+
+    Confirmed against real match data (Hull vs Man Utd, 2026-09-30
+    diagnostic run, min 36): idx 585 (Mohamed Belloumi, Hull, Foul,
+    Successful, isTouch=True, x=72.9/y=75.2) sits immediately before idx
+    586 (Youri Tielemans, Man Utd, Foul, Unsuccessful, isTouch=False,
+    x=27.1/y=24.8 - mirrored: 100-72.9=27.1, 100-75.2=24.8), same minute
+    (36) and second (24), both qualified 'OppositeRelatedEvent'.
+
+    Returns the fouled player's name if a matching mirrored row is found
+    within a few rows of foul_idx, else None (caller leaves the SCA player
+    field blank rather than guessing - no shot-taker fallback, per request).
+    """
+    # .get(...) rather than direct indexing: real scraped data always has a
+    # 'second' column (used unconditionally elsewhere, e.g. cumulative_mins),
+    # but defend against a synthetic/partial df that omits it rather than
+    # crash - treat a missing column as "second unknown", matching on minute
+    # alone in that case.
+    foul_row = df.loc[foul_idx]
+    foul_min = foul_row['minute']
+    has_second = 'second' in df.columns
+    foul_sec = foul_row['second'] if has_second else None
+    lo = max(0, foul_idx - 5)
+    hi = min(df.index.max(), foul_idx + 5)
+    window = df.loc[lo:hi]
+    mask = (
+        (window['type.displayName'] == 'Foul')
+        & (window['team'] != committer_team)
+        & (window['outcomeType.displayName'] == 'Successful')
+        & (window['minute'] == foul_min)
+    )
+    if has_second:
+        mask &= (window['second'] == foul_sec)
+    candidates = window[mask]
+    if candidates.empty:
+        return None
+    return candidates.iloc[0]['playerName']
+
+
 def compute_sca(df, minute_min=None, minute_max=None):
     """
     minute_min/minute_max: optional minute-range filter for a windowed
@@ -1148,7 +1298,23 @@ def compute_sca(df, minute_min=None, minute_max=None):
         }
         for rank, action_i in enumerate(found, start=1):
             arow = df.loc[action_i]
-            rec[f'sca{rank}_player'] = arow['playerName']
+            # A 'Foul' row's own playerName is WhoScored's foul COMMITTER
+            # (Opta's convention - confirmed by this branch only ever firing
+            # when rteam != shot_team, i.e. the opponent conceded the foul
+            # that won the shooting team their free kick/set piece) -
+            # crediting that name would put the SCA on the wrong team
+            # entirely. WhoScored also logs a MIRRORED 'Foul' row for the
+            # player who was actually fouled (same minute/second, opposite
+            # team, outcome 'Successful', isTouch True - see
+            # find_fouled_player()'s docstring for the confirmed real-data
+            # example). When that mirrored row is found, credit that
+            # specific player. Per request, no shot-taker fallback: if the
+            # mirrored row can't be found, the field is left blank (None)
+            # rather than guessing at a player.
+            if arow['type.displayName'] == 'Foul':
+                rec[f'sca{rank}_player'] = find_fouled_player(df, action_i, arow['team'])
+            else:
+                rec[f'sca{rank}_player'] = arow['playerName']
             rec[f'sca{rank}_action'] = classify_action(arow)
         sca_rows.append(rec)
 
@@ -2654,7 +2820,13 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " walking backward through the same team's play. Aerial duels and ground challenges never break"
         " this search, since WhoScored logs them as separate rows for both sides rather than as genuine"
         " turnovers - but a won aerial does NOT count as a contributing action (it's skipped over so the"
-        " search can keep looking further back); a won challenge still counts. An opponent's Clearance,"
+        " search can keep looking further back); a won challenge still counts. A foul drawn from the"
+        " opponent is credited to the player who was actually fouled, not whoever committed the foul -"
+        " WhoScored's own 'Foul' event is attributed to the committer, but it also logs a mirrored 'Foul'"
+        " row for the player fouled (same minute/second, opposite team, outcome 'Successful' rather than"
+        " 'Unsuccessful'), which is used to identify and credit that specific player. On the rare match"
+        " where that mirrored row can't be found, the player field is left blank rather than guessing."
+        " An opponent's Clearance,"
         " blocked pass, or keeper Save immediately before the shot is treated the same way - skipped over,"
         " not counted itself - because a defender's partial touch (e.g. heading a cross away, only for it to"
         " fall to another attacker) doesn't erase the real originating pass. Without this, headers set up by"
