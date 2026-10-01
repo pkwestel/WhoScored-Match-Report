@@ -268,7 +268,33 @@ def _current_calendar_month_label(driver):
         return None
 
 
-def _click_prev_month(driver, timeout=10):
+def _wait_for_calendar_ready(driver, timeout=20, poll=1.0):
+    """
+    Polls _current_calendar_month_label() until it returns a real value
+    (or the timeout is hit) - added after a real run showed the FIRST
+    _click_prev_month() call failing ("displayed month never changed")
+    when called immediately after the cookie-consent step, with no extra
+    wait. The diagnostic script that originally confirmed the click
+    mechanism worked only after ~20s of polling for the page's real
+    content to render first (see diagnose_fixtures_month.py's own
+    _wait_for_real_content()) - this mirrors that same wait here, so
+    get_fixture_urls(months_back=...) gives the page the same chance to
+    finish hydrating before trying to interact with it. Returns the
+    label once found, or None if it never appeared (the caller's own
+    _click_prev_month() will then raise its own clear error rather than
+    clicking blind).
+    """
+    start = time.time()
+    label = None
+    while time.time() - start < timeout:
+        label = _current_calendar_month_label(driver)
+        if label:
+            return label
+        time.sleep(poll)
+    return label
+
+
+def _click_prev_month(driver, timeout=15):
     """
     Clicks WhoScored's own "<" (previous month) control on the Fixtures
     page and waits for the displayed month label to actually change
@@ -281,8 +307,14 @@ def _click_prev_month(driver, timeout=10):
     visible; a JS-dispatched click() is silently accepted but never
     actually changes the month. Only ActionChains(driver).move_to_element
     (...).click().perform() was confirmed to work.
+
+    Waits (via _wait_for_calendar_ready()) for the month label to be
+    readable at all before clicking - a real run showed this failing on
+    the very first click when called right after the cookie-consent step
+    with no extra wait, most likely because the page hadn't finished
+    hydrating yet.
     """
-    before = _current_calendar_month_label(driver)
+    before = _wait_for_calendar_ready(driver)
     btn = driver.find_element(By.ID, "dayChangeBtn-prev")
     ActionChains(driver).move_to_element(btn).click().perform()
     start = time.time()
@@ -293,9 +325,12 @@ def _click_prev_month(driver, timeout=10):
         time.sleep(0.5)
     raise RuntimeError(
         f"Clicked WhoScored's previous-month arrow but the displayed month never changed within "
-        f"{timeout}s (still showing {before!r}). WhoScored's page may have changed since this was "
-        "last confirmed - re-run diagnose_fixtures_month.py against a real Fixtures page to check "
-        "before trusting months_back= on get_fixture_urls() again."
+        f"{timeout}s (still showing {before!r}). This could mean: WhoScored's page changed since "
+        "this click mechanism was last confirmed; this particular browser profile/session has "
+        "already been navigated to its earliest available month (if so, try a smaller months_back); "
+        "or the page just needed more time to hydrate than _wait_for_calendar_ready() allowed. "
+        "Re-run diagnose_fixtures_month.py against a real Fixtures page to check before trusting "
+        "months_back= on get_fixture_urls() again."
     )
 
 
