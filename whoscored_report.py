@@ -294,7 +294,7 @@ def _wait_for_calendar_ready(driver, timeout=20, poll=1.0):
     return label
 
 
-def _click_prev_month(driver, timeout=15):
+def _click_prev_month(driver, timeout=15, max_attempts=3):
     """
     Clicks WhoScored's own "<" (previous month) control on the Fixtures
     page and waits for the displayed month label to actually change
@@ -313,24 +313,46 @@ def _click_prev_month(driver, timeout=15):
     the very first click when called right after the cookie-consent step
     with no extra wait, most likely because the page hadn't finished
     hydrating yet.
+
+    max_attempts: Pauly confirmed directly, by hand, that WhoScored's own
+    calendar widget is itself inconsistent about registering a click -
+    clicking "previous" once sometimes silently does nothing, and getting
+    to a specific month sometimes requires clicking back past it and then
+    forward again (his own words: navigating to September required
+    clicking back to August "and then forward to September... likely due
+    to the time of the month, but still an issue"). That's a real
+    WhoScored-side quirk, not something this project's code can fix
+    outright - so instead of giving up after one unresponsive click, this
+    retries the SAME click up to max_attempts times (each with its own
+    full timeout) before raising. This won't paper over every possible
+    version of WhoScored's own inconsistency, but it directly addresses
+    the "sometimes a click just doesn't register" case confirmed above.
     """
-    before = _wait_for_calendar_ready(driver)
-    btn = driver.find_element(By.ID, "dayChangeBtn-prev")
-    ActionChains(driver).move_to_element(btn).click().perform()
-    start = time.time()
-    while time.time() - start < timeout:
-        after = _current_calendar_month_label(driver)
-        if after and after != before:
-            return after
-        time.sleep(0.5)
+    last_before = None
+    for attempt in range(1, max_attempts + 1):
+        before = _wait_for_calendar_ready(driver)
+        last_before = before
+        btn = driver.find_element(By.ID, "dayChangeBtn-prev")
+        ActionChains(driver).move_to_element(btn).click().perform()
+        start = time.time()
+        while time.time() - start < timeout:
+            after = _current_calendar_month_label(driver)
+            if after and after != before:
+                return after
+            time.sleep(0.5)
+        # This attempt's click didn't register - try again (WhoScored's own
+        # calendar widget is confirmed to sometimes miss a click) rather
+        # than giving up immediately.
+
     raise RuntimeError(
-        f"Clicked WhoScored's previous-month arrow but the displayed month never changed within "
-        f"{timeout}s (still showing {before!r}). This could mean: WhoScored's page changed since "
-        "this click mechanism was last confirmed; this particular browser profile/session has "
-        "already been navigated to its earliest available month (if so, try a smaller months_back); "
-        "or the page just needed more time to hydrate than _wait_for_calendar_ready() allowed. "
-        "Re-run diagnose_fixtures_month.py against a real Fixtures page to check before trusting "
-        "months_back= on get_fixture_urls() again."
+        f"Clicked WhoScored's previous-month arrow {max_attempts} time(s) but the displayed month "
+        f"never changed (still showing {last_before!r}). This could mean: WhoScored's page changed "
+        "since this click mechanism was last confirmed; this particular browser session has already "
+        "been navigated to its earliest available month (if so, try a smaller months_back); or this "
+        "is a worse case of the same click-registration inconsistency Pauly confirmed by hand (where "
+        "getting to a specific month sometimes needs clicking past it and back). Re-run "
+        "diagnose_fixtures_month.py against a real Fixtures page to check before trusting months_back= "
+        "on get_fixture_urls() again."
     )
 
 
