@@ -1110,6 +1110,57 @@ def _current_season_and_league(db, match_ids):
     return f"{current_season.replace('/', '-')} {league}"
 
 
+# The season Pass Map/Passes Received/Touch Map tabs only ever had a League
+# filter before - this is the default season a Season filter should open on
+# (see _season_map_scope() below), per explicit request. Only Man Utd has
+# COMPLETE data saved for earlier seasons right now (same underlying
+# situation history_db._HIDDEN_SEASONS already handles for the Fixtures/
+# League Overview/Player Stats/Team Page views, just broader here - every
+# season before this one, not only 2023/24) - so _season_map_scope() also
+# tells its caller to narrow the Team dropdown down to Man Utd only
+# whenever a season OTHER than this one is selected. This is scoped to
+# just these 3 tabs; it doesn't change history_db._HIDDEN_SEASONS itself or
+# any of the pages that already have their own hidden-season handling.
+_SEASON_MAPS_CURRENT_SEASON = "2026/27"
+
+
+def _season_map_scope(matches, league, key):
+    """
+    Shared League+Season scoping for the season Pass Map/Passes Received/
+    Touch Map tabs. Builds the Season dropdown from whichever seasons
+    actually have matches saved in the already-selected League (most recent
+    first, same convention as hdb.fetch_available_seasons()), defaulting to
+    _SEASON_MAPS_CURRENT_SEASON when it's one of the options.
+
+    Returns (season, keep_ids, restrict_to_man_utd):
+      - season: the selected season label ('YYYY/YY'), or None if this
+        League has no season data to show at all (caller should bail out
+        with an info message in that case, same as the old "no matches for
+        this league" check).
+      - keep_ids: match_id strings (as str) in this League+Season - filter
+        whichever passes/touches table the caller already fetched down to
+        this set, the same way it previously filtered on League alone.
+      - restrict_to_man_utd: True when a season other than
+        _SEASON_MAPS_CURRENT_SEASON is selected - the caller should then
+        narrow its own dataframe to Man Utd's rows only (hdb._is_man_utd())
+        before building its Team dropdown, rather than showing every other
+        club's incomplete earlier-season numbers.
+    """
+    if matches.empty:
+        return None, set(), False
+    in_league = matches[matches["competition"] == league].copy()
+    in_league["season"] = in_league["match_date"].apply(hdb._season_label)
+    available_seasons = sorted(in_league["season"].dropna().unique().tolist(), reverse=True)
+    if not available_seasons:
+        return None, set(), False
+    default_index = (available_seasons.index(_SEASON_MAPS_CURRENT_SEASON)
+                      if _SEASON_MAPS_CURRENT_SEASON in available_seasons else 0)
+    season = _narrow_selectbox("Season", available_seasons, key=key, index=default_index)
+    keep_ids = set(in_league.loc[in_league["season"] == season, "match_id"].astype(str))
+    restrict_to_man_utd = season != _SEASON_MAPS_CURRENT_SEASON
+    return season, keep_ids, restrict_to_man_utd
+
+
 def _render_season_pass_map(db, mode):
     """
     Same chart as _render_pass_map() above, but aggregated across EVERY
@@ -1145,21 +1196,33 @@ def _render_season_pass_map(db, mode):
         return
     league = _narrow_selectbox("League", available_leagues, key=f"season_passmap_league_{mode}")
     matches = hdb.fetch_matches(db)
-    keep_ids = set(matches.loc[matches["competition"] == league, "match_id"].astype(str)) if not matches.empty else set()
+    season, keep_ids, restrict_to_man_utd = _season_map_scope(
+        matches, league, key=f"season_passmap_season_{mode}_{league}"
+    )
+    if season is None:
+        st.info(f"No matches saved yet for {league}.")
+        return
     all_passes = all_passes[all_passes["match_id"].astype(str).isin(keep_ids)]
+    if restrict_to_man_utd:
+        all_passes = all_passes[all_passes["team"].apply(hdb._is_man_utd)]
+        st.caption(
+            "Only Man Utd has complete data saved for earlier seasons right now, "
+            "so other clubs are hidden here until that catches up."
+        )
     if all_passes.empty:
-        st.info(f"No pass data saved yet for {league}.")
+        st.info(f"No pass data saved yet for {season} {league}"
+                + (" (Man Utd only, for now)." if restrict_to_man_utd else "."))
         return
 
     player_col = "passer" if mode == "passer" else "receiver"
-    team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}_{league}")
+    team_filter = _team_filter_picker(all_passes, "team", key=f"season_passmap_team_{mode}_{league}_{season}")
 
     scoped = all_passes[all_passes["team"] == team_filter]
     players = sorted(scoped[player_col].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    player = _narrow_selectbox("Player", players, key=f"season_passmap_player_{mode}_{league}_{team_filter}")
+    player = _narrow_selectbox("Player", players, key=f"season_passmap_player_{mode}_{league}_{season}_{team_filter}")
 
     if mode == "passer":
         player_passes = hdb.fetch_passes(db, passer=player, team=team_filter)
@@ -1275,19 +1338,31 @@ def _render_season_touchmap(db):
         return
     league = _narrow_selectbox("League", available_leagues, key="season_touchmap_league")
     matches = hdb.fetch_matches(db)
-    keep_ids = set(matches.loc[matches["competition"] == league, "match_id"].astype(str)) if not matches.empty else set()
+    season, keep_ids, restrict_to_man_utd = _season_map_scope(
+        matches, league, key=f"season_touchmap_season_{league}"
+    )
+    if season is None:
+        st.info(f"No matches saved yet for {league}.")
+        return
     all_touches = all_touches[all_touches["match_id"].astype(str).isin(keep_ids)]
+    if restrict_to_man_utd:
+        all_touches = all_touches[all_touches["team"].apply(hdb._is_man_utd)]
+        st.caption(
+            "Only Man Utd has complete data saved for earlier seasons right now, "
+            "so other clubs are hidden here until that catches up."
+        )
     if all_touches.empty:
-        st.info(f"No touch data saved yet for {league}.")
+        st.info(f"No touch data saved yet for {season} {league}"
+                + (" (Man Utd only, for now)." if restrict_to_man_utd else "."))
         return
 
-    team_filter = _team_filter_picker(all_touches, "team", key=f"season_touchmap_team_{league}")
+    team_filter = _team_filter_picker(all_touches, "team", key=f"season_touchmap_team_{league}_{season}")
     scoped = all_touches[all_touches["team"] == team_filter]
     players = sorted(scoped["player"].dropna().unique())
     if not players:
         st.info("No players found for this filter.")
         return
-    player = _narrow_selectbox("Player", players, key=f"season_touchmap_player_{league}_{team_filter}")
+    player = _narrow_selectbox("Player", players, key=f"season_touchmap_player_{league}_{season}_{team_filter}")
 
     player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
     # Re-apply the same League scope fetch_touches() above doesn't know
