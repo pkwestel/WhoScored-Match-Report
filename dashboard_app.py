@@ -919,6 +919,127 @@ def _minute_range_slider(key, max_minute):
     return lo, hi
 
 
+def _narrow_selectbox_right(label, options, key=None, index=0, width=2, total=7, format_func=None):
+    """
+    Same idea as _narrow_selectbox() but right-aligned instead of left -
+    used for the Pitch Zone filter on every Pass Map/Passes Received/Touch
+    Map tab (single-match and full-season) per explicit request that it
+    sit "on the right side of the page", separate from whichever other
+    filters (League/Season/Matchweek/Match/Team/Player) already occupy
+    their own left-aligned narrow rows above or below it.
+    """
+    _spacer, col = st.columns([total - width, width])
+    with col:
+        kwargs = {"key": key, "index": index}
+        if format_func is not None:
+            kwargs["format_func"] = format_func
+        return st.selectbox(label, options, **kwargs)
+
+
+# Pitch Zone filter shared by every Pass Map/Passes Received/Touch Map tab
+# (single-match and full-season). The 3 thirds reuse this project's existing
+# OWN_THIRD_MAX/MIDDLE_THIRD_MAX boundaries (see whoscored_report.third()) -
+# x only, 0-100 normalized scale. Zone 14 is the classic "just outside the
+# box, central channel" danger zone - confirmed directly with Pauly in this
+# project's own 0-100 x/y scale: the first half of the attacking third
+# (x 66.6-83.3) crossed with the middle of the pitch's 3 vertical thirds
+# (y 33.3-66.6).
+_PITCH_ZONE_OPTIONS = ["All zones", "Own Third", "Middle Third", "Attacking Third", "Zone 14"]
+_PITCH_THIRD_X_BOUNDS = {
+    "Own Third": (0.0, 33.3),
+    "Middle Third": (33.3, 66.6),
+    "Attacking Third": (66.6, 100.0),
+}
+_ZONE_14_X_BOUNDS = (66.6, 83.3)
+_ZONE_14_Y_BOUNDS = (33.3, 66.6)
+
+
+def _pitch_zone_mask(df, zone, x_col, y_col):
+    """
+    Boolean mask selecting rows of `df` whose (x_col, y_col) location falls
+    inside `zone` (one of _PITCH_ZONE_OPTIONS). "All zones" (the default)
+    keeps every row - existing behavior is unchanged unless this filter is
+    actually touched. The 3 thirds filter on x_col only (same as
+    whoscored_report.third()); "Zone 14" filters on both x_col AND y_col
+    (see _ZONE_14_X_BOUNDS/_ZONE_14_Y_BOUNDS above). NaN coordinates (e.g.
+    an incomplete pass's end_x/end_y) simply don't match any zone, same as
+    pandas' own Series.between() treats NaN - excluded, not an error.
+
+    x_col/y_col let the SAME helper serve every caller's own "which pair of
+    coordinates does this zone apply to" rule: a Pass Map (mode='passer')
+    filters on the pass's ORIGIN (x, y) - "show only passes that originated
+    in this zone, and where they go" - while Passes Received (mode=
+    'receiver') filters on the pass's DESTINATION (end_x, end_y) - "show
+    passes received in this zone, and where they originated from" - both
+    per explicit request. A Touch Map has only one location per row (x, y)
+    either way.
+    """
+    if zone not in _PITCH_ZONE_OPTIONS or zone == "All zones":
+        return pd.Series(True, index=df.index)
+    if zone == "Zone 14":
+        x_lo, x_hi = _ZONE_14_X_BOUNDS
+        y_lo, y_hi = _ZONE_14_Y_BOUNDS
+        return df[x_col].between(x_lo, x_hi) & df[y_col].between(y_lo, y_hi)
+    x_lo, x_hi = _PITCH_THIRD_X_BOUNDS[zone]
+    return df[x_col].between(x_lo, x_hi)
+
+
+def _parse_matchweek(w):
+    """int(matchweek) if it parses cleanly, else None - matches.matchweek is
+    free-text (see history_db.py's schema) and can be missing/non-numeric
+    for matches saved before fotmob_report.extract_matchweek() existed."""
+    try:
+        return int(w)
+    except (ValueError, TypeError):
+        return None
+
+
+def _matchweek_range_slider(key, matches_in_scope):
+    """
+    Shared Matchweek range slider for the season Pass Map/Passes Received/
+    Touch Map tabs, added per request so these full-season aggregates can
+    be narrowed to a specific run of matchweeks (e.g. Matchweek 4-12)
+    instead of always pooling the ENTIRE League+Season. Not a full-width
+    slider (same "narrow column" convention as every other filter on these
+    tabs) - a two-handle st.slider from the lowest to highest KNOWN
+    matchweek actually present in `matches_in_scope` (already League+
+    Season-scoped by the caller), defaulting to the full range (no
+    narrowing) - same convention as _minute_range_slider().
+
+    A match with a missing/non-numeric matchweek (see _parse_matchweek()
+    above - common for anything saved before that field existed) is always
+    kept while the slider sits at its untouched default (so this feature
+    doesn't silently drop older matches that behaved fine before it
+    existed), but is excluded the moment the slider is actually narrowed,
+    since there's no way to confirm it belongs in a specific range.
+
+    Returns (match_ids_in_range, is_narrowed):
+      - match_ids_in_range: set of match_id strings - every match_id in
+        matches_in_scope while untouched, a strict subset once narrowed.
+      - is_narrowed: whether the slider was actually moved away from its
+        default full range.
+    If there are fewer than 2 distinct known matchweeks to slide between,
+    renders nothing and returns (every match_id in matches_in_scope, False).
+    """
+    all_ids = set(matches_in_scope["match_id"].astype(str)) if not matches_in_scope.empty else set()
+    if matches_in_scope.empty:
+        return all_ids, False
+    weeks = matches_in_scope["matchweek"].apply(_parse_matchweek)
+    known = weeks.dropna()
+    if known.nunique() < 2:
+        return all_ids, False
+    lo_bound, hi_bound = int(known.min()), int(known.max())
+    col, _spacer = st.columns([3, 4])
+    with col:
+        lo, hi = st.slider(
+            "Matchweek", min_value=lo_bound, max_value=hi_bound, value=(lo_bound, hi_bound), key=key
+        )
+    if (lo, hi) == (lo_bound, hi_bound):
+        return all_ids, False
+    in_range = matches_in_scope[weeks.between(lo, hi)]
+    return set(in_range["match_id"].astype(str)), True
+
+
 def _render_pass_map(db, matches, mode, show_minute_slider=False):
     """
     mode='passer' draws the outgoing Pass Map (every pass attempted by the
@@ -936,6 +1057,13 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
     Passes Received tabs (see _render_match_detail()) - a minute range only
     means one specific thing when scoped to one real match's own clock, so
     the season-wide call site (matches = every saved match) never shows it.
+
+    A Pitch Zone dropdown (right side of the page - see _narrow_selectbox_
+    right()/_pitch_zone_mask()) is always shown here regardless of mode:
+    mode='passer' filters on each pass's ORIGIN (x, y) - "show only passes
+    that originated in this zone, and where they go"; mode='receiver'
+    filters on its DESTINATION (end_x, end_y) - "show passes received in
+    this zone, and where they originated from" - both per explicit request.
     """
     if matches.empty:
         st.info("No matches published yet.")
@@ -946,6 +1074,13 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
     if show_minute_slider:
         max_minute = hdb.fetch_match_max_minute(db, match_id)
         minute_min, minute_max = _minute_range_slider(f"passmap_minutes_{mode}_{match_id}", max_minute)
+
+    zone = _narrow_selectbox_right("Pitch Zone", _PITCH_ZONE_OPTIONS, key=f"passmap_zone_{mode}_{match_id}")
+    # Raw column names (pre-rename - see the "endX/endY" rename comment
+    # further down) - origin (x, y) for the outgoing Pass Map, destination
+    # (end_x, end_y) for Passes Received (see this function's own docstring
+    # for why each mode uses a different pair).
+    zone_x_col, zone_y_col = ("x", "y") if mode == "passer" else ("end_x", "end_y")
 
     # Passes for the whole match (within the slider range, if narrowed) -
     # used just to populate the player dropdown with only players who
@@ -961,6 +1096,10 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
             )
         else:
             st.info(f"No passes recorded for {match_label} in this minute range.")
+        return
+    all_match_passes = all_match_passes[_pitch_zone_mask(all_match_passes, zone, zone_x_col, zone_y_col)]
+    if all_match_passes.empty:
+        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {match_label} in this pitch zone.")
         return
 
     if mode == "passer":
@@ -981,9 +1120,13 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
         # completed passes only - an incomplete pass has no real receiver.
         player_passes = hdb.fetch_passes(db, match_id, receiver=player, completed_only=True,
                                           minute_min=minute_min, minute_max=minute_max)
+    # Re-apply the same Pitch Zone scope as all_match_passes above (this
+    # fetch pulls this player's passes fresh, unfiltered by zone).
+    player_passes = player_passes[_pitch_zone_mask(player_passes, zone, zone_x_col, zone_y_col)]
 
     if player_passes.empty:
-        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player}.")
+        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player}"
+                + ("" if zone == "All zones" else " in this pitch zone") + ".")
         return
 
     # plot_pass_map()/pitch_viz.py expect whoscored_report.py's own dataframe
@@ -1212,6 +1355,14 @@ def _render_season_pass_map(db, mode):
     player that doesn't exist in the newly-selected competition - same
     convention _render_pairs_tab() already uses for its own League -> Team
     -> Player cascade.
+
+    A Matchweek range slider (see _matchweek_range_slider()) further
+    narrows the League+Season scope to a specific run of matchweeks (e.g.
+    4-12) instead of always pooling every match in that season, and a
+    Pitch Zone dropdown (right side of the page - see _narrow_selectbox_
+    right()/_pitch_zone_mask()) filters on each pass's ORIGIN (x, y) for
+    mode='passer' or DESTINATION (end_x, end_y) for mode='receiver') - both
+    added per explicit request, same split as _render_pass_map()'s own.
     """
     all_passes = hdb.fetch_passes(db)
     if all_passes.empty:
@@ -1230,6 +1381,16 @@ def _render_season_pass_map(db, mode):
     if season is None:
         st.info(f"No matches saved yet for {league}.")
         return
+
+    matches_in_scope = matches[matches["match_id"].astype(str).isin(keep_ids)] if not matches.empty else matches
+    keep_ids, _mw_narrowed = _matchweek_range_slider(
+        f"season_passmap_matchweek_{mode}_{league}_{season}", matches_in_scope
+    )
+    zone = _narrow_selectbox_right(
+        "Pitch Zone", _PITCH_ZONE_OPTIONS, key=f"season_passmap_zone_{mode}_{league}_{season}"
+    )
+    zone_x_col, zone_y_col = ("x", "y") if mode == "passer" else ("end_x", "end_y")
+
     all_passes = all_passes[all_passes["match_id"].astype(str).isin(keep_ids)]
     if restrict_to_man_utd:
         all_passes = all_passes[all_passes["team"].apply(hdb._is_man_utd)]
@@ -1237,9 +1398,11 @@ def _render_season_pass_map(db, mode):
             "Only Man Utd has complete data saved for earlier seasons right now, "
             "so other clubs are hidden here until that catches up."
         )
+    all_passes = all_passes[_pitch_zone_mask(all_passes, zone, zone_x_col, zone_y_col)]
     if all_passes.empty:
         st.info(f"No pass data saved yet for {season} {league}"
-                + (" (Man Utd only, for now)." if restrict_to_man_utd else "."))
+                + (" (Man Utd only, for now)" if restrict_to_man_utd else "")
+                + (" in this pitch zone." if zone != "All zones" else "."))
         return
 
     player_col = "passer" if mode == "passer" else "receiver"
@@ -1257,13 +1420,17 @@ def _render_season_pass_map(db, mode):
     else:
         player_passes = hdb.fetch_passes(db, receiver=player, team=team_filter, completed_only=True)
     # fetch_passes() above pulls every saved match for this player/team -
-    # re-apply the same League scope as `all_passes` so a player who's
-    # played in more than one competition doesn't have the OTHER one's
-    # passes sneak back in here.
+    # re-apply the same League/Season/Matchweek scope as `all_passes` (via
+    # keep_ids) and the same Pitch Zone scope, so a player who's played in
+    # more than one competition - or whose other matches fall outside the
+    # chosen matchweek range/pitch zone - doesn't have that other data
+    # sneak back in here.
     player_passes = player_passes[player_passes["match_id"].astype(str).isin(keep_ids)]
+    player_passes = player_passes[_pitch_zone_mask(player_passes, zone, zone_x_col, zone_y_col)]
 
     if player_passes.empty:
-        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player} in {league}.")
+        st.info(f"No {'passes' if mode == 'passer' else 'received passes'} found for {player} in {league}"
+                + ("" if zone == "All zones" else " in this pitch zone") + ".")
         return
 
     player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
@@ -1350,7 +1517,11 @@ def _render_season_touchmap(db):
     why this matters (a team/player who's played in more than one
     competition this season shouldn't have both mixed into one map) and
     for the "thread League into every downstream widget key" convention
-    this mirrors.
+    this mirrors. Also adds the same Matchweek range slider and Pitch Zone
+    dropdown (right side of the page) as that function, per the same
+    request - a Touch Map only has one location per row, so the Zone
+    filter always applies to plain (x, y), unlike the passer/receiver split
+    _render_season_pass_map() needs.
     """
     all_touches = hdb.fetch_touches(db)
     if all_touches.empty:
@@ -1372,6 +1543,11 @@ def _render_season_touchmap(db):
     if season is None:
         st.info(f"No matches saved yet for {league}.")
         return
+
+    matches_in_scope = matches[matches["match_id"].astype(str).isin(keep_ids)] if not matches.empty else matches
+    keep_ids, _mw_narrowed = _matchweek_range_slider(f"season_touchmap_matchweek_{league}_{season}", matches_in_scope)
+    zone = _narrow_selectbox_right("Pitch Zone", _PITCH_ZONE_OPTIONS, key=f"season_touchmap_zone_{league}_{season}")
+
     all_touches = all_touches[all_touches["match_id"].astype(str).isin(keep_ids)]
     if restrict_to_man_utd:
         all_touches = all_touches[all_touches["team"].apply(hdb._is_man_utd)]
@@ -1379,9 +1555,11 @@ def _render_season_touchmap(db):
             "Only Man Utd has complete data saved for earlier seasons right now, "
             "so other clubs are hidden here until that catches up."
         )
+    all_touches = all_touches[_pitch_zone_mask(all_touches, zone, "x", "y")]
     if all_touches.empty:
         st.info(f"No touch data saved yet for {season} {league}"
-                + (" (Man Utd only, for now)." if restrict_to_man_utd else "."))
+                + (" (Man Utd only, for now)" if restrict_to_man_utd else "")
+                + (" in this pitch zone." if zone != "All zones" else "."))
         return
 
     team_filter = _team_filter_picker(all_touches, "team", key=f"season_touchmap_team_{league}_{season}")
@@ -1393,12 +1571,15 @@ def _render_season_touchmap(db):
     player = _narrow_selectbox("Player", players, key=f"season_touchmap_player_{league}_{season}_{team_filter}")
 
     player_touches = hdb.fetch_touches(db, player=player, team=team_filter)
-    # Re-apply the same League scope fetch_touches() above doesn't know
-    # about (it just fetches every saved match for this player/team) - see
-    # _render_season_pass_map()'s own comment on the identical step.
+    # Re-apply the same League/Season/Matchweek scope fetch_touches() above
+    # doesn't know about (it just fetches every saved match for this
+    # player/team) - see _render_season_pass_map()'s own comment on the
+    # identical step - plus the same Pitch Zone scope.
     player_touches = player_touches[player_touches["match_id"].astype(str).isin(keep_ids)]
+    player_touches = player_touches[_pitch_zone_mask(player_touches, zone, "x", "y")]
     if player_touches.empty:
-        st.info(f"No touches found for {player} in {league}.")
+        st.info(f"No touches found for {player} in {league}"
+                + ("" if zone == "All zones" else " in this pitch zone") + ".")
         return
 
     n_matches = player_touches["match_id"].nunique()
@@ -1992,9 +2173,15 @@ def _render_player_stats_tab(db):
 
 def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None, competition=None):
     """Single-match touch map - same idea as _render_season_touchmap()
-    above, scoped to one match_id instead of the whole database."""
+    above, scoped to one match_id instead of the whole database.
+
+    A Pitch Zone dropdown (right side of the page - see
+    _narrow_selectbox_right()/_pitch_zone_mask()) filters touches down to
+    one zone, added per explicit request."""
     max_minute = hdb.fetch_match_max_minute(db, match_id)
     minute_min, minute_max = _minute_range_slider(f"match_detail_touchmap_minutes_{match_id}", max_minute)
+
+    zone = _narrow_selectbox_right("Pitch Zone", _PITCH_ZONE_OPTIONS, key=f"match_detail_touchmap_zone_{match_id}")
 
     touches = hdb.fetch_touches(db, match_id=match_id, minute_min=minute_min, minute_max=minute_max)
     if touches.empty:
@@ -2005,6 +2192,10 @@ def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None, 
             )
         else:
             st.info("No touches recorded in this minute range.")
+        return
+    touches = touches[_pitch_zone_mask(touches, zone, "x", "y")]
+    if touches.empty:
+        st.info("No touches found in this pitch zone.")
         return
     players = sorted(touches["player"].dropna().unique())
     if not players:
