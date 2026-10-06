@@ -888,7 +888,22 @@ def compute_shots(match_json):
         team_id = _get_first(s, ['teamId'])
         team_name = team_map.get(team_id, str(team_id))
         event_type = _get_first(s, ['eventType'])
-        outcome = OUTCOME_MAP.get(event_type, event_type)
+        # An own goal's eventType is just 'Goal' - CONFIRMED against real
+        # data (Fulham vs Man Utd, 2026-09-20, Lisandro Martinez's 63' own
+        # goal): the shotmap entry has eventType='Goal' with a SEPARATE
+        # 'isOwnGoal': true flag, never the literal eventType 'OwnGoal' the
+        # old OUTCOME_MAP entry assumed (that mapping was dead code - this
+        # shape never produces it). Without this check, an own goal was
+        # silently labeled Outcome='Goal', indistinguishable from a real
+        # goal, on the TEAM OF THE PLAYER WHO DEFLECTED IT (here, Man Utd
+        # via Martinez) rather than the team that actually benefited -
+        # which let it slip into combined_report.compute_combined_shots()'s
+        # shot list uncaught, even though whoscored_report.compute_sca()
+        # correctly excludes the matching WhoScored-side own goal via its
+        # own is_own_goal() check - a 1-shot count mismatch between the two
+        # sources that silently shifted every later shot's rank-matched
+        # Situation/xG/Outcome by one for the rest of the match.
+        outcome = 'Own Goal' if _get_first(s, ['isOwnGoal']) else OUTCOME_MAP.get(event_type, event_type)
         body_part_raw = _get_first(s, ['shotType'])
         body_part = BODY_PART_MAP.get(body_part_raw, body_part_raw)
         on_target_flag = _get_first(s, ['isOnTarget'])

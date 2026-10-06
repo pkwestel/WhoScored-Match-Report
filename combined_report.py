@@ -255,6 +255,20 @@ def compute_combined_shots(sca_out, fm_shots_df):
     that team's list are left with blank FotMob fields, since there's no
     way to tell which specific shot is the unmatched one from timing alone.
 
+    An own goal is explicitly dropped from fm_shots_df before this rank-
+    matching (see below) - sca_out (the WhoScored side) already excludes
+    own goals entirely (whoscored_report.compute_sca()'s own own_goal_mask/
+    is_own_goal() check), but FotMob's shotmap attributes an own goal to
+    the TEAM OF THE PLAYER WHO DEFLECTED IT, not the team that benefited
+    (confirmed on a real match, Fulham 1-1 Man Utd 2026-09-20: Lisandro
+    Martinez's 63' own goal appears under Man Utd's own shots, Outcome=
+    'Own Goal' - see fotmob_report.compute_shots()). Left in, that's one
+    MORE shot on FotMob's side than WhoScored's for that team, which
+    shifts every later shot's rank by one and silently attaches the WRONG
+    Situation/xG/Outcome to every shot after it for the rest of the match
+    - confirmed as the exact cause of that match's Bryan Mbeumo (78')/
+    Lisandro Martinez (81') shots showing each other's Situation.
+
     Minute/Added Time in the output are FotMob's own fields (not
     WhoScored's minute) - once matched, FotMob's own stoppage-time
     bookkeeping is used for both columns.
@@ -274,6 +288,10 @@ def compute_combined_shots(sca_out, fm_shots_df):
     fm_cols = ['_norm_team', '_rank_in_team', 'Minute', 'Added Time', 'xG', 'xGOT', 'Outcome', 'Situation']
     if fm_shots_df is not None and not fm_shots_df.empty:
         fm = fm_shots_df.copy()
+        # Drop own goals before ranking - see this function's own docstring
+        # for why (sca_out already has none, so leaving FotMob's own-goal
+        # row in would shift every later rank-matched shot by one).
+        fm = fm[fm['Outcome'] != 'Own Goal']
         fm['_norm_team'] = fm['Team'].apply(canonical_team_name)
         fm['_effective_minute'] = fm['Minute'].fillna(0) + fm['Added Time'].fillna(0)
         fm = fm.sort_values(['_norm_team', '_effective_minute']).copy()
