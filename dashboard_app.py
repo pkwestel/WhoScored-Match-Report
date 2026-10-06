@@ -1110,27 +1110,58 @@ def _current_season_and_league(db, match_ids):
     return f"{current_season.replace('/', '-')} {league}"
 
 
-# The season Pass Map/Passes Received/Touch Map tabs only ever had a League
-# filter before - this is the default season a Season filter should open on
-# (see _season_map_scope() below), per explicit request. Only Man Utd has
-# COMPLETE data saved for earlier seasons right now (same underlying
+# Any League+Season-scoped tab that aggregates across every saved match
+# (the season Pass Map/Passes Received/Touch Map tabs, and the top-level
+# Shots tab) defaults its own Season filter to this value and hides every
+# OTHER club's data whenever a different season is picked - only Man Utd
+# has COMPLETE data saved for earlier seasons right now (same underlying
 # situation history_db._HIDDEN_SEASONS already handles for the Fixtures/
 # League Overview/Player Stats/Team Page views, just broader here - every
-# season before this one, not only 2023/24) - so _season_map_scope() also
-# tells its caller to narrow the Team dropdown down to Man Utd only
-# whenever a season OTHER than this one is selected. This is scoped to
-# just these 3 tabs; it doesn't change history_db._HIDDEN_SEASONS itself or
-# any of the pages that already have their own hidden-season handling.
-_SEASON_MAPS_CURRENT_SEASON = "2026/27"
+# season before this one, not only 2023/24). This is scoped to just the
+# tabs that actually use it below; it doesn't change history_db._HIDDEN_
+# SEASONS itself or any of the pages that already have their own hidden-
+# season handling (the League Overview tab's own League/Season dropdowns,
+# for instance, are untouched by this).
+_CURRENT_SEASON = "2026/27"
+
+
+def _available_seasons_for_league(matches, league):
+    """
+    Every season label (see hdb._season_label()) with at least one match in
+    `league`, most recent first - the pure-data half of _season_map_scope()
+    below, split out so a caller that needs its OWN column layout for the
+    Season dropdown (e.g. the top-level Shots tab, which places League/
+    Season/Situation side by side) can get the same options list without
+    going through _season_map_scope()'s own fixed st.columns() placement -
+    nesting st.columns() more than one level deep inside an already-created
+    column isn't reliably supported, so such callers render the selectbox
+    themselves using this list (see _default_season_index() for the
+    matching default-selection rule) instead of calling _season_map_scope().
+    """
+    if matches.empty:
+        return []
+    in_league = matches[matches["competition"] == league].copy()
+    in_league["season"] = in_league["match_date"].apply(hdb._season_label)
+    return sorted(in_league["season"].dropna().unique().tolist(), reverse=True)
+
+
+def _default_season_index(available_seasons):
+    """
+    Index of _CURRENT_SEASON within available_seasons, or 0 (the most
+    recent, since available_seasons is always sorted most-recent-first) if
+    _CURRENT_SEASON isn't one of the options - shared default-selection
+    rule for every Season dropdown that uses this module's season-hiding
+    convention.
+    """
+    return (available_seasons.index(_CURRENT_SEASON)
+            if _CURRENT_SEASON in available_seasons else 0)
 
 
 def _season_map_scope(matches, league, key):
     """
     Shared League+Season scoping for the season Pass Map/Passes Received/
-    Touch Map tabs. Builds the Season dropdown from whichever seasons
-    actually have matches saved in the already-selected League (most recent
-    first, same convention as hdb.fetch_available_seasons()), defaulting to
-    _SEASON_MAPS_CURRENT_SEASON when it's one of the options.
+    Touch Map tabs. Builds the Season dropdown from _available_seasons_for_
+    league(), defaulting per _default_season_index().
 
     Returns (season, keep_ids, restrict_to_man_utd):
       - season: the selected season label ('YYYY/YY'), or None if this
@@ -1140,24 +1171,21 @@ def _season_map_scope(matches, league, key):
       - keep_ids: match_id strings (as str) in this League+Season - filter
         whichever passes/touches table the caller already fetched down to
         this set, the same way it previously filtered on League alone.
-      - restrict_to_man_utd: True when a season other than
-        _SEASON_MAPS_CURRENT_SEASON is selected - the caller should then
-        narrow its own dataframe to Man Utd's rows only (hdb._is_man_utd())
-        before building its Team dropdown, rather than showing every other
-        club's incomplete earlier-season numbers.
+      - restrict_to_man_utd: True when a season other than _CURRENT_SEASON
+        is selected - the caller should then narrow its own dataframe to
+        Man Utd's rows only (hdb._is_man_utd()) before building its Team
+        dropdown, rather than showing every other club's incomplete
+        earlier-season numbers.
     """
-    if matches.empty:
-        return None, set(), False
-    in_league = matches[matches["competition"] == league].copy()
-    in_league["season"] = in_league["match_date"].apply(hdb._season_label)
-    available_seasons = sorted(in_league["season"].dropna().unique().tolist(), reverse=True)
+    available_seasons = _available_seasons_for_league(matches, league)
     if not available_seasons:
         return None, set(), False
-    default_index = (available_seasons.index(_SEASON_MAPS_CURRENT_SEASON)
-                      if _SEASON_MAPS_CURRENT_SEASON in available_seasons else 0)
-    season = _narrow_selectbox("Season", available_seasons, key=key, index=default_index)
+    season = _narrow_selectbox("Season", available_seasons, key=key,
+                                index=_default_season_index(available_seasons))
+    in_league = matches[matches["competition"] == league].copy()
+    in_league["season"] = in_league["match_date"].apply(hdb._season_label)
     keep_ids = set(in_league.loc[in_league["season"] == season, "match_id"].astype(str))
-    restrict_to_man_utd = season != _SEASON_MAPS_CURRENT_SEASON
+    restrict_to_man_utd = season != _CURRENT_SEASON
     return season, keep_ids, restrict_to_man_utd
 
 
@@ -3058,46 +3086,97 @@ else:
                             st.line_chart(chart_df)
 
     elif _active_tab == "shots":
-        for_df, against_df = hdb.fetch_season_shot_totals(db)
-        if for_df.empty and against_df.empty:
+        # League + Season dropdowns, added per request - this tab used to
+        # show every saved shot pooled together with no scoping at all.
+        # League defaults to Premier League (falling back to whatever's
+        # first alphabetically if that's ever not an option - e.g. a
+        # database with only Champions League matches saved); Season
+        # defaults to _CURRENT_SEASON and, same as the season Pass Map/
+        # Passes Received/Touch Map tabs, is restricted to Man Utd's own
+        # row only when an earlier season is picked (see _CURRENT_SEASON's
+        # own comment on why - only Man Utd has complete data for those
+        # right now). All three dropdowns share one row rather than each
+        # getting the full page width.
+        available_leagues = hdb.fetch_available_competitions(db)
+        if not available_leagues:
             st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
         else:
-            situations_present = sorted(
-                (set(for_df["Situation"]) | set(against_df["Situation"])) - _HIDDEN_SITUATIONS
+            default_league_index = (
+                available_leagues.index("Premier League") if "Premier League" in available_leagues else 0
             )
-            situation_options = ["All situations"] + situations_present
-            chosen = st.selectbox(
-                "Situation",
-                situation_options,
-                format_func=lambda s: s if s == "All situations" else _situation_display_name(s),
-            )
+            league_col, season_col, situation_col = st.columns([1, 1, 2])
+            with league_col:
+                league = st.selectbox(
+                    "League", available_leagues, index=default_league_index, key="shots_tab_league"
+                )
 
-            def _team_totals_for(df):
-                scoped = df if chosen == "All situations" else df[df["Situation"] == chosen]
-                if scoped.empty:
-                    return pd.DataFrame(columns=["Team", "Shots", "Goals", "Total xG"])
-                out = (scoped.groupby("Team")[["Shots", "Goals", "Total xG"]]
-                       .sum()
-                       .reset_index()
-                       .sort_values("Total xG", ascending=False)
-                       .reset_index(drop=True))
-                out["Total xG"] = out["Total xG"].round(2)
-                return out
+            matches = hdb.fetch_matches(db)
+            available_seasons = _available_seasons_for_league(matches, league)
+            if not available_seasons:
+                st.info(f"No shots saved yet for {league}.")
+            else:
+                with season_col:
+                    season = st.selectbox(
+                        "Season", available_seasons, index=_default_season_index(available_seasons),
+                        key="shots_tab_season",
+                    )
+                restrict_to_man_utd = season != _CURRENT_SEASON
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("For")
-                # Plain st.dataframe - native instant column-header sort,
-                # no page reload (same tradeoff as the 5 Team Stats tables
-                # above: Team is plain text here, not a link).
-                for_totals = _team_totals_for(for_df)
-                st.dataframe(for_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(for_totals))
-            with col2:
-                st.subheader("Against")
-                against_totals = _team_totals_for(against_df)
-                st.dataframe(against_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(against_totals))
+                for_df, against_df = hdb.fetch_season_shot_totals(db, competition=league, season=season)
+                if restrict_to_man_utd:
+                    for_df = for_df[for_df["Team"].apply(hdb._is_man_utd)]
+                    against_df = against_df[against_df["Team"].apply(hdb._is_man_utd)]
+
+                if for_df.empty and against_df.empty:
+                    st.info(
+                        f"No shots saved yet for {season} {league}"
+                        + (" (Man Utd only, for now)." if restrict_to_man_utd else ".")
+                    )
+                else:
+                    if restrict_to_man_utd:
+                        st.caption(
+                            "Only Man Utd has complete data saved for earlier seasons right now, "
+                            "so other clubs are hidden here until that catches up."
+                        )
+                    situations_present = sorted(
+                        (set(for_df["Situation"]) | set(against_df["Situation"])) - _HIDDEN_SITUATIONS
+                    )
+                    situation_options = ["All situations"] + situations_present
+                    with situation_col:
+                        chosen = st.selectbox(
+                            "Situation",
+                            situation_options,
+                            format_func=lambda s: s if s == "All situations" else _situation_display_name(s),
+                            key="shots_tab_situation",
+                        )
+
+                    def _team_totals_for(df):
+                        scoped = df if chosen == "All situations" else df[df["Situation"] == chosen]
+                        if scoped.empty:
+                            return pd.DataFrame(columns=["Team", "Shots", "Goals", "Total xG"])
+                        out = (scoped.groupby("Team")[["Shots", "Goals", "Total xG"]]
+                               .sum()
+                               .reset_index()
+                               .sort_values("Total xG", ascending=False)
+                               .reset_index(drop=True))
+                        out["Total xG"] = out["Total xG"].round(2)
+                        return out
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.subheader("For")
+                        # Plain st.dataframe - native instant column-header
+                        # sort, no page reload (same tradeoff as the 5 Team
+                        # Stats tables above: Team is plain text here, not a
+                        # link).
+                        for_totals = _team_totals_for(for_df)
+                        st.dataframe(for_totals, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(for_totals))
+                    with col2:
+                        st.subheader("Against")
+                        against_totals = _team_totals_for(against_df)
+                        st.dataframe(against_totals, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(against_totals))
 
     elif _active_tab == "passmap":
         _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
