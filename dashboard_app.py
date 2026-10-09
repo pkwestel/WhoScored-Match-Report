@@ -1060,15 +1060,18 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
     history_db.py/whoscored_report.compute_all_passes()) and share
     pitch_viz.plot_pass_map() - the exact same drawing code streamlit_app.py
     uses for its own live versions of these two charts, just fed from the
-    database instead of a freshly-scraped match. 'matches' can be every
-    saved match (the normal Pass Map/Passes Received tabs) or a single-row
-    DataFrame scoped to one match (the match detail view) - the match
-    dropdown just has one option in that case.
+    database instead of a freshly-scraped match. Only ever called with
+    `matches` scoped to a single match (the match detail view's own Pass
+    Map/Passes Received tabs - see _render_match_detail()) now that the
+    main nav bar's own standalone Pass Map/Passes Received tabs have been
+    removed per request ("keep those confined to the individual match
+    reports") - the Match dropdown below still just has one option in that
+    case, same as before.
 
-    show_minute_slider: only True from the match detail view's own Pass Map/
-    Passes Received tabs (see _render_match_detail()) - a minute range only
-    means one specific thing when scoped to one real match's own clock, so
-    the season-wide call site (matches = every saved match) never shows it.
+    show_minute_slider: kept as a parameter (currently always True, since
+    every remaining call site is the match detail view) rather than
+    removed outright, in case a future caller needs this function without
+    a real match clock to slice by.
 
     Layout, per explicit request: Match dropdown, then Player and Pitch
     Zone sharing one row (see _player_and_zone_row()), with the Minute
@@ -2877,8 +2880,6 @@ _DASH_TABS = [
     ("team", "Team Trends"),
     ("player", "Player Trends"),
     ("shots", "Shots"),
-    ("passmap", "Pass Map"),
-    ("passrecv", "Passes Received"),
     ("pass_pairs", "Pass Pairs"),
     ("shot_pairs", "Shot Pairs"),
     ("season_passmap", "Season Pass Map"),
@@ -3320,8 +3321,10 @@ else:
         # Passes Received/Touch Map tabs, is restricted to Man Utd's own
         # row only when an earlier season is picked (see _CURRENT_SEASON's
         # own comment on why - only Man Utd has complete data for those
-        # right now). All three dropdowns share one row rather than each
-        # getting the full page width.
+        # right now). All three dropdowns are the same narrow width (not
+        # the whole page) and share one row, with a trailing spacer column
+        # soaking up the rest of the row rather than stretching any of
+        # them wider.
         available_leagues = hdb.fetch_available_competitions(db)
         if not available_leagues:
             st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
@@ -3329,7 +3332,7 @@ else:
             default_league_index = (
                 available_leagues.index("Premier League") if "Premier League" in available_leagues else 0
             )
-            league_col, season_col, situation_col = st.columns([1, 1, 2])
+            league_col, season_col, situation_col, _spacer = st.columns([1, 1, 1, 4])
             with league_col:
                 league = st.selectbox(
                     "League", available_leagues, index=default_league_index, key="shots_tab_league"
@@ -3402,12 +3405,6 @@ else:
                         against_totals = _team_totals_for(against_df)
                         st.dataframe(against_totals, use_container_width=False, hide_index=True,
                                      height=_no_scroll_height(against_totals))
-
-    elif _active_tab == "passmap":
-        _render_pass_map(db, hdb.fetch_matches(db), mode="passer")
-
-    elif _active_tab == "passrecv":
-        _render_pass_map(db, hdb.fetch_matches(db), mode="receiver")
 
     elif _active_tab == "season_passmap":
         _render_season_pass_map(db, mode="passer")
