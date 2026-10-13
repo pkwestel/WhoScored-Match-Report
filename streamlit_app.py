@@ -132,9 +132,12 @@ if st.button("Generate Report", type="primary"):
                 sca_out = wr.compute_sca(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing shot pairs..."):
                 shot_pairs = wr.compute_shot_pairs(sca_out)
+            with st.spinner("Computing xT received..."):
+                xt_received = wr.compute_xt_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing touches..."):
                 team_summary, player_third = wr.compute_touches(df_windowed, team_carries, player_carries,
-                                                                  passes_received, progressive_received)
+                                                                  passes_received, progressive_received,
+                                                                  xt_received=xt_received)
             with st.spinner("Computing passing..."):
                 passing_out = wr.compute_passing(df_windowed, player_totals, sca_out)
             with st.spinner("Computing possession sequences..."):

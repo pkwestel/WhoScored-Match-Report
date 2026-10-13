@@ -1265,11 +1265,11 @@ def _fetch_position_map(db: DB, match_id) -> dict:
 # for where each field is sourced from.
 _SCORING_STATS_COLUMNS = ["Minutes Played", "Goals", "Assists", "Shots", "SCA",
                            "NPxG", "PS-xG", "xA", "PK", "PK Attempted", "Sprints"]
-_DECIMAL_STAT_COLUMNS = {"NPxG", "PS-xG", "xA", "xG Buildup"}
+_DECIMAL_STAT_COLUMNS = {"NPxG", "PS-xG", "xA", "xG Buildup", "xT", "xT Carry", "xT Received"}
 _POSSESSION_COLUMNS = ["Total Touches", "Own third", "Middle third", "Final third",
                         "Attacking Box", "Progressive Carries", "Carries into Final Third",
                         "Carries into Box", "Passes Received", "Progressive Passes Received",
-                        "Zone 14 Touches"]
+                        "Zone 14 Touches", "xT Carry", "xT Received"]
 # xG Buildup (whoscored_report.compute_xg_buildup(), merged into
 # passing_out by combined_report.merge_xg_buildup() before it's saved)
 # lands in the SAME 'ws_passing' namespace as every other column here,
@@ -1282,7 +1282,7 @@ _POSSESSION_COLUMNS = ["Total Touches", "Own third", "Middle third", "Final thir
 _PASSING_COLUMNS = ["Passes Completed", "Passes Attempted", "Passes Forward", "Headed",
                      "Crosses Attempted", "Crosses Completed", "Passes into Final 1/3",
                      "Passes into the Box", "Progressive Passes", "Shot Assists", "SCA",
-                     "Line Breaking Passes", "xG Buildup"]
+                     "xT", "Line Breaking Passes", "xG Buildup"]
 _DEFENSIVE_ACTIONS_COLUMNS = ["Tackles", "Interceptions", "Passes Blocked", "Shots Blocked"]
 _DEFENSIVE_LOCATIONS_COLUMNS = [
     f"{stat} {third}" for stat in ("Tackles", "Interceptions", "Passes Blocked", "Ball Recoveries")
@@ -3497,7 +3497,8 @@ def fetch_season_touches_totals(db: DB, competition=None, season=None) -> pd.Dat
     cols = ["Team", "Total Touches", "Own Third", "Middle Third", "Final Third", "Attacking Box",
             "Progressive Carries", "Carries into Final Third", "Carries into Box",
             "Passes Received", "Progressive Passes Received",
-            "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %"]
+            "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %",
+            "xT Carry", "xT Received"]
 
     valid_ids = _match_ids_for_competition(db, competition, season)
     touches = fetch_touches(db)
@@ -3544,8 +3545,10 @@ def fetch_season_touches_totals(db: DB, competition=None, season=None) -> pd.Dat
         if not ws_touches:
             continue
         agg = player_received_totals.setdefault(team, {"Passes Received": 0,
-                                                         "Progressive Passes Received": 0})
-        for k in ("Passes Received", "Progressive Passes Received"):
+                                                         "Progressive Passes Received": 0,
+                                                         "xT Carry": 0.0,
+                                                         "xT Received": 0.0})
+        for k in ("Passes Received", "Progressive Passes Received", "xT Carry", "xT Received"):
             v = ws_touches.get(k)
             if isinstance(v, (int, float)):
                 agg[k] += v
@@ -3571,6 +3574,8 @@ def fetch_season_touches_totals(db: DB, competition=None, season=None) -> pd.Dat
             "Middle Third %": round(mid / total * 100, 1) if total else 0.0,
             "Final Third %": round(final / total * 100, 1) if total else 0.0,
             "Attacking Box %": round(box / total * 100, 1) if total else 0.0,
+            "xT Carry": round(received_totals.get("xT Carry", 0.0), 2),
+            "xT Received": round(received_totals.get("xT Received", 0.0), 2),
         })
     return pd.DataFrame(records, columns=cols).sort_values(
         "Total Touches", ascending=False).reset_index(drop=True)

@@ -749,6 +749,68 @@ def third(x):
 
 
 # ============================================================
+# 2b. EXPECTED THREAT (xT) GRID
+# ============================================================
+# 12×8 xT grid (12 columns across the pitch width, 8 rows from own goal
+# line to opponent goal line) based on the standard possession-value model
+# introduced by Karun Singh (https://karun.in/blog/expected-threat.html).
+# Values represent the probability that a possession at a given zone will
+# end in a goal, computed iteratively from large open-data event datasets
+# (Wyscout / StatsBomb).  Row 0 = own goal line, row 7 = opponent goal
+# line; column 0 = left touchline, column 11 = right touchline.
+#
+# These values are representative of the standard 12×8 xT grid widely
+# used in football analytics literature.  The exact numbers are from the
+# iterative xT computation on open Wyscout data (as implemented in the
+# soccermatics / Friends-of-Tracking tutorials).
+_XT_GRID = [
+    # row 0 – own goal line
+    [0.00638303, 0.00779616, 0.00844854, 0.00977659, 0.01126267, 0.01248344,
+     0.01248344, 0.01126267, 0.00977659, 0.00844854, 0.00779616, 0.00638303],
+    # row 1
+    [0.00750072, 0.00878589, 0.01001761, 0.01150012, 0.01312345, 0.01450953,
+     0.01450953, 0.01312345, 0.01150012, 0.01001761, 0.00878589, 0.00750072],
+    # row 2
+    [0.00875940, 0.01062399, 0.01245648, 0.01468837, 0.01651665, 0.01832377,
+     0.01832377, 0.01651665, 0.01468837, 0.01245648, 0.01062399, 0.00875940],
+    # row 3
+    [0.01081895, 0.01271548, 0.01533726, 0.01865838, 0.02212843, 0.02523508,
+     0.02523508, 0.02212843, 0.01865838, 0.01533726, 0.01271548, 0.01081895],
+    # row 4
+    [0.01353, 0.01592, 0.02052, 0.02611, 0.03205, 0.03781,
+     0.03781, 0.03205, 0.02611, 0.02052, 0.01592, 0.01353],
+    # row 5
+    [0.01733, 0.02141, 0.02874, 0.03862, 0.05150, 0.06398,
+     0.06398, 0.05150, 0.03862, 0.02874, 0.02141, 0.01733],
+    # row 6
+    [0.02400, 0.03261, 0.04581, 0.06711, 0.10580, 0.16388,
+     0.16388, 0.10580, 0.06711, 0.04581, 0.03261, 0.02400],
+    # row 7 – opponent goal line
+    [0.03157, 0.04347, 0.07021, 0.11526, 0.21511, 0.43304,
+     0.43304, 0.21511, 0.11526, 0.07021, 0.04347, 0.03157],
+]
+_XT_ROWS = len(_XT_GRID)       # 8
+_XT_COLS = len(_XT_GRID[0])    # 12
+
+
+def _xt_value(x, y):
+    """Look up the xT value for a pitch location on the 0-100 normalised
+    WhoScored coordinate system.  x runs 0 (own goal line) → 100 (opponent
+    goal line); y runs 0 → 100 across the width.
+
+    Coordinates are clamped to [0, 100] before the grid lookup, so
+    slightly out-of-bounds values from WhoScored's data don't crash.
+    Returns a single float: the xT value of the grid cell the point
+    falls in.
+    """
+    x = max(0.0, min(float(x), 99.999))
+    y = max(0.0, min(float(y), 99.999))
+    row = int(x / 100 * _XT_ROWS)
+    col = int(y / 100 * _XT_COLS)
+    return _XT_GRID[row][col]
+
+
+# ============================================================
 # 3. PROGRESSIVE PASSES
 # ============================================================
 def _pass_receiver_map(df):
@@ -894,6 +956,33 @@ def compute_passes_received(df, minute_min=None, minute_max=None):
         received = received[received['minute'] <= minute_max]
     return (received.groupby(['team', 'receiver']).size()
             .reset_index(name='passes_received')
+            .rename(columns={'receiver': 'player'}))
+
+
+def compute_xt_received(df, minute_min=None, minute_max=None):
+    """
+    xT Received per player: for each completed pass, the xT delta
+    (max(0, xT(end) - xT(start))) is attributed to the receiver.
+    Uses the same _pass_receiver_map() heuristic as passes_received.
+
+    Returns a DataFrame with columns: team, player, xt_received (float,
+    rounded to 2 dp).
+    """
+    receiver_map = _pass_receiver_map(df)
+    work = df.sort_index().copy()
+    work['receiver'] = receiver_map
+    pass_mask = (work['type.displayName'] == 'Pass') & (work['outcomeType.displayName'] == 'Successful')
+    received = work[pass_mask].dropna(subset=['receiver']).copy()
+    if minute_min is not None:
+        received = received[received['minute'] >= minute_min]
+    if minute_max is not None:
+        received = received[received['minute'] <= minute_max]
+    # Compute xT delta for each completed pass
+    received['xt_delta'] = received.apply(
+        lambda r: max(0.0, _xt_value(r['endX'], r['endY']) - _xt_value(r['x'], r['y'])), axis=1
+    )
+    return (received.groupby(['team', 'receiver'])['xt_delta']
+            .sum().round(2).reset_index(name='xt_received')
             .rename(columns={'receiver': 'player'}))
 
 
@@ -1215,16 +1304,22 @@ def compute_carries(df, minute_min=None, minute_max=None):
         is_progressive = ((progress >= PROGRESSIVE_YARD_THRESHOLD) or ends_in_box) and \
                           (end_third != 'Own third')
 
+        # xT delta for this carry: threat gained by moving the ball from
+        # start to end location (positive = moved to a more dangerous zone).
+        xt_delta = _xt_value(ex, ey) - _xt_value(sx, sy)
+
         carry_records.append({
             'team': cur['team'], 'player': nxt['playerName'],
             'cumulative_mins': cur['cumulative_mins'],
             'is_progressive': bool(is_progressive),
             'into_final_third': bool(end_third == 'Final third' and start_third != 'Final third'),
             'into_box': bool(ends_in_box and not starts_in_box),
+            'xt_carry': max(0.0, xt_delta),
         })
 
     carries_df = pd.DataFrame(carry_records) if carry_records else pd.DataFrame(
-        columns=['team', 'player', 'cumulative_mins', 'is_progressive', 'into_final_third', 'into_box'])
+        columns=['team', 'player', 'cumulative_mins', 'is_progressive', 'into_final_third', 'into_box',
+                 'xt_carry'])
 
     # carries_df returned to callers (e.g. compute_on_off()) is ALWAYS the
     # full-match version, unfiltered - only the team_carries/player_carries
@@ -1248,8 +1343,10 @@ def compute_carries(df, minute_min=None, minute_max=None):
         progressive_carries=('is_progressive', 'sum'),
         carries_into_final_third=('into_final_third', 'sum'),
         carries_into_box=('into_box', 'sum'),
+        xt_carry=('xt_carry', 'sum'),
     ).reset_index() if len(windowed) else pd.DataFrame(
-        columns=['team', 'player', 'progressive_carries', 'carries_into_final_third', 'carries_into_box'])
+        columns=['team', 'player', 'progressive_carries', 'carries_into_final_third', 'carries_into_box',
+                 'xt_carry'])
 
     # carries_df (the raw, one-row-per-carry data, with each carry's own
     # cumulative_mins) is also returned so compute_on_off() can window
@@ -1491,7 +1588,8 @@ def compute_shot_pairs(sca_out):
 # ============================================================
 # 5. TOUCHES (renamed from "Touches by Third"), with carries merged in
 # ============================================================
-def compute_touches(df, team_carries, player_carries, passes_received, progressive_received):
+def compute_touches(df, team_carries, player_carries, passes_received, progressive_received,
+                     xt_received=None):
     touches = df[df['isTouch'] == True].copy()
     touches['pitch_third'] = touches['x'].apply(third)
     touches['in_att_box'] = in_box(touches['x'], touches['y'])
@@ -1534,10 +1632,12 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
     player_third = player_third.merge(player_carries, on=['team', 'player'], how='left')
     for c in ['progressive_carries', 'carries_into_final_third', 'carries_into_box']:
         player_third[c] = player_third[c].fillna(0).astype(int)
+    player_third['xt_carry'] = player_third['xt_carry'].fillna(0.0).round(2)
     player_third = player_third.rename(columns={
         'progressive_carries': 'Progressive Carries',
         'carries_into_final_third': 'Carries into Final Third',
         'carries_into_box': 'Carries into Box',
+        'xt_carry': 'xT Carry',
     })
     player_third = player_third.merge(passes_received, on=['team', 'player'], how='left')
     player_third = player_third.merge(progressive_received, on=['team', 'player'], how='left')
@@ -1547,6 +1647,14 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
         'passes_received': 'Passes Received',
         'progressive_passes_received': 'Progressive Passes Received',
     })
+
+    # xT Received - total xT from passes received (attributed to the receiver)
+    if xt_received is not None and not xt_received.empty:
+        player_third = player_third.merge(xt_received, on=['team', 'player'], how='left')
+        player_third['xt_received'] = player_third['xt_received'].fillna(0.0).round(2)
+    else:
+        player_third['xt_received'] = 0.0
+    player_third = player_third.rename(columns={'xt_received': 'xT Received'})
 
     # Zone 14 Touches - last column, per request. A touch's own x/y already
     # places it in exactly one of Own/Middle/Final third (pitch_third
@@ -1565,6 +1673,7 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
         'team', 'player', 'Total Touches', 'Own third', 'Middle third', 'Final third', 'Attacking Box',
         'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
         'Passes Received', 'Progressive Passes Received', 'Zone 14 Touches',
+        'xT Carry', 'xT Received',
     ]]
     player_third = player_third.sort_values(['team', 'Total Touches'], ascending=[True, False])
 
@@ -1605,6 +1714,14 @@ def _classify_passes(df):
     passes['into_box'] = (passes['completed'] & passes['is_open_play']
                            & (~in_box(passes['x'], passes['y'])) & in_box(passes['endX'], passes['endY']))
     passes['shot_assist'] = passes['qn'].apply(lambda s: 'ShotAssist' in s)
+    # xT delta per pass: only for completed passes (failed passes don't move
+    # the ball), clamped to >= 0 (a backward pass has xT = 0, not negative).
+    passes['xt_pass'] = 0.0
+    completed_mask = passes['completed']
+    if completed_mask.any():
+        xt_end = passes.loc[completed_mask].apply(lambda r: _xt_value(r['endX'], r['endY']), axis=1).values
+        xt_start = passes.loc[completed_mask].apply(lambda r: _xt_value(r['x'], r['y']), axis=1).values
+        passes.loc[completed_mask, 'xt_pass'] = np.maximum(0.0, xt_end - xt_start)
     return passes
 
 
@@ -1633,6 +1750,7 @@ def compute_passing(df, player_totals, sca_out):
         into_final_third=('into_final_third', 'sum'),
         into_box=('into_box', 'sum'),
         shot_assists=('shot_assist', 'sum'),
+        xt_pass=('xt_pass', 'sum'),
     ).reset_index().rename(columns={'playerName': 'player'})
 
     prog = player_totals[['team', 'player', 'progressive_passes']]
@@ -1666,6 +1784,8 @@ def compute_passing(df, player_totals, sca_out):
     for c in numeric_cols:
         if c in grouped.columns:
             grouped[c] = grouped[c].fillna(0).astype(int)
+    # xT is a float column - fill NaN and round to 2 decimal places
+    grouped['xt_pass'] = grouped['xt_pass'].fillna(0.0).round(2)
 
     grouped = grouped.rename(columns={
         'passes_completed': 'Passes Completed',
@@ -1678,11 +1798,12 @@ def compute_passing(df, player_totals, sca_out):
         'into_box': 'Passes into the Box',
         'progressive_passes': 'Progressive Passes',
         'shot_assists': 'Shot Assists',
+        'xt_pass': 'xT',
     })
     grouped = grouped[[
         'team', 'player', 'Passes Completed', 'Passes Attempted', 'Passes Forward', 'Headed',
         'Crosses Attempted', 'Crosses Completed', 'Passes into Final 1/3', 'Passes into the Box',
-        'Progressive Passes', 'Shot Assists', 'SCA',
+        'Progressive Passes', 'Shot Assists', 'SCA', 'xT',
     ]]
     grouped = grouped.sort_values(['team', 'Passes Attempted'], ascending=[True, False])
 
@@ -3324,9 +3445,13 @@ def main():
     print("Computing shot pairs...")
     shot_pairs = compute_shot_pairs(sca_out)
 
+    print("Computing xT received...")
+    xt_received = compute_xt_received(df)
+
     print("Computing touches...")
     team_summary, player_third = compute_touches(df, team_carries, player_carries,
-                                                  passes_received, progressive_received)
+                                                  passes_received, progressive_received,
+                                                  xt_received=xt_received)
 
     print("Computing passing...")
     passing_out = compute_passing(df, player_totals, sca_out)

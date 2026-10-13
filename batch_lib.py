@@ -111,8 +111,10 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     team_carries, player_carries, carries_df = wr.compute_carries(df)
     sca_out = wr.compute_sca(df)
     shot_pairs = wr.compute_shot_pairs(sca_out)
+    xt_received = wr.compute_xt_received(df)
     team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
-                                                      passes_received, progressive_received)
+                                                      passes_received, progressive_received,
+                                                      xt_received=xt_received)
     passing_out = wr.compute_passing(df, player_totals, sca_out)
     chains_df, team_sequences = wr.compute_sequences(df)
     field_tilt = wr.compute_field_tilt(team_summary)
