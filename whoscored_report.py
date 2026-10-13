@@ -668,22 +668,32 @@ def scrape_match(match_centre_url):
     _, _, json_text = script_tag.text.partition("matchCentreData: ")
     match_json = json.loads(json_text.split(",\n")[0])
 
-    # Second redirect/mismatch check: compare the match ID inside the
-    # JSON payload itself against the one we asked for.  This catches
-    # cases where the URL didn't visibly change but WhoScored served
-    # data for a different match anyway.
+    # Diagnostic logging: always print what the page actually gave us so
+    # mismatches are visible in the console even if the check below can't
+    # fire (e.g. matchId missing from the JSON).
     json_match_id = match_json.get("matchId")
-    if requested_match_id and json_match_id and int(json_match_id) != requested_match_id:
-        json_home = match_json.get("home", {}).get("name", "?")
-        json_away = match_json.get("away", {}).get("name", "?")
-        raise RuntimeError(
-            f"WhoScored served data for the WRONG match!\n"
-            f"  Requested match ID: {requested_match_id}\n"
-            f"  Received match ID:  {json_match_id} ({json_home} vs {json_away})\n"
-            f"This usually means WhoScored redirected your old match URL "
-            f"to a more recent fixture.  Try opening the URL in a real "
-            f"browser to check whether the original match page still exists."
-        )
+    json_home = match_json.get("home", {}).get("name", "?")
+    json_away = match_json.get("away", {}).get("name", "?")
+    print(f"  Requested match ID : {requested_match_id}")
+    print(f"  JSON matchId       : {json_match_id}")
+    print(f"  JSON teams         : {json_home} vs {json_away}")
+    print(f"  Final browser URL  : {final_url}")
+
+    # Match-ID mismatch check: compare the match ID inside the JSON
+    # payload against the one we asked for.
+    if requested_match_id and json_match_id is not None:
+        if int(json_match_id) != requested_match_id:
+            raise RuntimeError(
+                f"WhoScored served data for the WRONG match!\n"
+                f"  Requested match ID: {requested_match_id}\n"
+                f"  Received match ID:  {json_match_id} ({json_home} vs {json_away})\n"
+                f"This usually means WhoScored redirected your old match URL "
+                f"to a more recent fixture.  Try opening the URL in a real "
+                f"browser to check whether the original match page still exists."
+            )
+    elif requested_match_id and json_match_id is None:
+        print(f"  WARNING: matchId not found in JSON payload - cannot verify this "
+              f"is the correct match. Teams in data: {json_home} vs {json_away}")
 
     player_id_name_dict = match_json.get("playerIdNameDictionary", {})
     events_dict = match_json.get("events", {})
