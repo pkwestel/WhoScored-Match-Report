@@ -125,9 +125,14 @@ if st.button("Generate Combined Report", type="primary"):
                 player_windows = wr.extract_player_windows(df)
                 on_off = wr.compute_on_off(df, player_windows, carries_df)
 
-            wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
-                                       defensive_actions, defensive_action_location, passing_pairs,
-                                       ws_home_name, ws_away_name, against_totals, shot_pairs, on_off)
+            # wb_ws (and its Passing sheet) is built further down, AFTER the
+            # FotMob section below - the Passing table's own xG Buildup
+            # column needs FotMob's shot xG (via combined_shots), so
+            # passing_out isn't in its final, Excel/DB-ready shape until
+            # that merge happens. totals_out just above intentionally still
+            # uses THIS (pre-merge) passing_out - it doesn't need that
+            # column and was never asked to show it. See batch_lib.
+            # run_combined_report()'s identical restructuring/comment.
 
             fm_debug_buf = io.StringIO()
             with st.spinner("Opening the FotMob match page (a real Chrome window will pop up, ~10-25s)..."):
@@ -184,6 +189,21 @@ if st.button("Generate Combined Report", type="primary"):
 
             with st.spinner("Merging Shot Creating Actions + Shots..."):
                 combined_shots = cr.compute_combined_shots(sca_out, shots_df)
+
+                # xG Buildup (see whoscored_report.compute_xg_buildup() and
+                # combined_report.merge_xg_buildup() docstrings): needs
+                # WhoScored's own possession chains (df/sca_out) AND
+                # FotMob's shot xG (combined_shots['xG'], already rank-matched/
+                # own-goal-excluded above) - appended as the Passing table's own
+                # final column, right before wb_ws (the Excel Passing tab)
+                # is built, so both it and the DB's ws_passing namespace (which
+                # persists passing_out verbatim) pick this up automatically.
+                xg_buildup = wr.compute_xg_buildup(df, sca_out, combined_shots['xG'])
+                passing_out = cr.merge_xg_buildup(passing_out, xg_buildup)
+
+            wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
+                                       defensive_actions, defensive_action_location, passing_pairs,
+                                       ws_home_name, ws_away_name, against_totals, shot_pairs, on_off)
 
             wb = cr.build_combined_workbook(wb_ws, wb_fm, combined_shots, ws_home_name, ws_away_name)
             buf = io.BytesIO()

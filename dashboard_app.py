@@ -2509,8 +2509,9 @@ def _render_match_detail(db, match_id):
         # so leaving it in would let it get shuffled into the middle of the
         # table on a descending sort instead of staying put at the bottom.
         # decimal_cols is passed unconditionally for every category - it's
-        # a no-op for the 4 categories that don't have an NPxG/PS-xG/xA
-        # column at all, and correct for Scoring Stats, which does.
+        # a no-op for categories that don't have any of these columns at
+        # all, and correct for Scoring Stats (NPxG/PS-xG/xA) and Passing
+        # (xG Buildup), which do.
         st.caption(f"[{_display_team_name(home_team)}]({_team_page_url(home_team)})")
         if tables["home"].empty:
             st.info(f"No {category.lower()} saved for {_display_team_name(home_team)} in this match.")
@@ -2519,7 +2520,7 @@ def _render_match_detail(db, match_id):
             st.dataframe(home_sortable, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(home_sortable))
             _render_pinned_team_total_row(home_sortable.columns, home_total,
-                                           decimal_cols=("NPxG", "PS-xG", "xA"))
+                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup"))
 
         st.caption(f"[{_display_team_name(away_team)}]({_team_page_url(away_team)})")
         if tables["away"].empty:
@@ -2529,7 +2530,7 @@ def _render_match_detail(db, match_id):
             st.dataframe(away_sortable, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(away_sortable))
             _render_pinned_team_total_row(away_sortable.columns, away_total,
-                                           decimal_cols=("NPxG", "PS-xG", "xA"))
+                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup"))
 
         # Full flattened stat breakdown - every namespace, every player -
         # still available for anyone who wants more than the 5 category
@@ -2852,7 +2853,12 @@ def _render_team_page(db, team, season=None):
             sortable_df, total_row = _split_team_total_row(category_df)
             st.dataframe(sortable_df, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(sortable_df))
-            _render_pinned_team_total_row(sortable_df.columns, total_row)
+            # decimal_cols passed unconditionally for all 4 categories - a
+            # no-op for the 3 that don't have an xG Buildup column at all,
+            # and correct for Passing, which now does (see history_db.
+            # _PASSING_COLUMNS / _DECIMAL_STAT_COLUMNS).
+            _render_pinned_team_total_row(sortable_df.columns, total_row,
+                                           decimal_cols=("xG Buildup",))
 
     # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
     # xG For and Against, totaled for exactly the minutes each player was on

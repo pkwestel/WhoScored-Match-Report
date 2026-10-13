@@ -323,6 +323,72 @@ def compute_combined_shots(sca_out, fm_shots_df):
     return out[COMBINED_SHOTS_COLUMNS]
 
 
+def compute_xg_buildup(ws_df, sca_out, fm_shots_df):
+    """
+    xGBuildup per player for a single match, combining WhoScored's
+    possession chains with each shot's FotMob xG value. This is the one
+    place both sources mix for this feature:
+
+    - The possession chains and the on-ball touches come from WhoScored
+      (whoscored_report._assign_possession_ids(), the same windowed chain
+      algorithm behind the Possession Sequences tab).
+    - Each shot's xG comes from FotMob, via this module's OWN
+      compute_combined_shots() above - reused rather than re-matched, so
+      the own-goal exclusion and team-rank shot pairing (see that
+      function's docstring) only has to be gotten right in one place.
+
+    See whoscored_report.compute_xg_buildup() for the actual crediting
+    definition (every touch in a possession that produces a shot gets that
+    shot's full xG, minus the shot itself and the single action
+    immediately before it).
+
+    sca_out must be compute_sca()'s FULL-MATCH output (minute_min/
+    minute_max left as None) - a windowed sca_out would misalign both
+    against fm_shots_df's rank-matching and against ws_df's own possession
+    assignment.
+    """
+    combined = compute_combined_shots(sca_out, fm_shots_df)
+    # compute_combined_shots() preserves sca_out's row order/count exactly
+    # (own goals already excluded from both sides before matching, and its
+    # own final sort restores '_orig_order') - so combined['xG'] lines up
+    # 1:1, position for position, with sca_out's own rows.
+    shot_xg = combined['xG'].tolist()
+    return wr.compute_xg_buildup(ws_df, sca_out, shot_xg)
+
+
+def merge_xg_buildup(passing_out, xg_buildup):
+    """
+    Attaches 'xG Buildup' (from compute_xg_buildup() above) onto
+    whoscored_report.compute_passing()'s own output, as its final column -
+    used by both batch_lib.run_combined_report() and combined_streamlit_
+    app.py's equivalent single-match flow, so the Passing tab/table always
+    gets this column the same way regardless of which flow built the
+    report, and so the Excel Passing tab + the DB's ws_passing namespace
+    (which simply persists every column of passing_out verbatim - see
+    batch_lib.build_db_stats()) both pick it up with no further changes of
+    their own.
+
+    Both frames key on WhoScored's own 'team'/'player' columns (passing_out
+    from _classify_passes(df)'s own playerName/team; xg_buildup from the
+    same underlying df) - this is a same-source merge, not a cross-source
+    (WhoScored<->FotMob) one, so none of this project's existing team/
+    player name-alias handling is needed here.
+
+    A player with passes but no qualifying possession involvement in any
+    matched shot (e.g. they were subbed off before their team ever had a
+    shot, every shot their team had went unmatched against FotMob, or
+    their only touches were the shot/assist events themselves) gets 0, not
+    a blank cell - same "0 means confirmed zero" convention as every other
+    column on this table.
+    """
+    out = passing_out.merge(
+        xg_buildup[['team', 'player', 'xG Buildup']],
+        on=['team', 'player'], how='left',
+    )
+    out['xG Buildup'] = out['xG Buildup'].fillna(0.0)
+    return out
+
+
 def _copy_sheet(src_ws, dst_wb, new_title):
     """
     Copy a worksheet's values, styles, column widths, and freeze panes into

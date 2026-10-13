@@ -1265,14 +1265,24 @@ def _fetch_position_map(db: DB, match_id) -> dict:
 # for where each field is sourced from.
 _SCORING_STATS_COLUMNS = ["Minutes Played", "Goals", "Assists", "Shots", "SCA",
                            "NPxG", "PS-xG", "xA", "PK", "PK Attempted", "Sprints"]
-_DECIMAL_STAT_COLUMNS = {"NPxG", "PS-xG", "xA"}
+_DECIMAL_STAT_COLUMNS = {"NPxG", "PS-xG", "xA", "xG Buildup"}
 _POSSESSION_COLUMNS = ["Total Touches", "Own third", "Middle third", "Final third",
                         "Attacking Box", "Progressive Carries", "Carries into Final Third",
-                        "Carries into Box", "Passes Received", "Progressive Passes Received"]
+                        "Carries into Box", "Passes Received", "Progressive Passes Received",
+                        "Zone 14 Touches"]
+# xG Buildup (whoscored_report.compute_xg_buildup(), merged into
+# passing_out by combined_report.merge_xg_buildup() before it's saved)
+# lands in the SAME 'ws_passing' namespace as every other column here,
+# since it's just one more field on that same per-player row - no
+# separate namespace needed. Kept as the table's final column per
+# request. A match saved before this feature existed simply has no
+# 'xG Buildup' key in its stored ws_passing dict, so this column shows up
+# as missing (handled the same "-" vs real-0 way as every other column -
+# see _player_category_table()'s own docstring).
 _PASSING_COLUMNS = ["Passes Completed", "Passes Attempted", "Passes Forward", "Headed",
                      "Crosses Attempted", "Crosses Completed", "Passes into Final 1/3",
                      "Passes into the Box", "Progressive Passes", "Shot Assists", "SCA",
-                     "Line Breaking Passes"]
+                     "Line Breaking Passes", "xG Buildup"]
 _DEFENSIVE_ACTIONS_COLUMNS = ["Tackles", "Interceptions", "Passes Blocked", "Shots Blocked"]
 _DEFENSIVE_LOCATIONS_COLUMNS = [
     f"{stat} {third}" for stat in ("Tackles", "Interceptions", "Passes Blocked", "Ball Recoveries")
@@ -1333,8 +1343,8 @@ def fetch_player_possession(db: DB, match_id, home_team, away_team) -> dict:
     Possession category: the same per-player fields as the WhoScored report's
     own Touches tab (Total Touches, thirds, Attacking Box, Progressive
     Carries/Carries into Final Third/Box, Passes Received, Progressive
-    Passes Received) - read straight from the 'ws_touches' namespace
-    (whoscored_report.compute_touches()'s player_third table).
+    Passes Received, Zone 14 Touches) - read straight from the 'ws_touches'
+    namespace (whoscored_report.compute_touches()'s player_third table).
     """
     return _player_category_table(db, match_id, home_team, away_team,
                                    ["ws_touches"], _POSSESSION_COLUMNS)
@@ -1348,7 +1358,10 @@ def fetch_player_passing(db: DB, match_id, home_team, away_team) -> dict:
     Shot Assists, SCA - from the 'ws_passing' namespace, whoscored_report.
     compute_passing()), plus Line Breaking Passes (FotMob's own figure,
     'fm_line_breaking_passes' namespace) folded in as an extra column per
-    the request to add it to this tab specifically.
+    the request to add it to this tab specifically, and xG Buildup
+    (combined_report.compute_xg_buildup(), merged into passing_out - and
+    so into this same 'ws_passing' namespace - before saving; see
+    merge_xg_buildup()'s docstring) as the final column.
     """
     return _player_category_table(db, match_id, home_team, away_team,
                                    ["ws_passing", "fm_line_breaking_passes"], _PASSING_COLUMNS)
@@ -2898,7 +2911,11 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
     for player, totals in sums.items():
         rec = {"Player": player, "Position": _season_mode_position(positions.get(player, []))}
         for c in columns:
-            rec[c] = int(round(totals[c]))
+            # Every column here used to be a plain running count (safe to
+            # force to int), but xG Buildup (see _PASSING_COLUMNS) is a
+            # decimal - same _DECIMAL_STAT_COLUMNS list the per-match
+            # _player_category_table() already uses to decide this.
+            rec[c] = round(totals[c], 2) if c in _DECIMAL_STAT_COLUMNS else int(round(totals[c]))
         records.append(rec)
 
     out = (pd.DataFrame(records, columns=out_cols)
@@ -2907,7 +2924,7 @@ def _fetch_team_season_category_table(db: DB, team, season, namespaces: list, co
 
     team_total = {"Player": "Team Total", "Position": "-"}
     for c in columns:
-        team_total[c] = int(round(out[c].sum()))
+        team_total[c] = round(out[c].sum(), 2) if c in _DECIMAL_STAT_COLUMNS else int(round(out[c].sum()))
 
     return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 

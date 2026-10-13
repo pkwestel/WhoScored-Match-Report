@@ -177,6 +177,17 @@ BOX_WIDTH_YD = 44
 OWN_THIRD_MAX = 33.3
 MIDDLE_THIRD_MAX = 66.6
 
+# Zone 14 - the attacking-third "pocket" just outside the box, dead center
+# (the attacking third split in half lengthwise; Zone 14 is the first half
+# of that, i.e. closer to the box than the final 1/3 touchline; middle
+# vertical channel of the pitch's three wide lanes). Same user-confirmed
+# bounds already used by dashboard_app.py's Pass/Touch Map "Pitch Zone"
+# filter (_ZONE_14_X_BOUNDS/_ZONE_14_Y_BOUNDS there) - kept in sync rather
+# than re-derived, since both describe the exact same patch of pitch on
+# the same 0-100 normalized x/y scale.
+ZONE_14_X_BOUNDS = (66.6, 83.3)
+ZONE_14_Y_BOUNDS = (33.3, 66.6)
+
 OFFENSIVE_TYPES = {'Pass', 'TakeOn', 'Tackle', 'Interception',
                     'Clearance', 'Goal', 'SavedShot', 'MissedShots', 'ShotOnPost'}
 # BallRecovery is deliberately excluded: picking up a loose ball isn't itself
@@ -714,6 +725,14 @@ def dist_to_goal_yd(x, y):
 
 def in_box(x, y):
     return (to_yd_x(x) >= BOX_X_MIN) & (to_yd_y(y) >= BOX_Y_MIN) & (to_yd_y(y) <= BOX_Y_MAX)
+
+
+def in_zone14(x, y):
+    """x/y on the native 0-100 normalized scale (not yards) - see
+    ZONE_14_X_BOUNDS/ZONE_14_Y_BOUNDS above."""
+    x_lo, x_hi = ZONE_14_X_BOUNDS
+    y_lo, y_hi = ZONE_14_Y_BOUNDS
+    return (x >= x_lo) & (x <= x_hi) & (y >= y_lo) & (y <= y_hi)
 
 
 def qual_names(qlist):
@@ -1404,8 +1423,19 @@ def compute_sca(df, minute_min=None, minute_max=None):
             'bodyPart': body_part(shot_row),
             'sca1_player': None, 'sca1_action': None,
             'sca2_player': None, 'sca2_action': None,
+            # Original df event-index for this shot, and for its SCA1 action
+            # (the single immediately-preceding contributing action - the
+            # closest thing this project has to "the assist"). Used by
+            # compute_xg_buildup() below to map a matched shot's xG
+            # back onto a possession and to know which two specific events
+            # to exclude from xGBuildup crediting. Not used by any other
+            # existing caller - purely additive.
+            'shot_event_index': shot_i,
+            'sca1_event_index': None,
         }
         for rank, action_i in enumerate(found, start=1):
+            if rank == 1:
+                rec['sca1_event_index'] = action_i
             arow = df.loc[action_i]
             # A 'Foul' row's own playerName is WhoScored's foul COMMITTER
             # (Opta's convention - confirmed by this branch only ever firing
@@ -1465,6 +1495,7 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
     touches = df[df['isTouch'] == True].copy()
     touches['pitch_third'] = touches['x'].apply(third)
     touches['in_att_box'] = in_box(touches['x'], touches['y'])
+    touches['in_zone14'] = in_zone14(touches['x'], touches['y'])
 
     team_summary = touches.groupby(['team', 'pitch_third']).size().unstack(fill_value=0)
     for c in ['Own third', 'Middle third', 'Final third']:
@@ -1517,10 +1548,23 @@ def compute_touches(df, team_carries, player_carries, passes_received, progressi
         'progressive_passes_received': 'Progressive Passes Received',
     })
 
+    # Zone 14 Touches - last column, per request. A touch's own x/y already
+    # places it in exactly one of Own/Middle/Final third (pitch_third
+    # above) AND, independently, may or may not also fall in Zone 14 (a
+    # specific sub-area of the final third - see in_zone14()) - these two
+    # groupings aren't mutually exclusive, so this is computed as its own
+    # separate count rather than folded into the third breakdown.
+    zone14_by_player = touches[touches['in_zone14']].groupby(['team', 'playerName']).size()
+    zone14_by_player.index.set_names(['team', 'player'], inplace=True)
+    player_third = player_third.merge(
+        zone14_by_player.rename('Zone 14 Touches'), on=['team', 'player'], how='left'
+    )
+    player_third['Zone 14 Touches'] = player_third['Zone 14 Touches'].fillna(0).astype(int)
+
     player_third = player_third[[
         'team', 'player', 'Total Touches', 'Own third', 'Middle third', 'Final third', 'Attacking Box',
         'Progressive Carries', 'Carries into Final Third', 'Carries into Box',
-        'Passes Received', 'Progressive Passes Received',
+        'Passes Received', 'Progressive Passes Received', 'Zone 14 Touches',
     ]]
     player_third = player_third.sort_values(['team', 'Total Touches'], ascending=[True, False])
 
@@ -1659,44 +1703,25 @@ SEQUENCE_CHAIN_CHECK = 5
 SEQUENCE_SUC_EVTS_IN_CHAIN = 2
 
 
-def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
-                       chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN,
-                       minute_min=None, minute_max=None):
+def _assign_possession_ids(df, chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN):
     """
-    Possession sequences per team, using the same windowed possession-chain
-    algorithm found in the open-source WhoScored report notebooks behind
-    insight90.streamlit.app (a "get_possession_chains" style approach,
-    originally from jakeyk11's tutorials). Rather than ending a sequence the
-    instant the opponent's team touches the ball, this looks at a sliding
-    window of the next `chain_check - 1` events: possession only flips to
-    the other team once at least `suc_evts_in_chain` of those events belong
-    to them - so a single missed tackle, aerial, or loose touch doesn't end
-    a sequence, but a sustained spell by the other side does. Sequences also
-    always restart at goals and at the start of a new period (half/extra
-    time). `chain_check=5, suc_evts_in_chain=2` were chosen by testing
-    several combinations against insight90's published numbers for this
-    match (Man Utd 25 sequences of 10+ passes, average 9 passes/sequence;
-    Crystal Palace 10 sequences of 10+, average 6) - this combination came
-    closest (24/13 sequences, 9.69/5.97 average) without an exact source to
-    match bit-for-bit. "Passes" here counts ALL pass attempts in a sequence,
-    not just completed ones - that was also the closest-matching definition.
+    Shared possession-chain assignment underlying compute_sequences() (see
+    that function's own docstring for the windowed-flip algorithm and where
+    the chain_check/suc_evts_in_chain tuning came from) - factored out so
+    other callers (xGChain/xGBuildup below) can get a possession_id/
+    possession_team per event without duplicating this logic.
 
-    minute_min/minute_max: optional minute-range filter for a windowed
-    report. The possession_id assignment below always runs on the FULL,
-    unsliced df first - a chain is a continuous run of same-team events,
-    and slicing df mid-chain would corrupt chain boundaries right at the
-    window's edge (a chain that was really still running would look like
-    it started/ended exactly at the cut). Once every event has a real
-    possession_id, each chain is tagged with the MINUTE of its first event
-    (chains_df's own 'minute' column, added below) so chains_df/
-    team_sequences can be filtered to "chains that started within this
-    window" afterward - this is the only place a minute range is applied.
-    None (the default) preserves this function's original full-match
-    behavior exactly, including chains_df's column shape (the 'minute'
-    column is new but additive, so no existing caller breaks).
+    Returns a DataFrame aligned to df's OWN original index, with two
+    columns: 'possession_id' and 'possession_team'. Every row of df gets a
+    value, including the admin rows excluded from the chain computation
+    itself ('Start', substitutions, cards, etc.) - those are filled in via
+    ffill/bfill against df's natural event order, same technique already
+    used below for the "continuation" rows within the chain computation.
     """
     work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
-    work = work.sort_index().reset_index(drop=True)
+    work = work.sort_index()
+    orig_index = work.index
+    work = work.reset_index(drop=True)
 
     teams_sorted = sorted(work['team'].dropna().unique())
     min_team = teams_sorted[0] if teams_sorted else None
@@ -1731,7 +1756,7 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
 
     chain['team'] = work['team']
     if len(chain) == 0:
-        return pd.DataFrame(columns=['team', 'passes']), pd.Series(dtype=int)
+        return pd.DataFrame(columns=['possession_id', 'possession_team'], index=df.index)
 
     first_idx = chain.index[0]
     chain.loc[first_idx, 'valid_pos_start'] = 1
@@ -1755,6 +1780,62 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     work['possession_id'] = chain['possession_id']
     work['possession_team'] = chain['possession_team']
     work[['possession_id', 'possession_team']] = work[['possession_id', 'possession_team']].ffill().bfill()
+
+    work.index = orig_index
+    result = work[['possession_id', 'possession_team']].reindex(df.index)
+    result = result.ffill().bfill()
+    return result
+
+
+def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
+                       chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN,
+                       minute_min=None, minute_max=None):
+    """
+    Possession sequences per team, using the same windowed possession-chain
+    algorithm found in the open-source WhoScored report notebooks behind
+    insight90.streamlit.app (a "get_possession_chains" style approach,
+    originally from jakeyk11's tutorials). Rather than ending a sequence the
+    instant the opponent's team touches the ball, this looks at a sliding
+    window of the next `chain_check - 1` events: possession only flips to
+    the other team once at least `suc_evts_in_chain` of those events belong
+    to them - so a single missed tackle, aerial, or loose touch doesn't end
+    a sequence, but a sustained spell by the other side does. Sequences also
+    always restart at goals and at the start of a new period (half/extra
+    time). `chain_check=5, suc_evts_in_chain=2` were chosen by testing
+    several combinations against insight90's published numbers for this
+    match (Man Utd 25 sequences of 10+ passes, average 9 passes/sequence;
+    Crystal Palace 10 sequences of 10+, average 6) - this combination came
+    closest (24/13 sequences, 9.69/5.97 average) without an exact source to
+    match bit-for-bit. "Passes" here counts ALL pass attempts in a sequence,
+    not just completed ones - that was also the closest-matching definition.
+
+    The actual per-event possession_id/possession_team assignment now lives
+    in _assign_possession_ids() above (shared with xGChain/xGBuildup) -
+    this function just aggregates that into per-chain pass counts/team
+    sequence totals, exactly as before the refactor.
+
+    minute_min/minute_max: optional minute-range filter for a windowed
+    report. The possession_id assignment always runs on the FULL, unsliced
+    df first - a chain is a continuous run of same-team events, and slicing
+    df mid-chain would corrupt chain boundaries right at the window's edge
+    (a chain that was really still running would look like it started/
+    ended exactly at the cut). Once every event has a real possession_id,
+    each chain is tagged with the MINUTE of its first event (chains_df's
+    own 'minute' column, added below) so chains_df/team_sequences can be
+    filtered to "chains that started within this window" afterward - this
+    is the only place a minute range is applied. None (the default)
+    preserves this function's original full-match behavior exactly,
+    including chains_df's column shape (the 'minute' column is new but
+    additive, so no existing caller breaks).
+    """
+    possession = _assign_possession_ids(df, chain_check=chain_check, suc_evts_in_chain=suc_evts_in_chain)
+
+    work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
+    work['possession_id'] = possession['possession_id']
+    work['possession_team'] = possession['possession_team']
+
+    if work.empty or work['possession_id'].isna().all():
+        return pd.DataFrame(columns=['team', 'passes']), pd.Series(dtype=int)
 
     pass_mask = work['type.displayName'] == 'Pass'
     passes_per_chain = work[pass_mask].groupby('possession_id').size()
@@ -1781,6 +1862,107 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
         team_sequences = pd.Series(dtype=int)
 
     return chains_df, team_sequences
+
+
+def compute_xg_buildup(df, sca_out, shot_xg):
+    """
+    xGBuildup per player, per the public definition introduced by StatsBomb
+    (see https://www.hudl.com/blog/introducing-xgchain-and-xgbuildup): find
+    every possession a player touches the ball in (ANY on-ball action
+    counts, however minor - a tackle, an interception, a pass, a dribble),
+    where that possession produces a shot - but a player's touch(es) in
+    that possession don't count toward their eligibility if their ONLY
+    involvement was taking the shot itself and/or playing the single
+    action immediately before it (here: SCA1 from compute_sca() above -
+    the closest equivalent this project has to "the assist"/"the key
+    pass", found via the same backward-chain walk already used for the
+    Shot Creating Actions tab). If a player ALSO had an earlier, separate
+    touch in the same possession, that earlier touch still earns them
+    buildup credit - only the two specific EVENTS (the shot, and SCA1) are
+    excluded, never the player as a whole. A possession with multiple
+    shots adds each shot's own xG to every involved player's running total
+    (the same "just sum them" convention used by the original published
+    implementations, rather than only counting the possession's single
+    highest-xG shot).
+
+    df: the full match event dataframe (same one passed to compute_sca()).
+    sca_out: compute_sca()'s own output, computed with minute_min=
+      minute_max=None (a full-match call) - its row order must line up
+      1:1 with shot_xg below, and a windowed sca_out would also misalign
+      against df's own possession assignment. Needs the 'shot_event_index'
+      and 'sca1_event_index' columns compute_sca() adds.
+    shot_xg: array-like aligned to sca_out's row order (one FotMob xG value
+      per shot - NaN/None where no FotMob shot was matched; those shots are
+      skipped, since there's no known xG value to credit).
+
+    Returns a DataFrame with columns ['team', 'player', 'xG Buildup'], one
+    row per player who touched the ball in a scoring possession (including
+    a shooter/assist-only player, shown with 0 since their only
+    involvement didn't qualify), sorted by 'xG Buildup' descending.
+    """
+    out_cols = ['team', 'player', 'xG Buildup']
+    if sca_out is None or sca_out.empty:
+        return pd.DataFrame(columns=out_cols)
+    if 'shot_event_index' not in sca_out.columns:
+        raise ValueError(
+            "sca_out is missing 'shot_event_index' - it must come from the "
+            "current compute_sca(), which adds that column (and "
+            "'sca1_event_index') to every row."
+        )
+
+    sca_out = sca_out.reset_index(drop=True)
+    xg_values = list(shot_xg)
+    if len(xg_values) != len(sca_out):
+        raise ValueError(
+            f"shot_xg has {len(xg_values)} values but sca_out has {len(sca_out)} rows - "
+            "they must be the same length and in the same row order (shot_xg should "
+            "come from the 'xG' column of compute_combined_shots()'s own output, "
+            "which preserves sca_out's row order exactly)."
+        )
+
+    possession = _assign_possession_ids(df)
+    buildup_totals = {}
+    touched_players = set()
+
+    for row_pos in range(len(sca_out)):
+        xg = xg_values[row_pos]
+        if xg is None or (isinstance(xg, float) and np.isnan(xg)):
+            continue
+        row = sca_out.iloc[row_pos]
+        shot_event_index = row.get('shot_event_index')
+        if shot_event_index is None or shot_event_index not in possession.index:
+            continue
+        pid = possession.at[shot_event_index, 'possession_id']
+        pteam = possession.at[shot_event_index, 'possession_team']
+        if pd.isna(pid) or pteam is None or (isinstance(pteam, float) and np.isnan(pteam)):
+            continue
+
+        in_possession = (possession['possession_id'] == pid) & (df['team'] == pteam)
+        team_events = df[in_possession]
+        xg = float(xg)
+
+        for player in team_events['playerName'].dropna().unique():
+            touched_players.add((pteam, player))
+
+        sca1_event_index = row.get('sca1_event_index')
+        exclude_idx = {i for i in (shot_event_index, sca1_event_index) if i is not None}
+        buildup_events = team_events[~team_events.index.isin(exclude_idx)]
+        for player in buildup_events['playerName'].dropna().unique():
+            key = (pteam, player)
+            buildup_totals[key] = buildup_totals.get(key, 0.0) + xg
+
+    records = [
+        {
+            'team': team,
+            'player': player,
+            'xG Buildup': round(buildup_totals.get((team, player), 0.0), 2),
+        }
+        for team, player in touched_players
+    ]
+    result = pd.DataFrame(records, columns=out_cols)
+    if not result.empty:
+        result = result.sort_values('xG Buildup', ascending=False).reset_index(drop=True)
+    return result
 
 
 # ============================================================
