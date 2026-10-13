@@ -63,6 +63,51 @@ from app_logo import logo_img_tag
 
 st.set_page_config(page_title="Match History Dashboard", layout="wide")
 
+# ── xT lookup (duplicated from whoscored_report.py so this app stays
+#    deployable without the scraping stack — see module docstring) ──
+_XT_GRID = [
+    [0.00638303,0.00779616,0.00844854,0.00977659,0.01126267,0.01248344,
+     0.01248344,0.01126267,0.00977659,0.00844854,0.00779616,0.00638303],
+    [0.00750072,0.00878589,0.01001761,0.01150012,0.01312345,0.01450953,
+     0.01450953,0.01312345,0.01150012,0.01001761,0.00878589,0.00750072],
+    [0.00875940,0.01062399,0.01245648,0.01468837,0.01651665,0.01832377,
+     0.01832377,0.01651665,0.01468837,0.01245648,0.01062399,0.00875940],
+    [0.01081895,0.01271548,0.01533726,0.01865838,0.02212843,0.02523508,
+     0.02523508,0.02212843,0.01865838,0.01533726,0.01271548,0.01081895],
+    [0.01353,0.01592,0.02052,0.02611,0.03205,0.03781,
+     0.03781,0.03205,0.02611,0.02052,0.01592,0.01353],
+    [0.01733,0.02141,0.02874,0.03862,0.05150,0.06398,
+     0.06398,0.05150,0.03862,0.02874,0.02141,0.01733],
+    [0.02400,0.03261,0.04581,0.06711,0.10580,0.16388,
+     0.16388,0.10580,0.06711,0.04581,0.03261,0.02400],
+    [0.03157,0.04347,0.07021,0.11526,0.21511,0.43304,
+     0.43304,0.21511,0.11526,0.07021,0.04347,0.03157],
+]
+_XT_ROWS = len(_XT_GRID)       # 8
+_XT_COLS = len(_XT_GRID[0])    # 12
+
+
+def _xt_value(x, y):
+    """xT grid lookup for 0-100 normalised WhoScored coords."""
+    x = max(0.0, min(float(x), 99.999))
+    y = max(0.0, min(float(y), 99.999))
+    return _XT_GRID[int(x / 100 * _XT_ROWS)][int(y / 100 * _XT_COLS)]
+
+
+def _sum_xt(passes_df, completed_only=True):
+    """Sum of positive xT deltas for a DataFrame of passes."""
+    df = passes_df
+    if completed_only and "completed" in df.columns:
+        df = df[df["completed"] == 1]
+    if df.empty:
+        return 0.0
+    total = 0.0
+    for _, r in df.iterrows():
+        delta = _xt_value(r["endX"], r["endY"]) - _xt_value(r["x"], r["y"])
+        if delta > 0:
+            total += delta
+    return round(total, 2)
+
 
 def _database_url():
     # st.secrets works once deployed on Streamlit Community Cloud; the
@@ -1173,6 +1218,9 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
+        xt_total = _sum_xt(player_passes, completed_only=True)
+        if xt_total > 0:
+            stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
         title_suffix = "Pass Map"
     else:
         c1, c2, c3 = st.columns(3)
@@ -1184,6 +1232,9 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
+        xt_recv = _sum_xt(player_passes, completed_only=False)
+        if xt_recv > 0:
+            stat_items.append((f"{xt_recv:.2f} xT Received", TITLE_COLOR))
         title_suffix = "Passes Received"
 
     fig = plot_pass_map(player_passes, player, player_team, home_team, away_team, stat_items,

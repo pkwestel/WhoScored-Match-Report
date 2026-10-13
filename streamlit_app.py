@@ -366,6 +366,15 @@ if report:
                     (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
                     (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
+                # xT from completed passes only
+                _completed = player_passes[player_passes["completed"] == 1]
+                if not _completed.empty:
+                    _xt = sum(
+                        max(0, wr._xt_value(r["endX"], r["endY"]) - wr._xt_value(r["x"], r["y"]))
+                        for _, r in _completed.iterrows()
+                    )
+                    if _xt > 0:
+                        stat_items.append((f"{_xt:.2f} xT", TITLE_COLOR))
                 fig = plot_pass_map(player_passes, selected_player, selected_player_team, home_name,
                                      away_name, stat_items, title_suffix="Pass Map", match_date=match_date)
 
@@ -429,6 +438,14 @@ if report:
                     (f"{progressive_pr} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
                     (f"{key_passes_pr} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
                 ]
+                # xT received (all passes here are already completed)
+                if not passes_received.empty:
+                    _xt_r = sum(
+                        max(0, wr._xt_value(r["endX"], r["endY"]) - wr._xt_value(r["x"], r["y"]))
+                        for _, r in passes_received.iterrows()
+                    )
+                    if _xt_r > 0:
+                        stat_items_pr.append((f"{_xt_r:.2f} xT Received", TITLE_COLOR))
                 fig_pr = plot_pass_map(passes_received, selected_player_pr, selected_player_pr_team,
                                         home_name, away_name, stat_items_pr, title_suffix="Passes Received",
                                         match_date=match_date)
