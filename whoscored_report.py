@@ -608,13 +608,54 @@ def scrape_match(match_centre_url):
         r"\1/live/",
         match_centre_url.strip(),
     )
+    # Extract the numeric match ID from the requested URL so we can verify
+    # the scraped page is actually the match we asked for (WhoScored
+    # sometimes redirects old match URLs to a team's most recent fixture).
+    requested_id_match = re.search(r"/matches/(\d+)/", match_centre_url)
+    requested_match_id = int(requested_id_match.group(1)) if requested_id_match else None
+
     print(f"Opening {match_centre_url} ...")
     with get_driver() as driver:
         driver.get(match_centre_url)
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        # Wait for the matchCentreData script to actually appear in the
+        # page rather than just the <body> tag — WhoScored is JS-heavy
+        # and the data payload may not be present yet when the DOM first
+        # renders.
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: d.execute_script(
+                    "return document.documentElement.innerHTML.indexOf('matchCentreData') > -1"
+                )
+            )
+        except Exception:
+            # Fall back to a simple body wait if the JS check times out
+            # (e.g. the page structure changed) — the old matchCentreData
+            # check below will still catch a genuinely missing payload.
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+        final_url = driver.current_url
         page_source = driver.page_source
+
+    # Detect redirects: if the browser ended up on a different match page
+    # than the one we requested, warn loudly so the user knows the data
+    # isn't for the match they expected.
+    if requested_match_id and final_url:
+        landed_id_match = re.search(r"/matches/(\d+)/", final_url)
+        if landed_id_match:
+            landed_match_id = int(landed_id_match.group(1))
+            if landed_match_id != requested_match_id:
+                raise RuntimeError(
+                    f"WhoScored redirected the request!\n"
+                    f"  Requested match ID: {requested_match_id}\n"
+                    f"  Landed on match ID: {landed_match_id}\n"
+                    f"  Final URL: {final_url}\n"
+                    f"This usually means the original match page is no longer "
+                    f"available and WhoScored sent us to a different match. "
+                    f"Try opening the URL in a real browser first to check "
+                    f"whether it still loads the correct match."
+                )
 
     soup = BeautifulSoup(page_source, "html.parser")
     script_tag = soup.select_one('script:-soup-contains("matchCentreData")')
@@ -626,6 +667,23 @@ def scrape_match(match_centre_url):
 
     _, _, json_text = script_tag.text.partition("matchCentreData: ")
     match_json = json.loads(json_text.split(",\n")[0])
+
+    # Second redirect/mismatch check: compare the match ID inside the
+    # JSON payload itself against the one we asked for.  This catches
+    # cases where the URL didn't visibly change but WhoScored served
+    # data for a different match anyway.
+    json_match_id = match_json.get("matchId")
+    if requested_match_id and json_match_id and int(json_match_id) != requested_match_id:
+        json_home = match_json.get("home", {}).get("name", "?")
+        json_away = match_json.get("away", {}).get("name", "?")
+        raise RuntimeError(
+            f"WhoScored served data for the WRONG match!\n"
+            f"  Requested match ID: {requested_match_id}\n"
+            f"  Received match ID:  {json_match_id} ({json_home} vs {json_away})\n"
+            f"This usually means WhoScored redirected your old match URL "
+            f"to a more recent fixture.  Try opening the URL in a real "
+            f"browser to check whether the original match page still exists."
+        )
 
     player_id_name_dict = match_json.get("playerIdNameDictionary", {})
     events_dict = match_json.get("events", {})
