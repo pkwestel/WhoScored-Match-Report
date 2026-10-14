@@ -552,6 +552,15 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
         })
 
     if not all_matches:
+        # Dump the page HTML to a file for debugging when auto-detect fails -
+        # makes it possible to fix the selectors without another live run.
+        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_page.html")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(page_source)
+            debug_msg = f" Page HTML saved to {debug_path} for debugging."
+        except Exception:
+            debug_msg = ""
         raise RuntimeError(
             "Couldn't find any match cards on this page (looked for div elements "
             "whose class starts with 'Match-module_match__'). WhoScored may have "
@@ -559,7 +568,7 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
             "checked against it, or this URL doesn't show a fixture list at "
             "all. Paste match URLs manually instead of using auto-detect for "
             "now, and share the page's HTML so this can be fixed against real "
-            "data."
+            "data." + debug_msg
         )
 
     results = []
