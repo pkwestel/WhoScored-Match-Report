@@ -323,7 +323,7 @@ def _wait_for_calendar_ready(driver, timeout=20, poll=1.0):
     return label
 
 
-def _click_prev_month(driver, timeout=15, max_attempts=3):
+def _click_prev_month(driver, timeout=15, max_attempts=5):
     """
     Clicks WhoScored's own "<" (previous month) control on the Fixtures
     page and waits for the displayed month label to actually change
@@ -370,13 +370,74 @@ def _click_prev_month(driver, timeout=15, max_attempts=3):
     failed and retried from scratch (fresh before/after label AND content
     snapshots), same as a click that didn't register at all.
     """
+    # Multiple click strategies, tried in order - WhoScored's calendar
+    # button has changed behavior across site deploys: ActionChains was
+    # confirmed working 2026-10-01 but stopped registering later.
+    def _try_click_prev(driver):
+        """Try several click strategies on the prev-month button."""
+        # Strategy 1: find by ID (stable across known deploys)
+        btn = None
+        try:
+            btn = driver.find_element(By.ID, "dayChangeBtn-prev")
+        except Exception:
+            pass
+
+        # Strategy 2: find by CSS selector if ID lookup failed
+        if btn is None:
+            try:
+                btn = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "[class*='Calendar'] [class*='prev'], "
+                    "[class*='calendar'] [class*='prev'], "
+                    "#toggleCalendar ~ * button:first-of-type, "
+                    "button[class*='prev']"
+                )
+            except Exception:
+                pass
+
+        if btn is None:
+            raise RuntimeError("Could not find the previous-month button on this page.")
+
+        # Scroll into view and dismiss any overlays first
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'}); "
+                # Also try to dismiss any cookie/GDPR overlay that might
+                # be intercepting clicks
+                "document.querySelectorAll('.qc-cmp2-summary-buttons button, "
+                "[class*=\"cookie\"] button, [class*=\"consent\"] button, "
+                "[id*=\"onetrust\"] button').forEach(b => { "
+                "  if (/accept|agree|ok|got it/i.test(b.textContent)) b.click(); "
+                "});",
+                btn
+            )
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        # Try JS click first (most reliable against overlays), then
+        # ActionChains, then direct click
+        try:
+            driver.execute_script("arguments[0].click();", btn)
+            return
+        except Exception:
+            pass
+        try:
+            ActionChains(driver).move_to_element(btn).click().perform()
+            return
+        except Exception:
+            pass
+        try:
+            btn.click()
+        except Exception:
+            raise RuntimeError("All click strategies failed on the previous-month button.")
+
     last_before = None
     for attempt in range(1, max_attempts + 1):
         before = _wait_for_calendar_ready(driver)
         last_before = before
         before_hrefs = _match_href_set(driver)
-        btn = driver.find_element(By.ID, "dayChangeBtn-prev")
-        ActionChains(driver).move_to_element(btn).click().perform()
+        _try_click_prev(driver)
 
         start = time.time()
         after = None
@@ -388,7 +449,8 @@ def _click_prev_month(driver, timeout=15, max_attempts=3):
         if not (after and after != before):
             # Label itself never changed - this attempt's click didn't
             # register at all (WhoScored's own calendar widget is
-            # confirmed to sometimes miss a click); try again.
+            # confirmed to sometimes miss a click); wait a bit then retry.
+            time.sleep(1.5)
             continue
 
         # Label changed - now separately wait for the match-list content
