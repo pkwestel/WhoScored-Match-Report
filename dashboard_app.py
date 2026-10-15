@@ -2571,7 +2571,8 @@ def _render_match_detail(db, match_id):
             st.dataframe(home_sortable, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(home_sortable))
             _render_pinned_team_total_row(home_sortable.columns, home_total,
-                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup"))
+                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup",
+                                                         "xT", "xT Carry", "xT Received"))
 
         st.caption(f"[{_display_team_name(away_team)}]({_team_page_url(away_team)})")
         if tables["away"].empty:
@@ -2581,7 +2582,8 @@ def _render_match_detail(db, match_id):
             st.dataframe(away_sortable, use_container_width=False, hide_index=True,
                          height=_no_scroll_height(away_sortable))
             _render_pinned_team_total_row(away_sortable.columns, away_total,
-                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup"))
+                                           decimal_cols=("NPxG", "PS-xG", "xA", "xG Buildup",
+                                                         "xT", "xT Carry", "xT Received"))
 
         # Full flattened stat breakdown - every namespace, every player -
         # still available for anyone who wants more than the 5 category
@@ -2909,7 +2911,7 @@ def _render_team_page(db, team, season=None):
             # and correct for Passing, which now does (see history_db.
             # _PASSING_COLUMNS / _DECIMAL_STAT_COLUMNS).
             _render_pinned_team_total_row(sortable_df.columns, total_row,
-                                           decimal_cols=("xG Buildup",))
+                                           decimal_cols=("xG Buildup", "xT", "xT Carry", "xT Received"))
 
     # Playing Time - the season-cumulative FM Plus/Minus table (Goals/Shots/
     # xG For and Against, totaled for exactly the minutes each player was on
