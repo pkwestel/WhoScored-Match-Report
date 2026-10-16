@@ -3579,3 +3579,166 @@ def fetch_season_touches_totals(db: DB, competition=None, season=None) -> pd.Dat
         })
     return pd.DataFrame(records, columns=cols).sort_values(
         "Total Touches", ascending=False).reset_index(drop=True)
+
+
+# ── Player Page: per-match match-log tables ──────────────────────────
+#
+# Each function below returns one DataFrame with a row PER MATCH for a
+# specific player on a specific team, ordered ascending by date (oldest
+# first).  Columns mirror the team-page season tables' own column sets
+# (see _SCORING_STATS_COLUMNS etc.) but each row is one match's raw
+# numbers, not a season sum.  An "Opponent" and "Date" column are
+# prepended so the match log reads like a schedule.
+#
+# These are the Player Page's match-log tabs' data source -- called from
+# dashboard_app._render_player_page().
+
+
+def _player_match_log(db, player, team, season, namespaces, columns,
+                      competition=None):
+    """
+    Shared plumbing for every Player Page match-log tab: one row per match
+    this player appeared in (for TEAM, in SEASON), with the requested
+    stat COLUMNS read from the given extra_json NAMESPACES, plus Date and
+    Opponent columns prepended.  Sorted ascending by date.
+
+    competition: optional Competition filter (None = all).
+    """
+    matches_df = fetch_matches(db)
+    if matches_df.empty:
+        return pd.DataFrame(columns=["Date", "Opponent"] + columns)
+    matches_df = matches_df.copy()
+    matches_df["season"] = matches_df["match_date"].apply(_season_label)
+    team_matches = matches_df[
+        ((matches_df["home_team"] == team) | (matches_df["away_team"] == team))
+        & (matches_df["season"] == season)
+    ]
+    if competition is not None and competition != "Both":
+        team_matches = team_matches[team_matches["competition"] == competition]
+    team_matches = team_matches.sort_values("match_date")
+    if team_matches.empty:
+        return pd.DataFrame(columns=["Date", "Opponent"] + columns)
+
+    records = []
+    for _, m in team_matches.iterrows():
+        match_id = m["match_id"]
+        opponent = m["away_team"] if m["home_team"] == team else m["home_team"]
+        venue = "vs" if m["home_team"] == team else "@"
+
+        df = _fetch_player_namespaces(db, match_id, namespaces)
+        if df.empty:
+            continue
+        row = df[(df["Team"] == team) & (df["Player"] == player)]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+
+        rec = {"Date": m["match_date"], "Opponent": f"{venue} {opponent}"}
+        for c in columns:
+            val = row.get(c)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                rec[c] = "-"
+            elif c in _DECIMAL_STAT_COLUMNS:
+                rec[c] = round(float(val), 2)
+            else:
+                try:
+                    rec[c] = int(float(val))
+                except (ValueError, TypeError):
+                    rec[c] = "-"
+        records.append(rec)
+
+    return pd.DataFrame(records, columns=["Date", "Opponent"] + columns)
+
+
+def fetch_player_match_log_scoring(db, player, team, season,
+                                    competition=None):
+    """Player Page match-log: Scoring Stats tab."""
+    df = _player_match_log(
+        db, player, team, season,
+        ["fm_scoring", "ws_passing"],
+        _SCORING_STATS_COLUMNS,
+        competition=competition,
+    )
+    if not df.empty:
+        df = _insert_g_pk_column(df)
+    return df
+
+
+def fetch_player_match_log_possession(db, player, team, season,
+                                       competition=None):
+    """Player Page match-log: Possession tab."""
+    return _player_match_log(
+        db, player, team, season,
+        ["ws_touches"],
+        _POSSESSION_COLUMNS,
+        competition=competition,
+    )
+
+
+def fetch_player_match_log_passing(db, player, team, season,
+                                    competition=None):
+    """Player Page match-log: Passing tab."""
+    return _player_match_log(
+        db, player, team, season,
+        ["ws_passing", "fm_line_breaking_passes"],
+        _PASSING_COLUMNS,
+        competition=competition,
+    )
+
+
+def fetch_player_match_log_defensive(db, player, team, season,
+                                      competition=None):
+    """Player Page match-log: Defensive Actions tab."""
+    return _player_match_log(
+        db, player, team, season,
+        ["ws_defensive"],
+        _DEFENSIVE_ACTIONS_COLUMNS,
+        competition=competition,
+    )
+
+
+def fetch_player_match_log_defensive_locations(db, player, team, season,
+                                                competition=None):
+    """Player Page match-log: Defensive Action Locations tab."""
+    return _player_match_log(
+        db, player, team, season,
+        ["ws_defensive_locations"],
+        _DEFENSIVE_LOCATIONS_COLUMNS,
+        competition=competition,
+    )
+
+
+def fetch_player_matches(db, player, team, season, competition=None):
+    """
+    List of (match_id, date, opponent_label) for a player's appearances
+    this season - used by the Player Page's match-selector dropdowns for
+    the per-match viz section.
+    """
+    matches_df = fetch_matches(db)
+    if matches_df.empty:
+        return []
+    matches_df = matches_df.copy()
+    matches_df["season"] = matches_df["match_date"].apply(_season_label)
+    team_matches = matches_df[
+        ((matches_df["home_team"] == team) | (matches_df["away_team"] == team))
+        & (matches_df["season"] == season)
+    ]
+    if competition is not None and competition != "Both":
+        team_matches = team_matches[team_matches["competition"] == competition]
+    team_matches = team_matches.sort_values("match_date")
+
+    result = []
+    for _, m in team_matches.iterrows():
+        match_id = m["match_id"]
+        # Check this player actually played in this match
+        cur = db.execute(
+            "SELECT 1 FROM player_match_stats WHERE match_id = ? AND team = ? AND player = ?",
+            (str(match_id), team, player),
+        )
+        if cur.fetchone() is None:
+            continue
+        opponent = m["away_team"] if m["home_team"] == team else m["home_team"]
+        venue = "vs" if m["home_team"] == team else "@"
+        label = f"{venue} {opponent} ({m['match_date']})"
+        result.append((match_id, m["match_date"], label))
+    return result

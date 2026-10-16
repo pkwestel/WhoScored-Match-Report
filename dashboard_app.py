@@ -355,6 +355,20 @@ def _team_page_url(team_name):
     return f"?team={quote(str(team_name))}"
 
 
+def _player_page_url(player_name, team_name):
+    """
+    Relative '?player=<url-encoded name>&team=<url-encoded team>' link to a
+    player's Player Page - same query-param routing pattern as
+    _team_page_url()'s own '?team=...' (see _render_player_page()'s dispatch
+    at the bottom of this module).
+    """
+    if not player_name or (isinstance(player_name, float) and pd.isna(player_name)):
+        return None
+    if not team_name or (isinstance(team_name, float) and pd.isna(team_name)):
+        return None
+    return f"?player={quote(str(player_name))}&team={quote(str(team_name))}"
+
+
 def _linkify_team_cell(team_name):
     """
     HTML for one team-name table cell: a real '<a href="?team=...">' link
@@ -577,7 +591,8 @@ def _render_fixtures_like_table(df):
 _FREEZE_HEADER_ROW_H_PX = 37  # approximate rendered height of one header row - see freeze_header below
 
 
-def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None, freeze_header=False):
+def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None,
+                                freeze_header=False, team_for_player_links=None):
     """
     Generic two-row-header HTML table: a merged group-header row (colspan,
     one per (label, [cols]) in `groups`) sitting above the real per-column
@@ -725,6 +740,16 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 cell_html = f"{val:.2f}"
             else:
                 cell_html = html.escape(str(val))
+            # Make Player column cells clickable links to the Player Page
+            # when team_for_player_links is set and this isn't the
+            # "Team Total" row.
+            if (col == "Player" and team_for_player_links
+                    and str(val) != "Team Total" and not pd.isna(val)):
+                player_url = _player_page_url(val, team_for_player_links)
+                if player_url:
+                    cell_html = (f'<a href="{player_url}" target="_self" '
+                                 f'style="color:inherit; text-decoration:underline;">'
+                                 f'{cell_html}</a>')
             style = f'padding:6px 14px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
             if freeze_header and i == 0:
                 # Frozen first column's body cells need their own opaque
@@ -750,13 +775,16 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     """, unsafe_allow_html=True)
 
 
-def _render_general_stats_table(scoring_stats):
+def _render_general_stats_table(scoring_stats, team_for_player_links=None):
     """
     _render_grouped_stats_table() wrapper for the General Stats table -
     see history_db.fetch_team_season_scoring_stats() for exactly which
     columns belong to each group: Player/Age ungrouped, 'Playing Time'
     (Appearances/Starts/Minutes), 'Totals' (everything else non-Per-90),
     'Per 90' (every '<Stat> (Per 90)' column).
+
+    team_for_player_links: when set, Player column cells become clickable
+    links to that player's Player Page (see _player_page_url()).
     """
     ungrouped = [c for c in ("Player", "Position", "Age") if c in scoring_stats.columns]
     playing_time_cols = [c for c in ("Appearances", "Starts", "Minutes") if c in scoring_stats.columns]
@@ -768,6 +796,7 @@ def _render_general_stats_table(scoring_stats):
         decimal_cols={"NPxG", "PS-xG", "xA"},
         sort_key="general_stats",
         freeze_header=True,
+        team_for_player_links=team_for_player_links,
     )
 
 
@@ -2838,7 +2867,7 @@ def _render_team_page(db, team, season=None):
     if scoring_stats.empty:
         st.info(f"No scoring stats saved yet for {_display_team_name(team)} in {season}.")
     else:
-        _render_general_stats_table(scoring_stats)
+        _render_general_stats_table(scoring_stats, team_for_player_links=team)
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
@@ -2994,6 +3023,355 @@ def _render_dash_tab_bar(active_slug):
     )
 
 
+# ── Player Page ──────────────────────────────────────────────────────
+#
+# '?player=<name>&team=<team>' - an individual player's match-by-match
+# stat logs, season maps, and pair tables.  Linked from the Team Page's
+# General Stats table (see _render_general_stats_table()'s
+# team_for_player_links parameter).
+
+
+def _render_player_match_log_table(df, decimal_cols=()):
+    """
+    Renders a player match-log DataFrame (Date + Opponent + stat columns)
+    as a plain HTML table - no grouped headers needed, just a simple flat
+    table with frozen first two columns (Date/Opponent).
+    """
+    if df.empty:
+        return
+    all_decimal = set(decimal_cols) | {c for c in df.columns if c.endswith(" (Per 90)")}
+
+    header_cells = []
+    for col in df.columns:
+        label = html.escape(str(col))
+        align = "left" if col in ("Date", "Opponent") else "right"
+        style = (f'padding:6px 10px; border:1px solid #888; background:#f0f2f6; '
+                 f'text-align:{align}; white-space:nowrap; position:sticky; top:0; z-index:2;')
+        header_cells.append(f'<th style="{style}">{label}</th>')
+
+    body_rows = []
+    for _, r in df.iterrows():
+        cells = []
+        for i, col in enumerate(df.columns):
+            val = r[col]
+            align = "left" if col in ("Date", "Opponent") else "right"
+            if pd.isna(val):
+                cell_html = "-"
+            elif col in all_decimal and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.2f}"
+            else:
+                cell_html = html.escape(str(val))
+            style = f'padding:6px 10px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
+            if i < 2:
+                style += ' position:sticky; z-index:1; background:#fff;'
+                style += f' left:{"0" if i == 0 else "90"}px;'
+            cells.append(f'<td style="{style}">{cell_html}</td>')
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(f"""
+    <div style="overflow:auto; max-height:520px;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead><tr>{"".join(header_cells)}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def _render_player_page(db, player, team):
+    """
+    The '?player=<name>&team=<team>' Player Page - an individual player's
+    match-by-match stats, season maps, and pair tables.  Linked from the
+    Team Page's General Stats table (see _render_general_stats_table()'s
+    team_for_player_links parameter).
+    """
+    # ── Season / Competition filters ──
+    seasons = hdb.fetch_available_seasons(db, team=team)
+    if not seasons:
+        st.info("No matches published yet.")
+        return
+
+    # Default to the most recent season (index 0)
+    title_col, filter_col = st.columns([5, 2])
+    with filter_col:
+        season = st.selectbox(
+            "Season", seasons, index=0,
+            key="player_page_season", label_visibility="collapsed",
+        )
+        st.markdown(
+            f'<div style="display:flex; justify-content:flex-end; margin-top:6px;">'
+            f'{logo_img_tag(90)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with title_col:
+        st.markdown(
+            f'<div style="font-size:2em; font-weight:bold;">{html.escape(player)}</div>'
+            f'<div style="font-size:1.1em; color:#555;">'
+            f'{_display_team_name(team)} &middot; {season}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Competition filter
+    competitions = hdb.fetch_team_competitions(db, team, season)
+    comp_options = competitions + (["Both"] if len(competitions) > 1 else [])
+    comp_col, _spacer = st.columns([1, 4])
+    with comp_col:
+        competition = st.selectbox(
+            "Competition", comp_options,
+            index=comp_options.index("Premier League") if "Premier League" in comp_options else 0,
+            key="player_page_competition", label_visibility="collapsed",
+        )
+    # "Both" means no filter
+    comp_filter = None if competition == "Both" else competition
+
+    # Back link to team page
+    team_url = _team_page_url(team)
+    st.markdown(
+        f'<a href="{team_url}" target="_self" style="font-size:0.9em;">← Back to {_display_team_name(team)}</a>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height:1.0em;'></div>", unsafe_allow_html=True)
+
+    # ── Match Log Tabs ──
+    st.subheader("Match Log")
+    ml_tabs = st.tabs(["Scoring", "Possession", "Passing", "Defensive Actions",
+                        "Defensive Action Locations"])
+
+    with ml_tabs[0]:
+        scoring_log = hdb.fetch_player_match_log_scoring(db, player, team, season, competition=comp_filter)
+        if scoring_log.empty:
+            st.info("No scoring stats found for this player/season.")
+        else:
+            _render_player_match_log_table(scoring_log, decimal_cols=("NPxG", "PS-xG", "xA"))
+
+    with ml_tabs[1]:
+        poss_log = hdb.fetch_player_match_log_possession(db, player, team, season, competition=comp_filter)
+        if poss_log.empty:
+            st.info("No possession stats found for this player/season.")
+        else:
+            _render_player_match_log_table(poss_log, decimal_cols=("xT Carry", "xT Received"))
+
+    with ml_tabs[2]:
+        pass_log = hdb.fetch_player_match_log_passing(db, player, team, season, competition=comp_filter)
+        if pass_log.empty:
+            st.info("No passing stats found for this player/season.")
+        else:
+            _render_player_match_log_table(pass_log, decimal_cols=("xT", "xG Buildup"))
+
+    with ml_tabs[3]:
+        def_log = hdb.fetch_player_match_log_defensive(db, player, team, season, competition=comp_filter)
+        if def_log.empty:
+            st.info("No defensive stats found for this player/season.")
+        else:
+            _render_player_match_log_table(def_log)
+
+    with ml_tabs[4]:
+        def_loc_log = hdb.fetch_player_match_log_defensive_locations(
+            db, player, team, season, competition=comp_filter
+        )
+        if def_loc_log.empty:
+            st.info("No defensive location stats found for this player/season.")
+        else:
+            _render_player_match_log_table(def_loc_log)
+
+    # ── Viz Section: Pass Maps, Passes Received, Touch Maps ──
+    st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
+    st.subheader("Maps")
+
+    # Match selector for individual match views
+    player_matches = hdb.fetch_player_matches(db, player, team, season, competition=comp_filter)
+    match_options = {"Full Season": None}
+    for mid, mdate, mlabel in player_matches:
+        match_options[mlabel] = mid
+    match_col, _map_spacer = st.columns([2, 5])
+    with match_col:
+        match_label = st.selectbox(
+            "Match", list(match_options.keys()),
+            key="player_page_map_match",
+        )
+    selected_match_id = match_options[match_label]
+
+    map_tabs = st.tabs(["Pass Map", "Passes Received", "Touch Map"])
+
+    with map_tabs[0]:
+        if selected_match_id is not None:
+            player_passes = hdb.fetch_passes(db, match_id=selected_match_id, passer=player, team=team)
+        else:
+            player_passes = hdb.fetch_passes(db, passer=player, team=team)
+            if player_matches:
+                keep_ids = {str(mid) for mid, _, _ in player_matches}
+                player_passes = player_passes[player_passes["match_id"].astype(str).isin(keep_ids)]
+
+        if player_passes.empty:
+            st.info("No pass data found.")
+        else:
+            player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+            n_matches = player_passes["match_id"].nunique()
+            total = len(player_passes)
+            completed = int(player_passes["completed"].sum())
+            progressive = int(player_passes["is_progressive"].sum())
+            key_passes = int(player_passes["is_key_pass"].sum())
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Matches", n_matches)
+            c2.metric("Passes Attempted", total)
+            c3.metric("Completion %", f"{completed / total * 100:.0f}%" if total else "0%")
+            c4.metric("Progressive", progressive)
+            c5.metric("Key Passes", key_passes)
+
+            stat_items = [
+                (f"{total} Attempted", TITLE_COLOR),
+                (f"{completed / total * 100:.0f}% Completion" if total else "0% Completion", TITLE_COLOR),
+                (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+            ]
+            subtitle = f"{season}" if selected_match_id is None else match_label
+            fig = plot_pass_map(player_passes, player, _display_team_name(team),
+                                None, None, stat_items,
+                                title_suffix="All Passes", subtitle=subtitle)
+            png_buf = io.BytesIO()
+            fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+            png_buf.seek(0)
+            st.image(png_buf, width=420)
+            plt.close(fig)
+
+    with map_tabs[1]:
+        if selected_match_id is not None:
+            recv_passes = hdb.fetch_passes(db, match_id=selected_match_id,
+                                            receiver=player, team=team, completed_only=True)
+        else:
+            recv_passes = hdb.fetch_passes(db, receiver=player, team=team, completed_only=True)
+            if player_matches:
+                keep_ids = {str(mid) for mid, _, _ in player_matches}
+                recv_passes = recv_passes[recv_passes["match_id"].astype(str).isin(keep_ids)]
+
+        if recv_passes.empty:
+            st.info("No received pass data found.")
+        else:
+            recv_passes = recv_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+            n_matches = recv_passes["match_id"].nunique()
+            total = len(recv_passes)
+            progressive = int(recv_passes["is_progressive"].sum())
+            key_passes = int(recv_passes["is_key_pass"].sum())
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Matches", n_matches)
+            c2.metric("Passes Received", total)
+            c3.metric("Progressive", progressive)
+            c4.metric("Key Passes", key_passes)
+
+            stat_items = [
+                (f"{total} Received", TITLE_COLOR),
+                (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+            ]
+            subtitle = f"{season}" if selected_match_id is None else match_label
+            fig = plot_pass_map(recv_passes, player, _display_team_name(team),
+                                None, None, stat_items,
+                                title_suffix="All Passes Received", subtitle=subtitle)
+            png_buf = io.BytesIO()
+            fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+            png_buf.seek(0)
+            st.image(png_buf, width=420)
+            plt.close(fig)
+
+    with map_tabs[2]:
+        if selected_match_id is not None:
+            player_touches = hdb.fetch_touches(db, match_id=selected_match_id, player=player, team=team)
+        else:
+            player_touches = hdb.fetch_touches(db, player=player, team=team)
+            if player_matches:
+                keep_ids = {str(mid) for mid, _, _ in player_matches}
+                player_touches = player_touches[player_touches["match_id"].astype(str).isin(keep_ids)]
+
+        if player_touches.empty:
+            st.info("No touch data found.")
+        else:
+            n_matches = player_touches["match_id"].nunique()
+            c1, c2 = st.columns(2)
+            c1.metric("Matches", n_matches)
+            c2.metric("Total Touches", len(player_touches))
+
+            subtitle = f"{season}" if selected_match_id is None else match_label
+            fig = plot_touch_map(player_touches, player, _display_team_name(team),
+                                  subtitle=subtitle)
+            png_buf = io.BytesIO()
+            fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+            png_buf.seek(0)
+            st.image(png_buf, width=420)
+            plt.close(fig)
+
+    # ── Passing Pairs / Shot Pairs ──
+    st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
+    st.subheader("Pairs")
+    pair_tabs = st.tabs(["Passing Pairs", "Shot Pairs"])
+
+    with pair_tabs[0]:
+        pass_pairs = hdb.fetch_team_passing_pairs(
+            db, team, match_id=selected_match_id,
+            competition=comp_filter if selected_match_id is None else None,
+        )
+        if pass_pairs.empty:
+            st.info("No passing pair data found.")
+        else:
+            left = (pass_pairs.loc[pass_pairs["passer"] == player, ["receiver", "count"]]
+                    .rename(columns={"receiver": "Receiver", "count": "Passes Completed"})
+                    .sort_values("Passes Completed", ascending=False)
+                    .reset_index(drop=True))
+            right = (pass_pairs.loc[pass_pairs["receiver"] == player, ["passer", "count"]]
+                     .rename(columns={"passer": "Passer", "count": "Passes Completed"})
+                     .sort_values("Passes Completed", ascending=False)
+                     .reset_index(drop=True))
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Passes by {player}**")
+                if left.empty:
+                    st.info("No outgoing passes found.")
+                else:
+                    st.dataframe(left, use_container_width=False, hide_index=True,
+                                 height=_no_scroll_height(left))
+            with col2:
+                st.markdown(f"**Passes Received by {player}**")
+                if right.empty:
+                    st.info("No incoming passes found.")
+                else:
+                    st.dataframe(right, use_container_width=False, hide_index=True,
+                                 height=_no_scroll_height(right))
+
+    with pair_tabs[1]:
+        shot_pairs = hdb.fetch_team_shot_pairs(
+            db, team, match_id=selected_match_id,
+            competition=comp_filter if selected_match_id is None else None,
+        )
+        if shot_pairs.empty:
+            st.info("No shot pair data found.")
+        else:
+            left = (shot_pairs.loc[shot_pairs["passer"] == player, ["shot_taker", "count"]]
+                    .rename(columns={"shot_taker": "Shot Taker", "count": "Shots"})
+                    .sort_values("Shots", ascending=False)
+                    .reset_index(drop=True))
+            right = (shot_pairs.loc[shot_pairs["shot_taker"] == player, ["passer", "count"]]
+                     .rename(columns={"passer": "Passer", "count": "Shots"})
+                     .sort_values("Shots", ascending=False)
+                     .reset_index(drop=True))
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Assists by {player}**")
+                if left.empty:
+                    st.info("No assist data found.")
+                else:
+                    st.dataframe(left, use_container_width=False, hide_index=True,
+                                 height=_no_scroll_height(left))
+            with col2:
+                st.markdown(f"**{player}'s Shots (by Assister)**")
+                if right.empty:
+                    st.info("No shot data found.")
+                else:
+                    st.dataframe(right, use_container_width=False, hide_index=True,
+                                 height=_no_scroll_height(right))
+
+
 # ============================================================
 # Dispatch: a "?match_id=..." query param (set by clicking a Fixtures row's
 # "Report" link) swaps the WHOLE page over to the single-match detail view,
@@ -3004,9 +3382,12 @@ def _render_dash_tab_bar(active_slug):
 # ============================================================
 _match_id_param = st.query_params.get("match_id")
 _team_param = st.query_params.get("team")
+_player_param = st.query_params.get("player")
 
 if _match_id_param:
     _render_match_detail(db, _match_id_param)
+elif _player_param and _team_param:
+    _render_player_page(db, _player_param, _team_param)
 elif _team_param:
     _render_team_page(db, _team_param)
 else:
