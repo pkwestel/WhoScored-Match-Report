@@ -2126,24 +2126,15 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
 
 def compute_xg_buildup(df, sca_out, shot_xg):
     """
-    xGBuildup per player, per the public definition introduced by StatsBomb
-    (see https://www.hudl.com/blog/introducing-xgchain-and-xgbuildup): find
-    every possession a player touches the ball in (ANY on-ball action
-    counts, however minor - a tackle, an interception, a pass, a dribble),
-    where that possession produces a shot - but a player's touch(es) in
-    that possession don't count toward their eligibility if their ONLY
-    involvement was taking the shot itself and/or playing the single
-    action immediately before it (here: SCA1 from compute_sca() above -
-    the closest equivalent this project has to "the assist"/"the key
-    pass", found via the same backward-chain walk already used for the
-    Shot Creating Actions tab). If a player ALSO had an earlier, separate
-    touch in the same possession, that earlier touch still earns them
-    buildup credit - only the two specific EVENTS (the shot, and SCA1) are
-    excluded, never the player as a whole. A possession with multiple
-    shots adds each shot's own xG to every involved player's running total
-    (the same "just sum them" convention used by the original published
-    implementations, rather than only counting the possession's single
-    highest-xG shot).
+    xGBuildup per player: for every possession that produces a shot,
+    credit the shot's xG value to each player who touched the ball in
+    that possession EXCEPT the shooter and the key passer (SCA1 - the
+    closest equivalent this project has to "the assist", found via the
+    same backward-chain walk used for the Shot Creating Actions tab).
+    The shooter and key passer are excluded entirely - even if they had
+    earlier touches in the same possession, they receive no xG Buildup
+    credit for it. A possession with multiple shots adds each shot's own
+    xG to every eligible player's running total.
 
     df: the full match event dataframe (same one passed to compute_sca()).
     sca_out: compute_sca()'s own output, computed with minute_min=
@@ -2205,9 +2196,22 @@ def compute_xg_buildup(df, sca_out, shot_xg):
             touched_players.add((pteam, player))
 
         sca1_event_index = row.get('sca1_event_index')
-        exclude_idx = {i for i in (shot_event_index, sca1_event_index) if i is not None}
-        buildup_events = team_events[~team_events.index.isin(exclude_idx)]
-        for player in buildup_events['playerName'].dropna().unique():
+
+        # Exclude the shooter and the key passer (SCA1) entirely from
+        # buildup credit for this possession - not just their shot/assist
+        # events, but the players themselves.
+        exclude_players = set()
+        shooter = df.at[shot_event_index, 'playerName'] if shot_event_index in df.index else None
+        if shooter and not (isinstance(shooter, float) and np.isnan(shooter)):
+            exclude_players.add(shooter)
+        if sca1_event_index is not None and sca1_event_index in df.index:
+            sca1_player = df.at[sca1_event_index, 'playerName']
+            if sca1_player and not (isinstance(sca1_player, float) and np.isnan(sca1_player)):
+                exclude_players.add(sca1_player)
+
+        for player in team_events['playerName'].dropna().unique():
+            if player in exclude_players:
+                continue
             key = (pteam, player)
             buildup_totals[key] = buildup_totals.get(key, 0.0) + xg
 
