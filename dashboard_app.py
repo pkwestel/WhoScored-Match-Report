@@ -757,7 +757,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 # transparent/white) - without one, other columns' text
                 # would visibly show through/behind this cell while
                 # scrolling horizontally underneath it.
-                style += ' position:sticky; left:0; z-index:1; background:#fff;'
+                style += ' position:sticky; left:0; z-index:1; background:#fff; color:#333;'
             cells.append(f'<td style="{style}">{cell_html}</td>')
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
@@ -3063,7 +3063,7 @@ def _render_player_match_log_table(df, decimal_cols=()):
                 cell_html = html.escape(str(val))
             style = f'padding:6px 10px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
             if i < 2:
-                style += ' position:sticky; z-index:1; background:#fff;'
+                style += ' position:sticky; z-index:1; background:#fff; color:#333;'
                 style += f' left:{"0" if i == 0 else "90"}px;'
             cells.append(f'<td style="{style}">{cell_html}</td>')
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
