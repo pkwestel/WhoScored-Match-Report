@@ -748,7 +748,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 player_url = _player_page_url(val, team_for_player_links)
                 if player_url:
                     cell_html = (f'<a href="{player_url}" target="_self" '
-                                 f'style="color:inherit; text-decoration:underline;">'
+                                 f'style="color:#4a9eff; text-decoration:underline;">'
                                  f'{cell_html}</a>')
             style = f'padding:6px 14px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
             if freeze_header and i == 0:
