@@ -675,17 +675,21 @@ def scrape_match(match_centre_url):
     error for what's really just a wrong-tab URL.
     """
     match_centre_url = re.sub(
-        r"^(https?://www\.whoscored\.com/matches/\d+)/show/",
+        r"^(https?://www\.whoscored\.com/[Mm]atches/\d+)/[Ss]how/",
         r"\1/live/",
         match_centre_url.strip(),
     )
     # Extract the numeric match ID from the requested URL so we can verify
     # the scraped page is actually the match we asked for (WhoScored
     # sometimes redirects old match URLs to a team's most recent fixture).
-    requested_id_match = re.search(r"/matches/(\d+)/", match_centre_url)
+    requested_id_match = re.search(r"/[Mm]atches/(\d+)/", match_centre_url)
     requested_match_id = int(requested_id_match.group(1)) if requested_id_match else None
 
-    print(f"Opening {match_centre_url} ...")
+    if requested_match_id is None:
+        print(f"  WARNING: Could not extract a numeric match ID from URL: {match_centre_url}")
+        print(f"           Redirect/mismatch safety checks will be SKIPPED for this scrape.")
+
+    print(f"Opening {match_centre_url} (requested match ID: {requested_match_id}) ...")
     with get_driver() as driver:
         driver.get(match_centre_url)
         # Wait for the matchCentreData script to actually appear in the
@@ -713,7 +717,7 @@ def scrape_match(match_centre_url):
     # than the one we requested, warn loudly so the user knows the data
     # isn't for the match they expected.
     if requested_match_id and final_url:
-        landed_id_match = re.search(r"/matches/(\d+)/", final_url)
+        landed_id_match = re.search(r"/[Mm]atches/(\d+)/", final_url)
         if landed_id_match:
             landed_match_id = int(landed_id_match.group(1))
             if landed_match_id != requested_match_id:

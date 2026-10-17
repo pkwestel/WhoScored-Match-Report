@@ -98,12 +98,14 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         if status_cb:
             status_cb(msg)
 
-    _status("Scraping WhoScored...")
+    _status(f"Scraping WhoScored: {ws_url.strip()}")
     df, match_info = wr.scrape_match(ws_url.strip())
     ws_home_name = match_info.get("home_name")
     ws_away_name = match_info.get("away_name")
     ws_match_json = match_info.get("match_json")
+    ws_match_date = match_info.get("match_date")
 
+    _status(f"WhoScored returned: {ws_home_name} vs {ws_away_name} ({ws_match_date or 'no date'})")
     _status("Computing WhoScored tables...")
     _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
     passes_received = wr.compute_passes_received(df)
@@ -216,6 +218,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "fm_url": fm_url,
         "ws_home_name": ws_home_name,
         "ws_away_name": ws_away_name,
+        "ws_match_date": ws_match_date,
         "fm_home_name": fm_home_name,
         "fm_away_name": fm_away_name,
         "referee": referee,

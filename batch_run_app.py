@@ -322,8 +322,31 @@ if results:
     for i, r in enumerate(results):
         if r["success"]:
             report = r["report"]
-            with st.expander(f"✅ {report['ws_home_name']} vs {report['ws_away_name']}"):
+            ws_date_str = report.get("ws_match_date") or "(no date)"
+            with st.expander(f"✅ {report['ws_home_name']} vs {report['ws_away_name']}  —  {ws_date_str}"):
+                st.write(f"**Requested URL:** `{r['ws_url']}`")
+                st.write(f"**WhoScored returned:** {report['ws_home_name']} vs {report['ws_away_name']} "
+                         f"({ws_date_str})")
                 st.write(f"WhoScored: {report['n_ws_events']} events  |  FotMob: {report['n_fm_shots']} shots")
+                # Date mismatch warning: compare the scraped match date against
+                # the user-entered batch date (the one in the date_input widget)
+                batch_date = report.get("match_date")
+                if batch_date and report.get("ws_match_date"):
+                    try:
+                        import datetime as _dt
+                        from dateutil import parser as _dateparser
+                        scraped_dt = _dateparser.parse(report["ws_match_date"]).date()
+                        batch_dt = (batch_date if isinstance(batch_date, _dt.date)
+                                    else _dateparser.parse(str(batch_date)).date())
+                        if scraped_dt != batch_dt:
+                            st.error(
+                                f"⚠️ **DATE MISMATCH**: You entered {batch_dt.isoformat()} as the match date, "
+                                f"but WhoScored's data is for **{report['ws_match_date']}**. "
+                                f"This strongly suggests WhoScored served data for a DIFFERENT match "
+                                f"than the one you requested. Do NOT save this row."
+                            )
+                    except Exception:
+                        pass  # couldn't parse - skip warning rather than crash
                 if report["team_name_mismatch"]:
                     st.warning(
                         "The team names from WhoScored and FotMob don't look like the same match - "
