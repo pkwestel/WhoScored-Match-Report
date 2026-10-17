@@ -251,7 +251,7 @@ def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
     st.markdown(f"""
     <div style="overflow-x:auto;">
         <table style="border-collapse:collapse; font-size:0.95em; width:100%;">
-            <tbody><tr style="background:#e2e5ea;">{"".join(cells)}</tr></tbody>
+            <tbody><tr style="background:#e2e5ea; color:#333;">{"".join(cells)}</tr></tbody>
         </table>
     </div>
     """, unsafe_allow_html=True)
@@ -500,7 +500,7 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     def _header_cell(col):
         align = "left" if col in left_columns else "right"
         label = html.escape(str(col))
-        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; color:#333; '
                  f'text-align:{align}; white-space:nowrap;')
         if sort_key is None:
             return f'<th style="{style}">{label}</th>'
@@ -679,7 +679,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     # header's own grey background.
     row1_cells = []
     for i, col in enumerate(ungrouped):
-        style = (f'padding:6px 14px; border:1px solid #888; background:#f0f2f6; '
+        style = (f'padding:6px 14px; border:1px solid #888; background:#f0f2f6; color:#333; '
                  f'text-align:left; white-space:nowrap;')
         if freeze_header:
             # ungrouped[0] ('Player') is BOTH the frozen first column and
@@ -692,7 +692,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
         row1_cells.append(f'<th rowspan="2" style="{style}">{html.escape(col)}</th>')
     for label, cols in groups:
         if cols:
-            style = (f'padding:6px 14px; border:1px solid #888; background:#e2e5ea; '
+            style = (f'padding:6px 14px; border:1px solid #888; background:#e2e5ea; color:#333; '
                      f'text-align:center; white-space:nowrap;')
             if freeze_header:
                 style += ' position:sticky; top:0; z-index:3;'
@@ -700,7 +700,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
 
     def _row2_th(col):
         label = html.escape(_label(col))
-        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; color:#333; '
                  f'text-align:right; white-space:nowrap;')
         if freeze_header:
             style += f' position:sticky; top:{_FREEZE_HEADER_ROW_H_PX}px; z-index:2;'
@@ -3045,7 +3045,7 @@ def _render_player_match_log_table(df, decimal_cols=()):
     for col in df.columns:
         label = html.escape(str(col))
         align = "left" if col in ("Date", "Opponent") else "right"
-        style = (f'padding:6px 10px; border:1px solid #888; background:#f0f2f6; '
+        style = (f'padding:6px 10px; border:1px solid #888; background:#f0f2f6; color:#333; '
                  f'text-align:{align}; white-space:nowrap; position:sticky; top:0; z-index:2;')
         header_cells.append(f'<th style="{style}">{label}</th>')
 
