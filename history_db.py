@@ -79,6 +79,7 @@ re-ran a report) overwrites rather than duplicates.
 
 import json
 import math
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
@@ -1144,15 +1145,40 @@ def _fetch_player_namespaces(db: DB, match_id, namespaces: list) -> pd.DataFrame
     Locations) so each only pulls the couple of namespaces it actually
     needs, and gets back plain field names (no 'namespace.' prefix, no
     underscores) ready to show as real column headers.
+
+    SPLIT-ROW HEALING: a player whose WhoScored name and FotMob name
+    didn't match at save time (see batch_lib.build_db_stats()'s docstring)
+    will have TWO player_match_stats rows in the DB - one keyed by the
+    WhoScored spelling (holding ws_* namespaces), one by the FotMob
+    spelling (holding fm_* namespaces). When both spellings are present
+    for the SAME team in a single match, this function merges them so
+    callers see a single player with all their data, using the WhoScored
+    name. This is a read-time fix for data saved before build_db_stats()'s
+    own post-processing merge was added; once those matches are re-scraped
+    (with the new merge), only one row per player will exist and this
+    code-path is a no-op.
     """
     cur = db.execute("""
         SELECT team, player, extra_json
         FROM player_match_stats
         WHERE match_id = ?
     """, (str(match_id),))
-    records = []
+
+    # First pass: collect raw rows with their full extra_json dicts so we
+    # can detect and merge split entries before flattening.
+    raw_rows = []
     for team, player, extra_json in cur.fetchall():
         extra = json.loads(extra_json) if extra_json else {}
+        raw_rows.append((team, player, extra))
+
+    # Detect split rows: for each team, find rows that have ONLY fm_*
+    # namespaces and try to merge them into a row that has ws_* namespaces.
+    # This mirrors batch_lib.build_db_stats()'s post-processing merge.
+    if len(raw_rows) > 1:
+        raw_rows = _heal_split_player_rows(raw_rows)
+
+    records = []
+    for team, player, extra in raw_rows:
         rec = {"Team": team, "Player": player}
         found_any = False
         for ns in namespaces:
@@ -1163,6 +1189,96 @@ def _fetch_player_namespaces(db: DB, match_id, namespaces: list) -> pd.DataFrame
         if found_any:
             records.append(rec)
     return pd.DataFrame(records)
+
+
+def _heal_split_player_rows(raw_rows):
+    """
+    Merge split player_match_stats rows where one row has only ws_*
+    namespaces and another has only fm_* namespaces for the same real
+    player on the same team. Returns the (possibly shorter) list of
+    (team, player, extra_dict) tuples.
+
+    NOTE: this function deliberately does NOT import combined_report.py
+    (which transitively imports whoscored_report → selenium) because it
+    runs on Streamlit Cloud where selenium isn't installed. Instead it
+    duplicates the tiny _normalize_name() logic inline (accent stripping +
+    lowercasing). The full PLAYER_NAME_ALIASES lookup isn't needed here -
+    alias-resolvable cases are already handled at SAVE time by
+    batch_lib.build_db_stats()'s _to_ws_player_name(); this function only
+    catches cases where plain normalization or last-name matching suffices
+    for data that was saved before that fix existed.
+    """
+    import unicodedata as _ud
+
+    def _norm(name):
+        """Strip accents, lowercase, collapse whitespace."""
+        if not isinstance(name, str):
+            return ""
+        nfkd = _ud.normalize("NFKD", name)
+        ascii_name = "".join(c for c in nfkd if not _ud.combining(c))
+        ascii_name = re.sub(r"[^a-zA-Z0-9]+", " ", ascii_name)
+        return " ".join(ascii_name.lower().split())
+
+    def _has_ws(extra):
+        return any(k.startswith("ws_") for k in extra)
+
+    def _has_fm(extra):
+        return any(k.startswith("fm_") for k in extra)
+
+    def _last_name(name):
+        parts = _norm(name).split()
+        return parts[-1] if parts else ""
+
+    # Index FM-only rows by team
+    fm_only_indices = []
+    ws_indices_by_team = {}
+    for i, (team, player, extra) in enumerate(raw_rows):
+        if _has_fm(extra) and not _has_ws(extra):
+            fm_only_indices.append(i)
+        if _has_ws(extra):
+            ws_indices_by_team.setdefault(team, []).append(i)
+
+    if not fm_only_indices:
+        return raw_rows
+
+    merged_into = {}  # fm_index -> ws_index
+    for fi in fm_only_indices:
+        fm_team, fm_player, fm_extra = raw_rows[fi]
+        fm_canon = _norm(fm_player)
+
+        # Pass 1: normalized-name match
+        for wi in ws_indices_by_team.get(fm_team, []):
+            ws_team, ws_player, ws_extra = raw_rows[wi]
+            if _norm(ws_player) == fm_canon:
+                merged_into[fi] = wi
+                break
+
+        # Pass 2: unique last-name match (only if one WhoScored entry
+        # on the same team shares the last name and lacks fm_ data)
+        if fi not in merged_into:
+            fm_last = _last_name(fm_player)
+            if fm_last:
+                candidates = [
+                    wi for wi in ws_indices_by_team.get(fm_team, [])
+                    if _last_name(raw_rows[wi][1]) == fm_last
+                    and not _has_fm(raw_rows[wi][2])
+                ]
+                if len(candidates) == 1:
+                    merged_into[fi] = candidates[0]
+
+    if not merged_into:
+        return raw_rows
+
+    # Apply merges
+    for fi, wi in merged_into.items():
+        fm_team, fm_player, fm_extra = raw_rows[fi]
+        ws_team, ws_player, ws_extra = raw_rows[wi]
+        # Merge fm_* namespaces into the ws entry
+        for k, v in fm_extra.items():
+            ws_extra.setdefault(k, v)
+
+    # Return rows excluding the merged FM-only ones
+    return [row for i, row in enumerate(raw_rows) if i not in merged_into]
 
 
 def _player_category_table(db: DB, match_id, home_team, away_team, namespaces: list,

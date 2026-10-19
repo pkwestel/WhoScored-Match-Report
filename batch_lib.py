@@ -480,6 +480,114 @@ def build_db_stats(report):
             key = (team, _to_ws_player_name(row["Player"]))
             player_stats.setdefault(key, {})["fm_position"] = {"Position": row["Position"]}
 
+    # ------------------------------------------------------------------
+    # POST-PROCESSING: merge split player entries
+    # ------------------------------------------------------------------
+    # If _to_ws_player_name() failed for a player (returned the raw FotMob
+    # name because canonical_player_name() couldn't match it to any
+    # WhoScored name), that player's FotMob-sourced namespaces (fm_scoring,
+    # fm_lineup, fm_cards, fm_position, etc.) ended up under a DIFFERENT
+    # (team, player) key than their WhoScored-sourced namespaces (ws_passing,
+    # ws_defensive, ws_touches).  This means one real player has TWO entries
+    # in player_stats - one with WhoScored data, one with FotMob data - and
+    # they'll be saved as two separate DB rows, causing the season
+    # aggregation to either show them twice or (more commonly) show the
+    # WhoScored-named entry with no Position/Minutes/Goals and the FotMob-
+    # named entry separately.
+    #
+    # Fix: for every entry that has ONLY FotMob namespaces (no ws_*), look
+    # for another entry on the same team that has ONLY WhoScored namespaces
+    # (no fm_*) and whose name matches via canonical_player_name().  If
+    # found, merge the FotMob data into the WhoScored entry.  This is a
+    # second-chance match that catches cases _normalize_name alone can't
+    # resolve - e.g. differing transliterations, first-name-only FotMob
+    # names, etc.  Exact-match cases (where _to_ws_player_name succeeded)
+    # are already merged and won't be touched here.
+    _WS_NS_PREFIXES = ("ws_",)
+    _FM_NS_PREFIXES = ("fm_",)
+
+    def _has_prefix(namespaces, prefixes):
+        return any(ns.startswith(p) for ns in namespaces for p in prefixes)
+
+    def _last_name(name):
+        """Extract the last whitespace-delimited token, normalized."""
+        parts = cr._normalize_name(name).split()
+        return parts[-1] if parts else ""
+
+    # Collect candidates: entries with ONLY FotMob data (no ws_* namespace)
+    fm_only_keys = []
+    for key, nss in player_stats.items():
+        if _has_prefix(nss, _FM_NS_PREFIXES) and not _has_prefix(nss, _WS_NS_PREFIXES):
+            fm_only_keys.append(key)
+
+    # Build a lookup of WhoScored-having entries per team for fuzzy matching
+    ws_entries_by_team = {}
+    for key, nss in player_stats.items():
+        if _has_prefix(nss, _WS_NS_PREFIXES):
+            ws_entries_by_team.setdefault(key[0], []).append(key)
+
+    merged_keys = []
+    for fm_key in fm_only_keys:
+        fm_team, fm_player = fm_key
+        fm_canonical = cr.canonical_player_name(fm_player)
+        match_key = None
+
+        # Pass 1: exact canonical match
+        for ws_key in ws_entries_by_team.get(fm_team, []):
+            if ws_key == fm_key:
+                continue
+            if cr.canonical_player_name(ws_key[1]) == fm_canonical:
+                match_key = ws_key
+                break
+
+        # Pass 2: last-name match (only if exactly ONE WhoScored entry
+        # on the same team shares the same last name - avoids ambiguity
+        # with common surnames). Catches cases like FotMob using a short
+        # name ("Mount") vs WhoScored's full name ("Mason Mount"), or
+        # different first-name transliterations with the same surname.
+        if match_key is None:
+            fm_last = _last_name(fm_player)
+            if fm_last:
+                candidates = [
+                    ws_key for ws_key in ws_entries_by_team.get(fm_team, [])
+                    if ws_key != fm_key
+                    and _last_name(ws_key[1]) == fm_last
+                    # Don't merge into an entry that already has fm_ data
+                    # (that one was already matched by _to_ws_player_name)
+                    and not _has_prefix(player_stats[ws_key], _FM_NS_PREFIXES)
+                ]
+                if len(candidates) == 1:
+                    match_key = candidates[0]
+
+        if match_key is not None:
+            # Merge FotMob namespaces into the WhoScored entry
+            for ns, data in player_stats[fm_key].items():
+                player_stats[match_key].setdefault(ns, data)
+            merged_keys.append(fm_key)
+            import logging
+            logging.getLogger(__name__).info(
+                "Merged split player entry: FotMob '%s' → WhoScored '%s' (team: %s)",
+                fm_player, match_key[1], fm_team,
+            )
+
+    for key in merged_keys:
+        del player_stats[key]
+
+    # ------------------------------------------------------------------
+    # SECOND PASS: for entries that are STILL FotMob-only after the merge
+    # above (no canonical match found), log a warning so the mismatch is
+    # visible and can be fixed by adding to PLAYER_NAME_ALIASES.
+    # ------------------------------------------------------------------
+    for key, nss in player_stats.items():
+        if _has_prefix(nss, _FM_NS_PREFIXES) and not _has_prefix(nss, _WS_NS_PREFIXES):
+            import logging
+            logging.getLogger(__name__).warning(
+                "Unmerged FotMob-only player entry: '%s' (team: %s) - "
+                "no matching WhoScored name found. Consider adding to "
+                "PLAYER_NAME_ALIASES in combined_report.py.",
+                key[1], key[0],
+            )
+
     return team_stats, player_stats
 
 
