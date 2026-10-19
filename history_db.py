@@ -1723,6 +1723,68 @@ def fetch_season_shot_totals(db: DB, competition=None, season=None):
     return for_df, against_df
 
 
+def fetch_season_corners(db: DB, competition=None, season=None):
+    """
+    Season-cumulative corner kicks taken per team, read from team_match_stats
+    .extra_json's 'fm_totals' namespace ('Corners' key — FotMob's own
+    already-team-level figure, same source as the match detail view's Team
+    Totals table).
+
+    Returns (for_df, against_df), each with columns [Team, Corners]:
+      - for_df:     total corners taken BY each team
+      - against_df: total corners faced (i.e. taken by the opponent)
+    """
+    valid_ids = _match_ids_for_competition(db, competition, season)
+
+    matches = fetch_matches(db)
+    if matches.empty:
+        empty = pd.DataFrame(columns=["Team", "Corners"])
+        return empty, empty.copy()
+
+    match_lookup = {}
+    for _, row in matches.iterrows():
+        match_lookup[str(row["match_id"])] = (row["home_team"], row["away_team"])
+
+    for_totals = {}    # team -> total corners taken
+    against_totals = {}  # team -> total corners faced
+
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if valid_ids is not None and mid not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        fm = extra.get("fm_totals")
+        if not fm:
+            continue
+        corners_val = fm.get("Corners")
+        if corners_val is None:
+            continue
+        try:
+            corners = int(float(corners_val))
+        except (TypeError, ValueError):
+            continue
+
+        for_totals[team] = for_totals.get(team, 0) + corners
+
+        # Attribute to opponent for the 'against' table
+        home, away = match_lookup.get(mid, (None, None))
+        if team == home and away:
+            against_totals[away] = against_totals.get(away, 0) + corners
+        elif team == away and home:
+            against_totals[home] = against_totals.get(home, 0) + corners
+
+    for_df = pd.DataFrame([
+        {"Team": t, "Corners": c} for t, c in for_totals.items()
+    ]) if for_totals else pd.DataFrame(columns=["Team", "Corners"])
+
+    against_df = pd.DataFrame([
+        {"Team": t, "Corners": c} for t, c in against_totals.items()
+    ]) if against_totals else pd.DataFrame(columns=["Team", "Corners"])
+
+    return for_df, against_df
+
+
 def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_only=False,
                   team=None, minute_min=None, minute_max=None) -> pd.DataFrame:
     """

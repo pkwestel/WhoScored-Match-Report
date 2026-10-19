@@ -3830,6 +3830,31 @@ else:
                         out["Total xG"] = out["Total xG"].round(2)
                         return out
 
+                    # When the Corner situation is selected, merge in total
+                    # corners taken and a "Corner Goal %" column so the user
+                    # can see conversion rate at a glance.
+                    is_corner = chosen == "FromCorner"
+                    if is_corner:
+                        corners_for_df, corners_against_df = hdb.fetch_season_corners(
+                            db, competition=league, season=season,
+                        )
+
+                    def _add_corner_cols(totals_df, corners_df):
+                        """Merge corner-taken totals and compute Corner Goal %."""
+                        if corners_df.empty:
+                            totals_df["Corners Taken"] = 0
+                            totals_df["Corner Goal %"] = "0.0%"
+                            return totals_df
+                        merged = totals_df.merge(corners_df, on="Team", how="left")
+                        merged["Corners Taken"] = merged["Corners"].fillna(0).astype(int)
+                        merged["Corner Goal %"] = merged.apply(
+                            lambda r: f"{r['Goals'] / r['Corners Taken'] * 100:.1f}%"
+                            if r["Corners Taken"] > 0 else "0.0%",
+                            axis=1,
+                        )
+                        merged.drop(columns=["Corners"], inplace=True, errors="ignore")
+                        return merged
+
                     col1, col2 = st.columns(2)
                     with col1:
                         st.subheader("For")
@@ -3838,11 +3863,15 @@ else:
                         # Stats tables above: Team is plain text here, not a
                         # link).
                         for_totals = _team_totals_for(for_df)
+                        if is_corner:
+                            for_totals = _add_corner_cols(for_totals, corners_for_df)
                         st.dataframe(for_totals, use_container_width=False, hide_index=True,
                                      height=_no_scroll_height(for_totals))
                     with col2:
                         st.subheader("Against")
                         against_totals = _team_totals_for(against_df)
+                        if is_corner:
+                            against_totals = _add_corner_cols(against_totals, corners_against_df)
                         st.dataframe(against_totals, use_container_width=False, hide_index=True,
                                      height=_no_scroll_height(against_totals))
 
