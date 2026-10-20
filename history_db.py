@@ -2487,7 +2487,7 @@ _CARD_COLUMNS = ["Yellow Cards", "Red Cards"]
 # 'ws_passing' instead - see _fetch_player_namespaces()'s docstring), which
 # still works fine since the totals dict doesn't care which namespace a
 # number originally came from.
-_PER90_STATS = ["Goals", "Assists", "Shots", "NPxG", "xA", "SCA"]
+_PER90_STATS = ["Goals", "Assists", "NPxG", "xA", "SCA"]
 
 
 def _per90(stat_total, minutes_total):
@@ -2629,9 +2629,13 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     so two competitions' numbers never silently mix into one total.
     """
     sum_cols = _SCORING_STATS_COLUMNS + _CARD_COLUMNS  # internal accumulation keeps the source "Minutes Played" name
+    # PS-xG and Shots (Per 90) moved to the new Shooting table - excluded
+    # from General Stats' output columns but still accumulated internally
+    # (sum_cols) since the data comes from the same fm_scoring namespace.
+    _GENERAL_STATS_EXCLUDE = {"PS-xG"}
     out_cols = (
         ["Player", "Position", "Age", "Appearances", "Starts"]
-        + ["Minutes" if c == "Minutes Played" else c for c in sum_cols]
+        + ["Minutes" if c == "Minutes Played" else c for c in sum_cols if c not in _GENERAL_STATS_EXCLUDE]
         + [f"{stat} (Per 90)" for stat in _PER90_STATS]
     )
 
@@ -3135,6 +3139,150 @@ def fetch_team_season_defensive_locations(db: DB, team, season, competition=None
         db, team, season, ["ws_defensive_locations"], _DEFENSIVE_LOCATIONS_COLUMNS,
         competition=competition
     )
+
+
+def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.DataFrame:
+    """
+    Season-cumulative Shooting table for the Team Page.
+
+    Columns:
+      Player, Position, Shots, Goals (non-penalty), NPxG, NPxG (Per 90),
+      PS-xG, Shots (Per 90), xG/Shot, Conversion, NPxG-G,
+      Right Foot, Left Foot, Header
+
+    Data is drawn from two sources:
+      1. fm_scoring namespace (player_match_stats): Shots, Goals, NPxG,
+         PS-xG, PK, Minutes Played
+      2. shots table: body_part counts per player (Right Foot, Left Foot,
+         Head) across all the team's matches this season
+
+    Derived columns:
+      - Goals (non-penalty) = Goals - PK
+      - NPxG (Per 90)      = (NPxG / Minutes Played) * 90
+      - Shots (Per 90)      = (Shots / Minutes Played) * 90
+      - xG/Shot             = NPxG / Shots  (or 0.00 if Shots == 0)
+      - Conversion          = Goals / Shots (or 0.0% if Shots == 0)
+      - NPxG-G              = NPxG - (Goals - PK)
+
+    Returns an empty DataFrame if no data exists. Includes a 'Team Total'
+    row appended at the bottom, same convention as the category tables.
+    """
+    _SHOOTING_FM_COLS = ["Minutes Played", "Goals", "Shots", "NPxG", "PS-xG", "PK"]
+    out_cols = [
+        "Player", "Position",
+        "Shots", "NP Goals", "NPxG", "NPxG (Per 90)", "PS-xG",
+        "Shots (Per 90)", "xG/Shot", "Conversion", "NPxG-G",
+        "Right Foot", "Left Foot", "Header",
+    ]
+
+    matches = fetch_matches(db)
+    if matches.empty:
+        return pd.DataFrame(columns=out_cols)
+    matches = matches.copy()
+    matches["season"] = matches["match_date"].apply(_season_label)
+    team_matches = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+        & (matches["season"] == season)
+    ]
+    if competition is not None:
+        team_matches = team_matches[team_matches["competition"] == competition]
+    team_matches = team_matches.sort_values("match_date")
+    if team_matches.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    match_ids = list(team_matches["match_id"])
+
+    # --- 1. Accumulate fm_scoring stats per player ---
+    sums, positions = {}, {}
+    for match_id in match_ids:
+        df = _fetch_player_namespaces(db, match_id, ["fm_scoring", "fm_position"])
+        if df.empty:
+            continue
+        sub = df[df["Team"] == team]
+        if sub.empty:
+            continue
+        present = [c for c in _SHOOTING_FM_COLS if c in sub.columns]
+        for _, r in sub.iterrows():
+            player = r["Player"]
+            row_totals = sums.setdefault(player, {c: 0.0 for c in _SHOOTING_FM_COLS})
+            for c in present:
+                v = pd.to_numeric(r[c], errors="coerce")
+                row_totals[c] += 0.0 if pd.isna(v) else float(v)
+            pos = r.get("Position")
+            if pos:
+                positions.setdefault(player, []).append(pos)
+
+    # --- 2. Accumulate body-part shot counts from the shots table ---
+    body_counts = {}  # player -> {Right Foot: n, Left Foot: n, Header: n}
+    _BODY_MAP = {"Right Foot": "Right Foot", "Left Foot": "Left Foot", "Head": "Header"}
+    for match_id in match_ids:
+        shots_df = fetch_shots(db, match_id=match_id, team=team)
+        if shots_df.empty:
+            continue
+        for _, s in shots_df.iterrows():
+            player = s["player"]
+            if not player:
+                continue
+            pc = body_counts.setdefault(player, {"Right Foot": 0, "Left Foot": 0, "Header": 0})
+            mapped = _BODY_MAP.get(s.get("body_part", ""))
+            if mapped:
+                pc[mapped] += 1
+
+    if not sums:
+        return pd.DataFrame(columns=out_cols)
+
+    # --- 3. Build per-player records with derived columns ---
+    records = []
+    for player, t in sums.items():
+        goals_np = int(round(t["Goals"] - t["PK"]))
+        shots = int(round(t["Shots"]))
+        npxg = round(t["NPxG"], 2)
+        ps_xg = round(t["PS-xG"], 2)
+        minutes = t["Minutes Played"]
+        bc = body_counts.get(player, {"Right Foot": 0, "Left Foot": 0, "Header": 0})
+
+        rec = {
+            "Player": player,
+            "Position": _season_mode_position(positions.get(player, [])),
+            "Shots": shots,
+            "NP Goals": goals_np,
+            "NPxG": npxg,
+            "NPxG (Per 90)": _per90(t["NPxG"], minutes),
+            "PS-xG": ps_xg,
+            "Shots (Per 90)": _per90(t["Shots"], minutes),
+            "xG/Shot": round(npxg / shots, 2) if shots else 0.00,
+            "Conversion": round(goals_np / shots * 100, 1) if shots else 0.0,
+            "NPxG-G": round(npxg - goals_np, 2),
+            "Right Foot": bc["Right Foot"],
+            "Left Foot": bc["Left Foot"],
+            "Header": bc["Header"],
+        }
+        records.append(rec)
+
+    out = (pd.DataFrame(records, columns=out_cols)
+           .sort_values("Shots", ascending=False)
+           .reset_index(drop=True))
+
+    # --- 4. Team Total row ---
+    team_total = {"Player": "Team Total", "Position": "-"}
+    _DECIMAL_SHOOTING = {"NPxG", "PS-xG", "NPxG-G", "xG/Shot"}
+    for c in out_cols:
+        if c in ("Player", "Position"):
+            continue
+        if c in ("NPxG (Per 90)", "Shots (Per 90)", "xG/Shot", "Conversion"):
+            continue  # recomputed below
+        s = out[c].sum()
+        team_total[c] = round(s, 2) if c in _DECIMAL_SHOOTING else int(round(s))
+    total_shots = team_total["Shots"]
+    total_goals = team_total["NP Goals"]
+    total_npxg = team_total["NPxG"]
+    total_minutes = sum(t["Minutes Played"] for t in sums.values())
+    team_total["NPxG (Per 90)"] = _per90(sum(t["NPxG"] for t in sums.values()), total_minutes)
+    team_total["Shots (Per 90)"] = _per90(sum(t["Shots"] for t in sums.values()), total_minutes)
+    team_total["xG/Shot"] = round(total_npxg / total_shots, 2) if total_shots else 0.00
+    team_total["Conversion"] = round(total_goals / total_shots * 100, 1) if total_shots else 0.0
+
+    return pd.concat([out, pd.DataFrame([team_total], columns=out_cols)], ignore_index=True)
 
 
 def fetch_team_match_counts(db: DB, season, competition=None) -> dict:

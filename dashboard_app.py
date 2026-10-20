@@ -257,6 +257,115 @@ def _render_pinned_team_total_row(columns, total_row, decimal_cols=()):
     """, unsafe_allow_html=True)
 
 
+def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_links=None):
+    """
+    Custom HTML table for the Shooting stats table, with sortable column
+    headers (same _apply_sort_from_query()/_build_sort_href() mechanism as
+    General Stats) and per-cell color coding on the NPxG-G column:
+    dark green when > 0.00 (overperforming xG), dark red when < 0.00
+    (underperforming xG), default color when exactly 0.00.
+
+    The 'Team Total' row is pinned at the bottom, excluded from sorting,
+    same as every other table on this page.
+    """
+    if shooting_df.empty:
+        return
+
+    # Split out the Team Total row before sorting
+    is_total = shooting_df["Player"] == "Team Total"
+    if is_total.any():
+        total_row = shooting_df[is_total]
+        sortable_rows = shooting_df[~is_total]
+    else:
+        total_row = shooting_df.iloc[0:0]
+        sortable_rows = shooting_df
+
+    sortable_rows, active_column, active_direction = _apply_sort_from_query(sortable_rows, sort_key)
+    df = pd.concat([sortable_rows, total_row], ignore_index=True)
+
+    columns = list(df.columns)
+    _DECIMAL_COLS = {"NPxG", "PS-xG", "NPxG (Per 90)", "Shots (Per 90)", "xG/Shot", "NPxG-G"}
+
+    # Header row
+    header_cells = []
+    for col in columns:
+        align = "left" if col in ("Player", "Position") else "right"
+        style = (f'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; color:#333; '
+                 f'text-align:{align}; white-space:nowrap; position:sticky; top:0; z-index:2;')
+        if col in ("Player",):
+            style += ' position:sticky; left:0; top:0; z-index:3;'
+        label = html.escape(col)
+        if col not in ("Player", "Position"):
+            if col == active_column:
+                next_dir = "asc" if active_direction == "desc" else "desc"
+                arrow = " ▲" if active_direction == "asc" else " ▼"
+            else:
+                numeric = pd.to_numeric(df[col], errors="coerce")
+                is_numeric = numeric.notna().sum() == df[col].notna().sum()
+                next_dir = "desc" if is_numeric else "asc"
+                arrow = ""
+            href = _build_sort_href(sort_key, col, next_dir)
+            header_cells.append(
+                f'<th style="{style} cursor:pointer;">'
+                f'<a href="{href}" target="_self" '
+                f'style="color:inherit; text-decoration:none; display:block;">{label}{arrow}</a></th>'
+            )
+        else:
+            header_cells.append(f'<th style="{style}">{label}</th>')
+
+    # Body rows
+    body_rows = []
+    for idx, (_, r) in enumerate(df.iterrows()):
+        is_total_row = (str(r.get("Player", "")) == "Team Total")
+        bg = "background:#e2e5ea;" if is_total_row else ""
+        cells = []
+        for col in columns:
+            val = r[col]
+            align = "left" if col in ("Player", "Position") else "right"
+            extra_style = ""
+            if pd.isna(val):
+                cell_html = "-"
+            elif col == "Conversion" and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.1f}%"
+            elif col in _DECIMAL_COLS and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.2f}"
+                # NPxG-G color coding
+                if col == "NPxG-G":
+                    if val > 0.005:
+                        extra_style = "color:#1a7a1a;"  # dark green
+                    elif val < -0.005:
+                        extra_style = "color:#b91c1c;"  # dark red
+            else:
+                cell_html = html.escape(str(val))
+            # Player links
+            if (col == "Player" and team_for_player_links
+                    and str(val) != "Team Total" and not pd.isna(val)):
+                player_url = _player_page_url(val, team_for_player_links)
+                if player_url:
+                    cell_html = (f'<a href="{player_url}" target="_self" '
+                                 f'style="color:#4a9eff; text-decoration:underline;">'
+                                 f'{cell_html}</a>')
+            weight = "font-weight:600;" if col == "Player" and is_total_row else ""
+            sticky = ""
+            if col == "Player":
+                sticky_bg = "background:#e2e5ea;" if is_total_row else "background:#fff;"
+                sticky = f' position:sticky; left:0; z-index:1; {sticky_bg}'
+            cells.append(
+                f'<td style="padding:6px 14px; border:1px solid #ddd; text-align:{align}; '
+                f'white-space:nowrap; {bg}{weight}{extra_style}{sticky}">{cell_html}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(f"""
+    <div style="overflow:auto; max-height:520px;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead><tr>{"".join(header_cells)}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # Cosmetic-only team name overrides for display - the DB's own stored team
 # key (matches.home_team/away_team and every other team-keyed column) stays
 # whatever WhoScored's own scrape produced ("Porto"), since that's what
@@ -793,7 +902,7 @@ def _render_general_stats_table(scoring_stats, team_for_player_links=None):
     _render_grouped_stats_table(
         scoring_stats, ungrouped,
         [("Playing Time", playing_time_cols), ("Totals", totals_cols), ("Per 90", per90_cols)],
-        decimal_cols={"NPxG", "PS-xG", "xA"},
+        decimal_cols={"NPxG", "xA"},
         sort_key="general_stats",
         freeze_header=True,
         team_for_player_links=team_for_player_links,
@@ -2880,6 +2989,19 @@ def _render_team_page(db, team, season=None):
         st.info(f"No matches saved yet for {_display_team_name(team)} in {season}.")
     else:
         _render_fixtures_like_table(match_log)
+
+    # Shooting table - season-cumulative per-player shooting stats drawn
+    # from fm_scoring (Shots, Goals, NPxG, PS-xG) and the shots table
+    # (body part counts). Placed between Match Log and Possession as
+    # requested. Custom HTML table (not st.dataframe) because the NPxG-G
+    # column needs per-cell text color (dark green > 0, dark red < 0).
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    st.subheader("Shooting")
+    shooting_stats = hdb.fetch_team_season_shooting(db, team, season, competition=competition)
+    if shooting_stats.empty:
+        st.info(f"No shooting stats saved yet for {_display_team_name(team)} in {season}.")
+    else:
+        _render_shooting_table(shooting_stats, team_for_player_links=team)
 
     # The remaining match-report Player Stats categories (see the match
     # detail view's own mt_players tab), season-cumulative the same way
