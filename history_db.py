@@ -3147,7 +3147,7 @@ def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.Dat
 
     Columns:
       Player, Position, Shots, Goals (non-penalty), NPxG, NPxG (Per 90),
-      PS-xG, Shots (Per 90), xG/Shot, Conversion, NPxG-G,
+      PS-xG, Shots (Per 90), xG/Shot, Conversion, G-NPxG,
       Right Foot, Left Foot, Header
 
     Data is drawn from two sources:
@@ -3162,7 +3162,7 @@ def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.Dat
       - Shots (Per 90)      = (Shots / Minutes Played) * 90
       - xG/Shot             = NPxG / Shots  (or 0.00 if Shots == 0)
       - Conversion          = Goals / Shots (or 0.0% if Shots == 0)
-      - NPxG-G              = NPxG - (Goals - PK)
+      - G-NPxG              = (Goals - PK) - NPxG
 
     Returns an empty DataFrame if no data exists. Includes a 'Team Total'
     row appended at the bottom, same convention as the category tables.
@@ -3171,7 +3171,7 @@ def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.Dat
     out_cols = [
         "Player", "Position",
         "Shots", "NP Goals", "NPxG", "NPxG (Per 90)", "PS-xG",
-        "Shots (Per 90)", "xG/Shot", "Conversion", "NPxG-G",
+        "Shots (Per 90)", "xG/Shot", "Conversion", "G-NPxG",
         "Right Foot", "Left Foot", "Header",
     ]
 
@@ -3252,7 +3252,7 @@ def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.Dat
             "Shots (Per 90)": _per90(t["Shots"], minutes),
             "xG/Shot": round(npxg / shots, 2) if shots else 0.00,
             "Conversion": round(goals_np / shots * 100, 1) if shots else 0.0,
-            "NPxG-G": round(npxg - goals_np, 2),
+            "G-NPxG": round(goals_np - npxg, 2),
             "Right Foot": bc["Right Foot"],
             "Left Foot": bc["Left Foot"],
             "Header": bc["Header"],
@@ -3265,7 +3265,7 @@ def fetch_team_season_shooting(db: DB, team, season, competition=None) -> pd.Dat
 
     # --- 4. Team Total row ---
     team_total = {"Player": "Team Total", "Position": "-"}
-    _DECIMAL_SHOOTING = {"NPxG", "PS-xG", "NPxG-G", "xG/Shot"}
+    _DECIMAL_SHOOTING = {"NPxG", "PS-xG", "G-NPxG", "xG/Shot"}
     for c in out_cols:
         if c in ("Player", "Position"):
             continue
@@ -3421,6 +3421,13 @@ def fetch_league_season_defensive_locations(db: DB, season, competition=None) ->
     """League-wide Defensive Action Locations leaderboard - see _fetch_league_season_table()'s own docstring."""
     return _fetch_league_season_table(
         db, season, competition, fetch_team_season_defensive_locations, _DEFENSIVE_LOCATIONS_COLUMNS[0]
+    )
+
+
+def fetch_league_season_shooting(db: DB, season, competition=None) -> pd.DataFrame:
+    """League-wide Shooting leaderboard - see _fetch_league_season_table()'s own docstring."""
+    return _fetch_league_season_table(
+        db, season, competition, fetch_team_season_shooting, "Shots"
     )
 
 

@@ -261,9 +261,9 @@ def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_lin
     """
     Custom HTML table for the Shooting stats table, with sortable column
     headers (same _apply_sort_from_query()/_build_sort_href() mechanism as
-    General Stats) and per-cell color coding on the NPxG-G column:
-    dark green when > 0.00 (overperforming xG), dark red when < 0.00
-    (underperforming xG), default color when exactly 0.00.
+    General Stats) and per-cell color coding on the G-NPxG column:
+    dark green when > 0.00 (outscoring xG), dark red when < 0.00
+    (underscoring xG), default color when exactly 0.00.
 
     The 'Team Total' row is pinned at the bottom, excluded from sorting,
     same as every other table on this page.
@@ -284,7 +284,7 @@ def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_lin
     df = pd.concat([sortable_rows, total_row], ignore_index=True)
 
     columns = list(df.columns)
-    _DECIMAL_COLS = {"NPxG", "PS-xG", "NPxG (Per 90)", "Shots (Per 90)", "xG/Shot", "NPxG-G"}
+    _DECIMAL_COLS = {"NPxG", "PS-xG", "NPxG (Per 90)", "Shots (Per 90)", "xG/Shot", "G-NPxG"}
 
     # Header row
     header_cells = []
@@ -329,8 +329,8 @@ def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_lin
                 cell_html = f"{val:.1f}%"
             elif col in _DECIMAL_COLS and isinstance(val, (int, float)) and not isinstance(val, bool):
                 cell_html = f"{val:.2f}"
-                # NPxG-G color coding
-                if col == "NPxG-G":
+                # G-NPxG color coding
+                if col == "G-NPxG":
                     if val > 0.005:
                         extra_style = "color:#1a7a1a;"  # dark green
                     elif val < -0.005:
@@ -2285,11 +2285,136 @@ def _render_player_stats_table(key, title, df, per90_cols):
             st.rerun()
 
 
+_PLAYER_STATS_SHOOTING_PER90_COLS = ["Shots", "NP Goals", "NPxG", "PS-xG"]
+
+# Columns from fetch_team_season_shooting() that are baked-in rates or
+# ratios and should be DROPPED on the league-wide Player Stats tab (that
+# tab has its own Per 90 toggle that converts the raw columns instead).
+_SHOOTING_DROP_FOR_LEAGUE = {"NPxG (Per 90)", "Shots (Per 90)"}
+
+_SHOOTING_DECIMAL_COLS = {"NPxG", "PS-xG", "G-NPxG", "xG/Shot", "NPxG (Per 90)", "Shots (Per 90)"}
+
+
+def _render_player_stats_shooting_table(key, title, df, per90_cols,
+                                        minutes_lookup, team_available_minutes):
+    """
+    Shooting table on the league-wide Player Stats tab - same subheader/
+    Per 90 toggle/sort-by/pagination pattern as _render_player_stats_table(),
+    but uses custom HTML instead of st.dataframe so the G-NPxG column can
+    show per-cell text color (dark green > 0, dark red < 0).
+    """
+    header_col, toggle_col = st.columns([5, 1])
+    with header_col:
+        st.subheader(title)
+    with toggle_col:
+        show_per90 = st.toggle(
+            "Per 90", key=f"player_stats_per90_{key}",
+            help=f"Converts to (stat / Minutes) x 90 rates, limited to players with at least "
+                 f"{int(_PLAYER_STATS_MIN_MINUTES_FRACTION * 100)}% of their own club's available "
+                 f"minutes this season.",
+        )
+    if show_per90:
+        df = _convert_to_per90_league(df, minutes_lookup, team_available_minutes, per90_cols)
+        st.caption(
+            f"Only players with at least {int(_PLAYER_STATS_MIN_MINUTES_FRACTION * 100)}% of their "
+            "own club's available minutes this season are shown."
+        )
+        if df.empty:
+            st.info("No players meet the minimum-minutes threshold for this league/season.")
+            return
+    elif df.empty:
+        st.info("No data saved yet for this league/season.")
+        return
+
+    sortable_cols = [c for c in df.columns if c != "Position"]
+    default_sort_col = per90_cols[0] if per90_cols and per90_cols[0] in sortable_cols else (
+        sortable_cols[0] if sortable_cols else None
+    )
+    sort_col_key = f"{key}_sort_col"
+    sort_dir_key = f"{key}_sort_asc"
+    if sort_col_key not in st.session_state or st.session_state[sort_col_key] not in sortable_cols:
+        st.session_state[sort_col_key] = default_sort_col
+
+    sort_col_widget, sort_dir_widget, _spacer = st.columns([2, 1, 3])
+    with sort_col_widget:
+        sort_col = st.selectbox("Sort by", sortable_cols, key=sort_col_key)
+    with sort_dir_widget:
+        ascending = st.checkbox(
+            "Ascending", key=sort_dir_key,
+            help="Off (default) shows highest first - on shows lowest first.",
+        )
+
+    df = df.sort_values(sort_col, ascending=ascending, na_position="last", kind="mergesort")
+
+    rows_key = f"{key}_rows_shown"
+    rows_shown = st.session_state.get(rows_key, _PLAYER_STATS_ROWS_PER_PAGE)
+    display_df = df.head(rows_shown).reset_index(drop=True)
+    if "Team" in display_df.columns:
+        display_df["Team"] = display_df["Team"].map(_team_abbreviation)
+
+    columns = list(display_df.columns)
+    all_decimal = set(_SHOOTING_DECIMAL_COLS)
+    if show_per90:
+        all_decimal |= set(per90_cols)
+
+    # Header
+    header_cells = []
+    for col in columns:
+        align = "left" if col in ("Player", "Team", "Position") else "right"
+        header_cells.append(
+            f'<th style="padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; '
+            f'color:#333; text-align:{align}; white-space:nowrap;">{html.escape(col)}</th>'
+        )
+
+    # Body
+    body_rows = []
+    for _, r in display_df.iterrows():
+        cells = []
+        for col in columns:
+            val = r[col]
+            align = "left" if col in ("Player", "Team", "Position") else "right"
+            extra = ""
+            if pd.isna(val):
+                cell_html = "-"
+            elif col == "Conversion" and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.1f}%"
+            elif col in all_decimal and isinstance(val, (int, float)) and not isinstance(val, bool):
+                cell_html = f"{val:.2f}"
+                if col == "G-NPxG":
+                    if val > 0.005:
+                        extra = "color:#1a7a1a;"
+                    elif val < -0.005:
+                        extra = "color:#b91c1c;"
+            else:
+                cell_html = html.escape(str(val))
+            cells.append(
+                f'<td style="padding:6px 14px; border:1px solid #ddd; text-align:{align}; '
+                f'white-space:nowrap; {extra}">{cell_html}</td>'
+            )
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(f"""
+    <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead><tr>{"".join(header_cells)}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption(
+        "Use the \"Sort by\" dropdown above to re-rank every player in the league by a different stat."
+    )
+    if rows_shown < len(df):
+        if st.button(f"Show More ({rows_shown} of {len(df)})", key=f"{key}_show_more"):
+            st.session_state[rows_key] = rows_shown + _PLAYER_STATS_ROWS_PER_PAGE
+            st.rerun()
+
+
 def _render_player_stats_tab(db):
     """
-    League-wide "Player Stats" tab - every one of the Team Page's own 5
-    season-cumulative tables (General Stats/Possession/Passing/Defensive
-    Actions/Defensive Action Locations), but covering every team in a
+    League-wide "Player Stats" tab - every one of the Team Page's own 6
+    season-cumulative tables (General Stats/Shooting/Possession/Passing/
+    Defensive Actions/Defensive Action Locations), but covering every team in a
     chosen League+Season at once instead of just one club, so it works as
     a real league-leaders board. Built on top of history_db.fetch_league_
     season_*() (see those functions' own docstrings) - each one already
@@ -2355,6 +2480,18 @@ def _render_player_stats_tab(db):
         "player_stats_general", "General Stats",
         _totals_or_per90(general_stats, _PLAYER_STATS_GENERAL_PER90_COLS, "player_stats_general"),
         _PLAYER_STATS_GENERAL_PER90_COLS,
+    )
+
+    st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
+    shooting = hdb.fetch_league_season_shooting(db, season, competition=league)
+    if not shooting.empty:
+        # Drop the baked-in per-90 columns - the league page has its own
+        # Per 90 toggle that converts the raw stat columns instead.
+        shooting = shooting[[c for c in shooting.columns if c not in _SHOOTING_DROP_FOR_LEAGUE]]
+    _render_player_stats_shooting_table(
+        "player_stats_shooting", "Shooting",
+        shooting, _PLAYER_STATS_SHOOTING_PER90_COLS,
+        minutes_lookup, team_available_minutes,
     )
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
@@ -2993,7 +3130,7 @@ def _render_team_page(db, team, season=None):
     # Shooting table - season-cumulative per-player shooting stats drawn
     # from fm_scoring (Shots, Goals, NPxG, PS-xG) and the shots table
     # (body part counts). Placed between Match Log and Possession as
-    # requested. Custom HTML table (not st.dataframe) because the NPxG-G
+    # requested. Custom HTML table (not st.dataframe) because the G-NPxG
     # column needs per-cell text color (dark green > 0, dark red < 0).
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
     st.subheader("Shooting")
