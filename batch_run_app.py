@@ -258,8 +258,8 @@ if matches:
         "expect a browser window to pop up for every match's FotMob half."
     )
     dcol1, dcol2 = st.columns(2)
-    min_delay = dcol1.number_input("Minimum delay between matches (seconds)", min_value=0, value=15)
-    max_delay = dcol2.number_input("Maximum delay between matches (seconds)", min_value=0, value=45)
+    min_delay = dcol1.number_input("Minimum delay between matches (seconds)", min_value=0, value=7)
+    max_delay = dcol2.number_input("Maximum delay between matches (seconds)", min_value=0, value=25)
     if max_delay < min_delay:
         st.warning("Maximum delay is less than minimum delay - using minimum delay for both.")
         max_delay = min_delay
