@@ -93,8 +93,8 @@ if st.button("Scan fixtures", type="primary"):
     if team_fixtures_url.strip():
         try:
             fixtures_status = st.empty()
-            fixtures_status.write("Scanning all months (this may take a minute)...")
-            all_matches = wr.get_all_fixture_urls(
+            fixtures_status.write("Scanning team fixtures page...")
+            all_matches = wr.get_team_fixture_urls(
                 team_fixtures_url.strip(), only_finished=only_finished,
                 status_cb=fixtures_status.write,
             )

@@ -665,14 +665,23 @@ def _parse_matches_from_page_source(page_source, only_finished=True):
     return results, raw_count
 
 
-def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
+def get_team_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
     """
-    Scrape ALL months of a WhoScored fixtures page in a single browser
-    session - keeps clicking the previous-month arrow until there are no
-    more months, collecting every match found along the way.
+    Scrape a WhoScored TEAM fixtures page (e.g.
+    https://www.whoscored.com/teams/32/fixtures/england-manchester-united).
 
-    Designed for the team bulk app, where you want a full season's worth
-    of matches from one team's fixture list rather than a single month.
+    Team fixture pages have a completely different HTML structure from the
+    league/competition fixtures pages that get_fixture_urls() handles:
+    - All matches for the season are shown on ONE page (no month navigation)
+    - Each match is a '<div class="... item divtable-row ..." data-id="<match_id>">'
+    - Dates are in DD-MM-YY format inside '<div class="... date ...">'
+    - Team names are in '<a class="team-link">' inside home/away divs
+    - Match URLs are in '<a class="horiz-match-link ...">' with href to /live/ pages
+    - Upcoming matches have no match href (empty)
+
+    Confirmed against a real Man Utd fixtures page (debug_team_fixtures.html,
+    2026-10-26): 48 rows, dates like "11-01-26" (DD-MM-YY), scores like
+    "1 : 2", upcoming matches have result_a=None.
 
     Returns the same list-of-dicts format as get_fixture_urls().
     """
@@ -689,82 +698,113 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
         )
         _accept_fixtures_cookie_banner(driver)
 
-        # Wait for match cards or the calendar to actually render — the
-        # page is JS-heavy and page_source grabbed too early returns a
-        # skeleton with no match cards at all.
+        # Wait for match rows to render
         try:
             WebDriverWait(driver, 15).until(
                 lambda d: d.find_elements(
-                    By.CSS_SELECTOR,
-                    "[class*='Match-module_match__'], "
-                    "[class*='Calendar-module'], "
-                    "[id='dayChangeBtn-prev']"
+                    By.CSS_SELECTOR, ".divtable-row.item"
                 )
             )
         except Exception:
-            _status("Warning: timed out waiting for match cards to render.")
-        # Extra settle time for JS hydration
+            _status("Warning: timed out waiting for fixture rows to render.")
         time.sleep(2)
 
-        # Collect from the default month first
-        all_results = []
-        seen_urls = set()
-        month_num = 0
-        consecutive_empty = 0
-
-        current_label = _current_calendar_month_label(driver)
-        _status(f"Reading matches from {current_label or 'default month'}...")
         page_source = driver.page_source
-        matches, raw = _parse_matches_from_page_source(page_source, only_finished)
-        for m in matches:
-            if m["match_url"] not in seen_urls:
-                all_results.append(m)
-                seen_urls.add(m["match_url"])
-        _status(f"  {current_label or 'Default'}: {len(matches)} match(es) (raw cards: {raw})")
 
-        # If the default month had no matches at all, dump debug HTML
-        if raw == 0:
-            debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_page.html")
+    soup = BeautifulSoup(page_source, "html.parser")
+
+    # Each match is a divtable-row with a data-id attribute
+    rows = soup.find_all(
+        "div",
+        class_=lambda c: c and "divtable-row" in c and "item" in c,
+        attrs={"data-id": True},
+    )
+    _status(f"Found {len(rows)} fixture row(s) on the page.")
+
+    if not rows:
+        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_team_fixtures.html")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(page_source)
+            _status(f"No rows found - page HTML saved to {debug_path}")
+        except Exception:
+            pass
+
+    results = []
+    for row in rows:
+        # --- Match URL ---
+        # The horizontal-display score link has the /live/ URL
+        result_div = row.find(
+            "div",
+            class_=lambda c: (c and "result" in c and "divtable-data" in c
+                              and "form" not in c),
+        )
+        result_a = (
+            result_div.find("a", class_=lambda c: c and "match-link" in c)
+            if result_div else None
+        )
+        href = result_a.get("href", "").strip() if result_a else ""
+        if not href:
+            # No match URL = upcoming/unplayed match
+            if only_finished:
+                continue
+            # For unplayed matches, try the stacked-score link or the
+            # form-fixtures link as fallback
+            fallback_a = row.find("a", class_=lambda c: c and "match-link" in c)
+            if fallback_a:
+                href = fallback_a.get("href", "").strip()
+            if not href:
+                continue
+        match_url = href if href.startswith("http") else f"https://www.whoscored.com{href}"
+
+        # --- Date (DD-MM-YY) ---
+        date_div = row.find("div", class_=lambda c: c and "date" in c)
+        raw_date = date_div.get_text(strip=True) if date_div else None
+        # Convert DD-MM-YY to a readable format
+        parsed_date = None
+        if raw_date:
             try:
-                with open(debug_path, "w", encoding="utf-8") as f:
-                    f.write(page_source)
-                _status(f"No match cards found on default month - page HTML saved to {debug_path}")
+                parts = raw_date.split("-")
+                if len(parts) == 3:
+                    day, month, year = parts
+                    year_full = f"20{year}" if len(year) == 2 else year
+                    parsed_date = f"{year_full}-{month}-{day}"
             except Exception:
-                pass
+                parsed_date = raw_date
 
-        # Keep clicking back until the arrow fails
-        while True:
-            month_num += 1
-            try:
-                new_label = _click_prev_month(driver)
-                _status(f"Navigated to {new_label} (month {month_num} back)...")
-                # Small wait for content to settle after month change
-                time.sleep(1)
-                page_source = driver.page_source
-                matches, raw = _parse_matches_from_page_source(page_source, only_finished)
-                new_count = 0
-                for m in matches:
-                    if m["match_url"] not in seen_urls:
-                        all_results.append(m)
-                        seen_urls.add(m["match_url"])
-                        new_count += 1
-                _status(f"  {new_label}: {new_count} new match(es) (raw cards: {raw})")
-                if raw == 0:
-                    consecutive_empty += 1
-                    if consecutive_empty >= 2:
-                        # Two consecutive months with zero match cards =
-                        # past the start of this team's data
-                        _status("Two consecutive empty months - stopping scan.")
-                        break
-                else:
-                    consecutive_empty = 0
-            except RuntimeError:
-                # _click_prev_month failed = no more months to go back to
-                _status(f"Reached earliest available month after {month_num - 1} back-clicks.")
-                break
+        # --- Team names (horizontal display) ---
+        home_div = row.find(
+            "div",
+            class_=lambda c: (c and "home" in c and "horizontal" in c),
+        )
+        away_div = row.find(
+            "div",
+            class_=lambda c: (c and "away" in c and "horizontal" in c),
+        )
+        home_a = home_div.find("a", class_="team-link") if home_div else None
+        away_a = away_div.find("a", class_="team-link") if away_div else None
+        home_name = home_a.get_text(strip=True) if home_a else None
+        away_name = away_a.get_text(strip=True) if away_a else None
 
-    _status(f"Total: {len(all_results)} match(es) collected.")
-    return all_results
+        if not (home_name and away_name):
+            continue
+
+        # --- Status (finished vs upcoming) ---
+        score_text = result_a.get_text(strip=True) if result_a else ""
+        is_finished = bool(score_text and ":" in score_text)
+        if only_finished and not is_finished:
+            continue
+
+        results.append({
+            "match_url": match_url,
+            "home_name": home_name,
+            "away_name": away_name,
+            "status": score_text if is_finished else "(upcoming)",
+            "date": parsed_date or raw_date,
+        })
+
+    _status(f"Total: {len(results)} match(es) collected.")
+    return results
 
 
 # ============================================================
