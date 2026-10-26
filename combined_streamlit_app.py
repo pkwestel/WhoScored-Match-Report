@@ -252,6 +252,8 @@ if st.button("Generate Combined Report", type="primary"):
                 "n_ws_events": len(df),
                 "n_fm_shots": len(shots_df),
                 "fm_debug_log": fm_debug_buf.getvalue(),
+                "ws_url": ws_url.strip(),
+                "fm_url": fm_url.strip(),
             }
 
         except Exception as e:

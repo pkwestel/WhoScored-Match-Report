@@ -219,6 +219,13 @@ if matches:
                 matches[i]["already_saved_date"] = row_date_iso
                 if already:
                     n_found += 1
+                    # Pre-fill FotMob URL from database if auto-match didn't
+                    # find one (or wasn't run) — saves having to hunt for it
+                    # again when re-running matches after algorithm changes.
+                    if isinstance(already, dict):
+                        saved_fm = already.get("fm_url", "")
+                        if saved_fm and not m.get("fm_url"):
+                            matches[i]["fm_url"] = saved_fm
         st.session_state["tbulk_matches"] = matches
         st.success(f"{n_found} of {len(matches)} match(es) already in the database.")
 

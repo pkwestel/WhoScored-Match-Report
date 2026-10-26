@@ -182,6 +182,8 @@ def init_schema(db: DB):
             fm_shots      INTEGER,
             referee       TEXT,
             matchweek     TEXT,
+            ws_url        TEXT,
+            fm_url        TEXT,
             scraped_at    TEXT
         )
     """)
@@ -199,6 +201,16 @@ def init_schema(db: DB):
         db.rollback()
     try:
         db.execute("ALTER TABLE matches ADD COLUMN matchweek TEXT")
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute("ALTER TABLE matches ADD COLUMN ws_url TEXT")
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute("ALTER TABLE matches ADD COLUMN fm_url TEXT")
         db.commit()
     except Exception:
         db.rollback()
@@ -379,11 +391,12 @@ def init_schema(db: DB):
 # Publish (upsert) helpers
 # ============================================================
 def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match_date=None,
-                  ws_events=None, fm_shots=None, referee=None, matchweek=None):
+                  ws_events=None, fm_shots=None, referee=None, matchweek=None,
+                  ws_url=None, fm_url=None):
     db.execute("""
         INSERT INTO matches (match_id, competition, match_date, home_team, away_team,
-                              ws_events, fm_shots, referee, matchweek, scraped_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              ws_events, fm_shots, referee, matchweek, ws_url, fm_url, scraped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(match_id) DO UPDATE SET
             competition = excluded.competition,
             match_date  = excluded.match_date,
@@ -393,10 +406,13 @@ def upsert_match(db: DB, match_id, home_team, away_team, competition=None, match
             fm_shots    = excluded.fm_shots,
             referee     = excluded.referee,
             matchweek   = excluded.matchweek,
+            ws_url      = excluded.ws_url,
+            fm_url      = excluded.fm_url,
             scraped_at  = excluded.scraped_at
     """, (str(match_id), competition, match_date, home_team, away_team,
           ws_events, fm_shots, referee,
           str(matchweek) if matchweek is not None else None,
+          ws_url, fm_url,
           datetime.now(timezone.utc).isoformat()))
 
 
@@ -596,7 +612,7 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
                     touches_df: pd.DataFrame = None,
                     competition=None, match_date=None, ws_events=None, fm_shots=None, referee=None,
-                    matchweek=None):
+                    matchweek=None, ws_url=None, fm_url=None):
     """
     One-call orchestrator for a full match publish, wrapped in a single
     transaction (all-or-nothing - if any part fails, nothing is written).
@@ -627,7 +643,7 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
                 db.execute(f"DELETE FROM {_table} WHERE match_id = ?", (_stale_id,))
 
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
-                     fm_shots, referee, matchweek)
+                     fm_shots, referee, matchweek, ws_url=ws_url, fm_url=fm_url)
         # A re-save of an already-published match is meant to be a full
         # replace, not a merge: every child table below is keyed on tuples
         # like (match_id, team, player, minute, second, x, y) or similar, so

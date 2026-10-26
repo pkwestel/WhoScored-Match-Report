@@ -50,7 +50,8 @@ def find_existing_match(db_url, home_name, away_name, match_date_iso):
     Defensive Action Height's formula update earlier in this project) by
     just checking the box yourself.
 
-    Returns False (never found) on any database error - a connection
+    Returns a dict with {'found': True, 'fm_url': ..., 'ws_url': ...} when
+    found, or False (never found) on any database error - a connection
     hiccup here should never block you from running matches, just leave
     the duplicate check inconclusive rather than crashing the batch runner
     over it.
@@ -72,7 +73,11 @@ def find_existing_match(db_url, home_name, away_name, match_date_iso):
         if (cr.canonical_team_name(row.get("home_team", "")) == target_home
                 and cr.canonical_team_name(row.get("away_team", "")) == target_away
                 and str(row.get("match_date", "")) == str(match_date_iso)):
-            return True
+            return {
+                'found': True,
+                'fm_url': row.get('fm_url', ''),
+                'ws_url': row.get('ws_url', ''),
+            }
     return False
 
 
@@ -631,6 +636,8 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
             ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
             referee=report.get("referee"),
             matchweek=report.get("matchweek"),
+            ws_url=report.get("ws_url"),
+            fm_url=report.get("fm_url"),
         )
     finally:
         db.close()

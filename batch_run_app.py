@@ -213,6 +213,12 @@ if matches:
                 matches[i]["already_saved_date"] = row_date_iso
                 if already:
                     n_found += 1
+                    # Pre-fill FotMob URL from database if auto-match didn't
+                    # find one — saves having to hunt for it when re-running.
+                    if isinstance(already, dict):
+                        saved_fm = already.get("fm_url", "")
+                        if saved_fm and not m.get("fm_url"):
+                            matches[i]["fm_url"] = saved_fm
                     # Un-check its "Run" box now that we know it's a duplicate -
                     # this only takes effect if the widget hasn't been created
                     # yet this session; if it already has a value, setting the
