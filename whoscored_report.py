@@ -26,11 +26,13 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     to convert the 0-100 normalized x/y coordinates into yards.
   - Progressive pass: a completed, OPEN PLAY pass that moves the ball at
     least 10 yards closer to the opponent's goal than the most-advanced
-    point reached in that team's previous six completed passes (a rolling
-    window that is NOT reset by turnovers), OR any completed, open play
-    pass into the penalty area. Corners, free kicks, throw-ins, goal kicks,
-    and keeper throws can never count as progressive (they still feed the
-    rolling baseline). Passes starting in the defending 40% of the pitch
+    point reached in that team's previous six ball-advancement events — a
+    rolling window of completed passes AND carries that is NOT reset by
+    turnovers — OR any completed, open play pass into the penalty area.
+    Corners, free kicks, throw-ins, goal kicks, and keeper throws can
+    never count as progressive (they still feed the rolling baseline).
+    Carries also feed the baseline so a short pass after a long carry is
+    not falsely flagged. Passes starting in the defending 40% of the pitch
     are excluded, unless they end in the box.
   - Progressive carry: WhoScored/Opta data has no explicit "carry" event
     (unlike StatsBomb-sourced data), so carries are inferred using the same
@@ -1125,6 +1127,76 @@ def _pass_receiver_map(df):
     return receiver.where(valid)
 
 
+def _precompute_carry_positions(df):
+    """Pre-compute carry end-positions from the full event stream.
+
+    Uses the same detection logic as compute_carries() (same-team gap
+    between consecutive events, skipping TakeOns/Fouls, 3-60m distance,
+    1-10s elapsed, same period) but returns only what the progressive-pass
+    rolling window needs: a list of (insertion_index, team, end_dist)
+    tuples sorted by insertion_index.
+
+    insertion_index is the original-df index of the DESTINATION event (nxt),
+    i.e. where the carry ends.  Feeding its end_dist into the rolling
+    window before that event is processed ensures the baseline reflects the
+    ball's actual position after the carry.
+    """
+    d = _add_cumulative_mins(df)
+    n = len(d)
+    carry_positions = []
+
+    for idx in range(n - 1):
+        cur = d.iloc[idx]
+        cur_team = cur['teamId']
+
+        # Forward-look: skip TakeOns, unsuccessful Challenges, Fouls
+        j = idx + 1
+        nxt = None
+        while j < n:
+            cand = d.iloc[j]
+            if (cand['type.displayName'] == 'TakeOn'
+                    and cand['outcomeType.displayName'] == 'Successful'):
+                j += 1
+                continue
+            if ((cand['type.displayName'] == 'TakeOn'
+                    and cand['outcomeType.displayName'] == 'Unsuccessful')
+                    or (cand['teamId'] != cur_team
+                        and cand['type.displayName'] == 'Challenge'
+                        and cand['outcomeType.displayName'] == 'Unsuccessful')
+                    or (cand['type.displayName'] == 'Foul')):
+                j += 1
+                continue
+            nxt = cand
+            break
+        if nxt is None:
+            continue
+
+        same_team = cur_team == nxt['teamId']
+        not_ball_touch = cur['type.displayName'] != 'BallTouch'
+        if pd.isna(cur.get('endX')) or pd.isna(cur.get('endY')):
+            continue
+        dx = 105 * (cur['endX'] - nxt['x']) / 100
+        dy = 68 * (cur['endY'] - nxt['y']) / 100
+        far_enough = dx ** 2 + dy ** 2 >= CARRY_MIN_LEN ** 2
+        not_too_far = dx ** 2 + dy ** 2 <= CARRY_MAX_LEN ** 2
+        dt = 60 * (nxt['cumulative_mins'] - cur['cumulative_mins'])
+        min_time = dt >= CARRY_MIN_DUR
+        same_phase = dt < CARRY_MAX_DUR
+        same_period = cur['period.displayName'] == nxt['period.displayName']
+
+        if not (same_team and not_ball_touch and far_enough and not_too_far
+                and min_time and same_phase and same_period):
+            continue
+
+        # Carry end position = start position of destination event
+        ex, ey = nxt['x'], nxt['y']
+        end_dist = dist_to_goal_yd(ex, ey)
+        carry_positions.append((nxt.name, cur['team'], end_dist))
+
+    carry_positions.sort(key=lambda t: t[0])
+    return carry_positions
+
+
 def _compute_progressive_flags(df):
     """
     Shared core of the progressive-pass rolling-window algorithm, factored
@@ -1143,10 +1215,22 @@ def _compute_progressive_flags(df):
     measure "progress" (an attacking team's furthest reach doesn't reset
     just because the delivery was a set piece), but they can never
     themselves be counted as a progressive pass.
+
+    Carries also feed the rolling baseline: if a player carries the ball
+    25 yards up the field, the baseline should reflect that advancement so
+    a subsequent short pass isn't falsely flagged as progressive. Carry
+    detection uses the same logic as compute_carries() (same-team gap,
+    3-60m distance, 1-10s elapsed).
     """
     receiver_map = _pass_receiver_map(df)
     work = df[~df['type.displayName'].isin(BOUNDARY_TYPES)].copy()
     work = work.sort_index()
+
+    # Pre-compute carry end-positions from the full event stream so we can
+    # interleave them into the rolling window at the right chronological
+    # point (before the destination event is processed as a pass).
+    carry_positions = _precompute_carry_positions(df)
+    carry_ptr = 0  # pointer into the sorted carry_positions list
 
     rolling = {t: deque(maxlen=PROGRESSIVE_ROLLING_WINDOW) for t in work['team'].dropna().unique()}
     prog_pass_records = []
@@ -1156,6 +1240,18 @@ def _compute_progressive_flags(df):
         team = row['team']
         if pd.isna(team):
             continue
+
+        # Drain any carries whose destination event is at or before this
+        # event's index — their ball-advancement should already be in the
+        # rolling window before we evaluate this event.
+        while carry_ptr < len(carry_positions):
+            c_idx, c_team, c_end_dist = carry_positions[carry_ptr]
+            if c_idx > row.name:
+                break
+            if c_team in rolling:
+                rolling[c_team].append(c_end_dist)
+            carry_ptr += 1
+
         if (row['type.displayName'] == 'Pass' and row['outcomeType.displayName'] == 'Successful'
                 and pd.notna(row['endX']) and pd.notna(row['endY'])):
             start_dist = dist_to_goal_yd(row['x'], row['y'])
@@ -3455,10 +3551,11 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         "",
         f"Progressive pass: a completed, OPEN PLAY pass that moves the ball at least {PROGRESSIVE_YARD_THRESHOLD} yards"
         f" closer to the opponent's goal than the most-advanced point reached in that team's previous"
-        f" {PROGRESSIVE_ROLLING_WINDOW} completed passes (rolling window, not reset by turnovers), OR any"
-        " completed, open play pass into the penalty area. Corners, free kicks (direct/indirect), throw-ins,"
-        " goal kicks, and keeper throws can never be counted as a progressive pass, though they still feed"
-        " into the rolling baseline used to measure another pass's progress. Passes starting in the"
+        f" {PROGRESSIVE_ROLLING_WINDOW} ball-advancement events (completed passes AND carries; rolling window,"
+        " not reset by turnovers), OR any completed, open play pass into the penalty area. Corners, free kicks"
+        " (direct/indirect), throw-ins, goal kicks, and keeper throws can never be counted as a progressive"
+        " pass, though they still feed into the rolling baseline. Carries also feed the baseline so a short"
+        " pass after a long carry is not falsely flagged. Passes starting in the"
         f" defending {DEFENSIVE_START_CUTOFF}% of the pitch are excluded unless they end in the box.",
         "",
         "Progressive carry: WhoScored/Opta data has no explicit carry event, so carries are inferred using"
