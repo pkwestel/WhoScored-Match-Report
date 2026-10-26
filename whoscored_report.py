@@ -2128,6 +2128,62 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     return chains_df, team_sequences
 
 
+def _assign_strict_possession_ids(df):
+    """
+    Strict possession assignment for xG Buildup / xG Chain: a possession
+    changes the moment ANY event belongs to the other team. This follows
+    the standard analytics definition (StatsBomb / ASA: "uninterrupted by
+    the opposing team attempting any of those same actions") rather than
+    the looser sliding-window used by compute_sequences() (which tolerates
+    a stray opponent touch within a window of N events, and was tuned for
+    "10+ pass sequences" where that tolerance is desirable).
+
+    Administrative events (cards, substitutions, formation changes, etc.)
+    are ignored - they don't change possession. Goals and period changes
+    always start a new possession.
+
+    Returns a DataFrame aligned to df's original index with columns
+    'possession_id' and 'possession_team'.
+    """
+    work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
+    work = work.sort_index()
+    orig_index = work.index
+    work = work.reset_index(drop=True)
+
+    if len(work) == 0:
+        return pd.DataFrame(columns=['possession_id', 'possession_team'], index=df.index)
+
+    # Period ordering for detecting period changes
+    work['period_num'] = work['period.displayName'].map(PERIOD_ORDER)
+    work['goal_flag'] = (work['type.displayName'] == 'Goal').astype(int)
+
+    possession_ids = np.empty(len(work), dtype=float)
+    possession_teams = np.empty(len(work), dtype=object)
+    current_pid = 1
+    current_team = work.at[0, 'team']
+    possession_ids[0] = current_pid
+    possession_teams[0] = current_team
+
+    for i in range(1, len(work)):
+        team = work.at[i, 'team']
+        period_changed = (work.at[i, 'period_num'] != work.at[i - 1, 'period_num'])
+        after_goal = (work.at[i - 1, 'goal_flag'] == 1)
+
+        if team != current_team or period_changed or after_goal:
+            current_pid += 1
+            current_team = team
+
+        possession_ids[i] = current_pid
+        possession_teams[i] = current_team
+
+    work['possession_id'] = possession_ids
+    work['possession_team'] = possession_teams
+    work.index = orig_index
+    result = work[['possession_id', 'possession_team']].reindex(df.index)
+    result = result.ffill().bfill()
+    return result
+
+
 def compute_xg_buildup(df, sca_out, shot_xg):
     """
     xGBuildup per player: for every possession that produces a shot,
@@ -2139,6 +2195,11 @@ def compute_xg_buildup(df, sca_out, shot_xg):
     earlier touches in the same possession, they receive no xG Buildup
     credit for it. A possession with multiple shots adds each shot's own
     xG to every eligible player's running total.
+
+    Uses a STRICT possession definition (any opponent event breaks the
+    chain) following the standard StatsBomb/ASA approach, rather than the
+    looser sliding-window used by compute_sequences() (which was tuned
+    for "10+ pass sequences" and tolerates stray opponent touches).
 
     df: the full match event dataframe (same one passed to compute_sca()).
     sca_out: compute_sca()'s own output, computed with minute_min=
@@ -2175,7 +2236,7 @@ def compute_xg_buildup(df, sca_out, shot_xg):
             "which preserves sca_out's row order exactly)."
         )
 
-    possession = _assign_possession_ids(df)
+    possession = _assign_strict_possession_ids(df)
     buildup_totals = {}
     touched_players = set()
 
