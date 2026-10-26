@@ -689,10 +689,28 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
         )
         _accept_fixtures_cookie_banner(driver)
 
+        # Wait for match cards or the calendar to actually render — the
+        # page is JS-heavy and page_source grabbed too early returns a
+        # skeleton with no match cards at all.
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: d.find_elements(
+                    By.CSS_SELECTOR,
+                    "[class*='Match-module_match__'], "
+                    "[class*='Calendar-module'], "
+                    "[id='dayChangeBtn-prev']"
+                )
+            )
+        except Exception:
+            _status("Warning: timed out waiting for match cards to render.")
+        # Extra settle time for JS hydration
+        time.sleep(2)
+
         # Collect from the default month first
         all_results = []
         seen_urls = set()
         month_num = 0
+        consecutive_empty = 0
 
         current_label = _current_calendar_month_label(driver)
         _status(f"Reading matches from {current_label or 'default month'}...")
@@ -702,7 +720,17 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
             if m["match_url"] not in seen_urls:
                 all_results.append(m)
                 seen_urls.add(m["match_url"])
-        _status(f"  {current_label or 'Default'}: {len(matches)} match(es)")
+        _status(f"  {current_label or 'Default'}: {len(matches)} match(es) (raw cards: {raw})")
+
+        # If the default month had no matches at all, dump debug HTML
+        if raw == 0:
+            debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_page.html")
+            try:
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    f.write(page_source)
+                _status(f"No match cards found on default month - page HTML saved to {debug_path}")
+            except Exception:
+                pass
 
         # Keep clicking back until the arrow fails
         while True:
@@ -710,6 +738,8 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
             try:
                 new_label = _click_prev_month(driver)
                 _status(f"Navigated to {new_label} (month {month_num} back)...")
+                # Small wait for content to settle after month change
+                time.sleep(1)
                 page_source = driver.page_source
                 matches, raw = _parse_matches_from_page_source(page_source, only_finished)
                 new_count = 0
@@ -718,11 +748,16 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
                         all_results.append(m)
                         seen_urls.add(m["match_url"])
                         new_count += 1
-                _status(f"  {new_label}: {new_count} new match(es)")
-                if new_count == 0 and raw == 0:
-                    # Empty month - likely past the start of this team's data
-                    _status("Empty month reached - stopping scan.")
-                    break
+                _status(f"  {new_label}: {new_count} new match(es) (raw cards: {raw})")
+                if raw == 0:
+                    consecutive_empty += 1
+                    if consecutive_empty >= 2:
+                        # Two consecutive months with zero match cards =
+                        # past the start of this team's data
+                        _status("Two consecutive empty months - stopping scan.")
+                        break
+                else:
+                    consecutive_empty = 0
             except RuntimeError:
                 # _click_prev_month failed = no more months to go back to
                 _status(f"Reached earliest available month after {month_num - 1} back-clicks.")
