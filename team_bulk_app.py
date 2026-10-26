@@ -14,8 +14,8 @@ WORKFLOW
 --------
 1. Paste a WhoScored team fixtures URL (e.g.
    https://www.whoscored.com/teams/32/fixtures/england-manchester-united)
-   and set how many months back to scan. The app opens Chrome, navigates
-   back month by month, and collects every finished match it finds.
+   The app opens Chrome, automatically navigates back through every
+   month, and collects every finished match it finds.
 
 2. Review the match list - each row shows the WhoScored URL, date (from
    WhoScored), and a FotMob URL field for you to paste in. Checkboxes
@@ -53,7 +53,7 @@ st.set_page_config(page_title="Team Bulk Runner", layout="wide")
 st.title("Team Bulk Runner")
 st.caption(
     "Bulk-scrape a team's full season from their WhoScored fixtures page. "
-    "Paste the team's fixtures URL, scan back through as many months as you need, "
+    "Paste the team's fixtures URL, it'll scan through every month automatically, "
     "paste in FotMob URLs, and run + save them all."
 )
 
@@ -79,16 +79,7 @@ team_fixtures_url = st.text_input(
          "batch app's league fixtures - same page structure, same caveats.",
 )
 
-col_a, col_b = st.columns(2)
-months_back = col_a.number_input(
-    "Months to scan back",
-    min_value=0, value=1, step=1,
-    help="How many months to go back from WhoScored's default view. WhoScored's fixtures page "
-         "shows one month at a time - set this to however many months of matches you want to "
-         "collect. 0 = just the default month, 1 = default + one month back, etc. Each month "
-         "click takes a few seconds.",
-)
-only_finished = col_b.checkbox("Only finished matches", value=True)
+only_finished = st.checkbox("Only finished matches", value=True)
 
 manual_urls_text = st.text_area(
     "Paste additional WhoScored match URLs (one per line)",
@@ -102,33 +93,12 @@ if st.button("Scan fixtures", type="primary"):
     if team_fixtures_url.strip():
         try:
             fixtures_status = st.empty()
-
-            # Scan the default month first
-            fixtures_status.write("Scanning default month...")
-            month_matches = wr.get_fixture_urls(
+            fixtures_status.write("Scanning all months (this may take a minute)...")
+            all_matches = wr.get_all_fixture_urls(
                 team_fixtures_url.strip(), only_finished=only_finished,
-                months_back=0, status_cb=fixtures_status.write,
+                status_cb=fixtures_status.write,
             )
-            all_matches.extend(month_matches)
-            fixtures_status.write(f"Default month: {len(month_matches)} match(es)")
-
-            # Scan additional months by going back one more each time
-            for m in range(1, int(months_back) + 1):
-                fixtures_status.write(f"Scanning month {m} back...")
-                try:
-                    month_matches = wr.get_fixture_urls(
-                        team_fixtures_url.strip(), only_finished=only_finished,
-                        months_back=m, status_cb=fixtures_status.write,
-                    )
-                    # Deduplicate against what we already have
-                    existing_urls = {match["match_url"] for match in all_matches}
-                    new_matches = [mm for mm in month_matches if mm["match_url"] not in existing_urls]
-                    all_matches.extend(new_matches)
-                    fixtures_status.write(f"Month {m} back: {len(new_matches)} new match(es)")
-                except Exception as e:
-                    st.warning(f"Month {m} back failed ({e}) - continuing with what we have.")
-
-            st.success(f"Found {len(all_matches)} match(es) total across {int(months_back) + 1} month(s).")
+            st.success(f"Found {len(all_matches)} match(es) total.")
         except Exception as e:
             st.warning(f"Fixture scan failed ({e}) - use the manual paste box below.")
             with st.expander("Full error"):

@@ -559,6 +559,41 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
                 _status(f"Navigated back to {new_label} ({i + 1}/{months_back})...")
         page_source = driver.page_source
 
+    results, raw_count = _parse_matches_from_page_source(page_source, only_finished)
+
+    if raw_count == 0:
+        # Dump the page HTML to a file for debugging when auto-detect fails -
+        # makes it possible to fix the selectors without another live run.
+        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_page.html")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(page_source)
+            debug_msg = f" Page HTML saved to {debug_path} for debugging."
+        except Exception:
+            debug_msg = ""
+        raise RuntimeError(
+            "Couldn't find any match cards on this page (looked for div elements "
+            "whose class starts with 'Match-module_match__'). WhoScored may have "
+            "changed this page's structure since get_fixture_urls() was last "
+            "checked against it, or this URL doesn't show a fixture list at "
+            "all. Paste match URLs manually instead of using auto-detect for "
+            "now, and share the page's HTML so this can be fixed against real "
+            "data." + debug_msg
+        )
+
+    return results
+
+
+def _parse_matches_from_page_source(page_source, only_finished=True):
+    """
+    Extract match dicts from a WhoScored fixtures page's HTML source.
+    Factored out of get_fixture_urls() so it can be called multiple times
+    (once per month) by get_all_fixture_urls() without duplicating the
+    parsing logic.
+
+    Returns (matches, raw_count) where matches is the filtered list and
+    raw_count is how many match cards were found before filtering.
+    """
     soup = BeautifulSoup(page_source, "html.parser")
 
     def _class_startswith(prefix):
@@ -581,12 +616,9 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
         if not any(c.startswith("Match-module_match__") for c in classes):
             continue
 
-        # This div IS one match card - extract everything from its own
-        # subtree. See this function's docstring for the confirmed real
-        # markup this is built against.
         stats_a = el.find("a", id=lambda i: i and i.startswith("statsBtn-"))
         if stats_a is None or not stats_a.get("href"):
-            continue  # couldn't find a reliable match URL for this card - skip rather than guess
+            continue
         href = stats_a["href"].split("#", 1)[0].rstrip("/")
         match_url = href if href.startswith("http") else f"https://www.whoscored.com{href}"
         if match_url in seen_urls:
@@ -613,31 +645,10 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
             "away_name": away_name,
         })
 
-    if not all_matches:
-        # Dump the page HTML to a file for debugging when auto-detect fails -
-        # makes it possible to fix the selectors without another live run.
-        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_page.html")
-        try:
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(page_source)
-            debug_msg = f" Page HTML saved to {debug_path} for debugging."
-        except Exception:
-            debug_msg = ""
-        raise RuntimeError(
-            "Couldn't find any match cards on this page (looked for div elements "
-            "whose class starts with 'Match-module_match__'). WhoScored may have "
-            "changed this page's structure since get_fixture_urls() was last "
-            "checked against it, or this URL doesn't show a fixture list at "
-            "all. Paste match URLs manually instead of using auto-detect for "
-            "now, and share the page's HTML so this can be fixed against real "
-            "data." + debug_msg
-        )
-
+    raw_count = len(all_matches)
     results = []
     for m in all_matches:
         if not (m["home_name"] and m["away_name"]):
-            # Couldn't confidently pair this match link with two team names -
-            # skip rather than guess at who played.
             continue
         status_word = (m["status"] or "").upper()
         is_finished = status_word in _FIXTURE_FINISHED_STATUS_WORDS
@@ -651,7 +662,74 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
             "date": m["date"],
         })
 
-    return results
+    return results, raw_count
+
+
+def get_all_fixture_urls(fixtures_url, only_finished=True, status_cb=None):
+    """
+    Scrape ALL months of a WhoScored fixtures page in a single browser
+    session - keeps clicking the previous-month arrow until there are no
+    more months, collecting every match found along the way.
+
+    Designed for the team bulk app, where you want a full season's worth
+    of matches from one team's fixture list rather than a single month.
+
+    Returns the same list-of-dicts format as get_fixture_urls().
+    """
+    def _status(msg):
+        print(msg)
+        if status_cb:
+            status_cb(msg)
+
+    _status(f"Opening {fixtures_url} ...")
+    with get_driver(track_network=True) as driver:
+        driver.get(fixtures_url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        _accept_fixtures_cookie_banner(driver)
+
+        # Collect from the default month first
+        all_results = []
+        seen_urls = set()
+        month_num = 0
+
+        current_label = _current_calendar_month_label(driver)
+        _status(f"Reading matches from {current_label or 'default month'}...")
+        page_source = driver.page_source
+        matches, raw = _parse_matches_from_page_source(page_source, only_finished)
+        for m in matches:
+            if m["match_url"] not in seen_urls:
+                all_results.append(m)
+                seen_urls.add(m["match_url"])
+        _status(f"  {current_label or 'Default'}: {len(matches)} match(es)")
+
+        # Keep clicking back until the arrow fails
+        while True:
+            month_num += 1
+            try:
+                new_label = _click_prev_month(driver)
+                _status(f"Navigated to {new_label} (month {month_num} back)...")
+                page_source = driver.page_source
+                matches, raw = _parse_matches_from_page_source(page_source, only_finished)
+                new_count = 0
+                for m in matches:
+                    if m["match_url"] not in seen_urls:
+                        all_results.append(m)
+                        seen_urls.add(m["match_url"])
+                        new_count += 1
+                _status(f"  {new_label}: {new_count} new match(es)")
+                if new_count == 0 and raw == 0:
+                    # Empty month - likely past the start of this team's data
+                    _status("Empty month reached - stopping scan.")
+                    break
+            except RuntimeError:
+                # _click_prev_month failed = no more months to go back to
+                _status(f"Reached earliest available month after {month_num - 1} back-clicks.")
+                break
+
+    _status(f"Total: {len(all_results)} match(es) collected.")
+    return all_results
 
 
 # ============================================================
