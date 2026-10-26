@@ -65,6 +65,7 @@ import time
 import traceback
 import datetime
 
+from dateutil import parser as _dateparser
 import streamlit as st
 
 import whoscored_report as wr
@@ -158,10 +159,11 @@ matches = st.session_state.get("batch_matches", [])
 if matches:
     st.header("Step 2: Review matches and match each to FotMob")
     default_date = st.date_input(
-        "Default match date",
+        "Default match date (fallback for manually pasted URLs with no date)",
         value=datetime.date.today(),
-        help="Used to look up each match's FotMob page, and as the default 'Match date' saved "
-             "to the database. Override per row below for matches played on a different day "
+        help="Fallback date for manually pasted match URLs that have no date from WhoScored. "
+             "Auto-detected matches use the date from WhoScored's fixtures page instead. "
+             "Override per row below for matches played on a different day "
              "(e.g. Saturday vs Sunday fixtures in the same batch).",
     )
 
@@ -243,11 +245,18 @@ if matches:
                     "default. Check the box below only if you want to re-scrape and overwrite it (e.g. "
                     "after a stat-calculation fix)."
                 )
+            # Parse the WhoScored date if available, otherwise fall back to default_date
+            row_default_date = default_date
+            if m.get("date"):
+                try:
+                    row_default_date = _dateparser.parse(m["date"]).date()
+                except Exception:
+                    pass  # unparseable date string - fall back to default_date
             cols = st.columns([0.6, 2.2, 2.2, 1.4])
-            cols[0].checkbox("Run", value=not m.get("already_saved", False), key=f"batch_include_{i}")
+            cols[0].checkbox("Run", value=False, key=f"batch_include_{i}")
             cols[1].text_input("WhoScored URL", value=m["match_url"], key=f"batch_ws_url_{i}")
             cols[2].text_input("FotMob URL", value=m.get("fm_url") or "", key=f"batch_fm_url_{i}")
-            cols[3].date_input("Match date", value=default_date, key=f"batch_date_{i}")
+            cols[3].date_input("Match date", value=row_default_date, key=f"batch_date_{i}")
 
     # ---------------------------------------------------------------------------
     # Step 3: run the batch
