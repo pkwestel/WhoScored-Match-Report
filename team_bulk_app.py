@@ -57,14 +57,31 @@ st.caption(
     "paste in FotMob URLs, and run + save them all."
 )
 
-_ROW_KEY_PREFIXES = ("tbulk_include_", "tbulk_ws_url_", "tbulk_fm_url_", "tbulk_date_")
+_ROW_KEY_PREFIX = "tbulk_row_"
+
+
+def _scan_id():
+    """Return the current scan's unique ID, used to namespace all per-row
+    widget keys so a new scan can never collide with stale widget state
+    from a previous scan."""
+    return st.session_state.get("tbulk_scan_id", "0")
+
+
+def _row_key(name, i):
+    """Build a widget key that's unique to this scan + row index."""
+    return f"{_ROW_KEY_PREFIX}{_scan_id()}_{name}_{i}"
 
 
 def _clear_row_widget_state():
-    """Drop any leftover per-row widget state from a previous match list."""
+    """Drop any leftover per-row widget state from a previous match list
+    and bump the scan ID so the next set of widgets gets fresh keys."""
     for key in list(st.session_state.keys()):
-        if key.startswith(_ROW_KEY_PREFIXES):
+        if key.startswith(_ROW_KEY_PREFIX):
             del st.session_state[key]
+    # Bump the scan ID so new widgets can't collide with any lingering
+    # Streamlit internal state from the old scan's widget keys
+    import uuid
+    st.session_state["tbulk_scan_id"] = uuid.uuid4().hex[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +204,7 @@ if matches:
     if st.button("Check for already-saved matches"):
         n_found = 0
         for i, m in enumerate(matches):
-            row_date_key = f"tbulk_date_{i}"
-            row_date = st.session_state.get(row_date_key, default_date)
+            row_date = st.session_state.get(_row_key("date", i), default_date)
             if m.get("date"):
                 try:
                     row_date = _dateparser.parse(m["date"]).date()
@@ -238,10 +254,10 @@ if matches:
             default_checked = False
 
             cols = st.columns([0.6, 2.2, 2.2, 1.4])
-            cols[0].checkbox("Run", value=default_checked, key=f"tbulk_include_{i}")
-            cols[1].text_input("WhoScored URL", value=m["match_url"], key=f"tbulk_ws_url_{i}")
-            cols[2].text_input("FotMob URL", value=m.get("fm_url") or "", key=f"tbulk_fm_url_{i}")
-            cols[3].date_input("Match date", value=row_default_date, key=f"tbulk_date_{i}")
+            cols[0].checkbox("Run", value=default_checked, key=_row_key("include", i))
+            cols[1].text_input("WhoScored URL", value=m["match_url"], key=_row_key("ws_url", i))
+            cols[2].text_input("FotMob URL", value=m.get("fm_url") or "", key=_row_key("fm_url", i))
+            cols[3].date_input("Match date", value=row_default_date, key=_row_key("date", i))
 
     # ---------------------------------------------------------------------------
     # Step 3: run the batch
@@ -262,11 +278,11 @@ if matches:
     if st.button("Run batch", type="primary", key="tbulk_run"):
         to_run = []
         for i in range(len(matches)):
-            if not st.session_state.get(f"tbulk_include_{i}", False):
+            if not st.session_state.get(_row_key("include", i), False):
                 continue
-            fm_url = st.session_state.get(f"tbulk_fm_url_{i}", "").strip()
-            ws_url = st.session_state.get(f"tbulk_ws_url_{i}", matches[i]["match_url"]).strip()
-            match_date = st.session_state.get(f"tbulk_date_{i}", default_date)
+            fm_url = st.session_state.get(_row_key("fm_url", i), "").strip()
+            ws_url = st.session_state.get(_row_key("ws_url", i), matches[i]["match_url"]).strip()
+            match_date = st.session_state.get(_row_key("date", i), default_date)
             to_run.append({"ws_url": ws_url, "fm_url": fm_url, "match_date": match_date,
                            "row_index": i})
 
