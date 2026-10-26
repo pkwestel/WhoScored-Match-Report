@@ -69,14 +69,19 @@ def find_existing_match(db_url, home_name, away_name, match_date_iso):
 
     target_home = cr.canonical_team_name(home_name)
     target_away = cr.canonical_team_name(away_name)
+    target_date = str(match_date_iso)[:10]  # just the YYYY-MM-DD part
     for _, row in existing.iterrows():
+        # match_date in the DB can be either a plain date "2026-10-25" or
+        # a kickoff datetime "2026-10-25 15:00" — compare only the first
+        # 10 characters (the date portion) so both formats match.
+        db_date = str(row.get("match_date", ""))[:10]
         if (cr.canonical_team_name(row.get("home_team", "")) == target_home
                 and cr.canonical_team_name(row.get("away_team", "")) == target_away
-                and str(row.get("match_date", "")) == str(match_date_iso)):
+                and db_date == target_date):
             return {
                 'found': True,
-                'fm_url': row.get('fm_url', ''),
-                'ws_url': row.get('ws_url', ''),
+                'fm_url': row.get('fm_url') or '',
+                'ws_url': row.get('ws_url') or '',
             }
     return False
 
