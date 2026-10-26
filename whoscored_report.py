@@ -1959,124 +1959,16 @@ def compute_passing(df, player_totals, sca_out):
 SEQUENCE_MIN_PASSES = 10
 SEQUENCE_ADMIN_EXCLUDE_TYPES = {'OffsideGiven', 'CornerAwarded', 'Card', 'FormationChange',
                                  'Start', 'SubstitutionOff', 'SubstitutionOn', 'FormationSet', 'End'}
-# These two parameters (window size, required same-team run within it) were
-# tuned empirically against a published benchmark (insight90.streamlit.app's
-# "Passes per Sequence" / "10+ Pass Sequences" chart for this same match) -
-# see compute_sequences() docstring.
-SEQUENCE_CHAIN_CHECK = 5
-SEQUENCE_SUC_EVTS_IN_CHAIN = 2
-
-
-def _assign_possession_ids(df, chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN):
-    """
-    Shared possession-chain assignment underlying compute_sequences() (see
-    that function's own docstring for the windowed-flip algorithm and where
-    the chain_check/suc_evts_in_chain tuning came from) - factored out so
-    other callers (xGChain/xGBuildup below) can get a possession_id/
-    possession_team per event without duplicating this logic.
-
-    Returns a DataFrame aligned to df's OWN original index, with two
-    columns: 'possession_id' and 'possession_team'. Every row of df gets a
-    value, including the admin rows excluded from the chain computation
-    itself ('Start', substitutions, cards, etc.) - those are filled in via
-    ffill/bfill against df's natural event order, same technique already
-    used below for the "continuation" rows within the chain computation.
-    """
-    work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
-    work = work.sort_index()
-    orig_index = work.index
-    work = work.reset_index(drop=True)
-
-    teams_sorted = sorted(work['team'].dropna().unique())
-    min_team = teams_sorted[0] if teams_sorted else None
-    work['team_binary'] = (work['team'] == min_team).astype(int)
-    work['goal_binary'] = (work['type.displayName'] == 'Goal').astype(int).diff().apply(
-        lambda x: 1 if x < 0 else 0)
-    work['period_num'] = work['period.displayName'].map(PERIOD_ORDER)
-
-    chain = pd.DataFrame(index=work.index)
-    same_team_cols = []
-    for n in range(1, chain_check):
-        col = f'evt_{n}_same_team'
-        same_team_cols.append(col)
-        chain[col] = abs(work['team_binary'].diff(periods=-n))
-        chain[col] = chain[col].apply(lambda x: 1 if x > 1 else x)
-    chain['enough_evt_same_team'] = chain[same_team_cols].sum(axis=1).apply(
-        lambda x: 1 if x < chain_check - suc_evts_in_chain else 0)
-    chain['enough_evt_same_team'] = chain['enough_evt_same_team'].diff(periods=1)
-    chain.loc[chain['enough_evt_same_team'] < 0, :] = 0
-
-    chain['upcoming_ko'] = 0
-    ko_mask = (work['goal_binary'] == 1) | (work['period_num'].diff().fillna(0) != 0)
-    for ko_pos in work.index[ko_mask]:
-        lo = max(0, ko_pos - suc_evts_in_chain)
-        chain.iloc[lo:ko_pos, chain.columns.get_loc('upcoming_ko')] = 1
-
-    chain['valid_pos_start'] = chain['enough_evt_same_team'].fillna(0) - chain['upcoming_ko'].fillna(0)
-    chain['kick_off_period_change'] = work['period_num'].diff(periods=1)
-    chain['kick_off_goal'] = work['goal_binary']
-    chain.loc[chain['kick_off_period_change'] == 1, 'valid_pos_start'] = 1
-    chain.loc[chain['kick_off_goal'] == 1, 'valid_pos_start'] = 1
-
-    chain['team'] = work['team']
-    if len(chain) == 0:
-        return pd.DataFrame(columns=['possession_id', 'possession_team'], index=df.index)
-
-    first_idx = chain.index[0]
-    chain.loc[first_idx, 'valid_pos_start'] = 1
-    chain.loc[first_idx, 'possession_id'] = 1
-    chain.loc[first_idx, 'possession_team'] = chain.loc[first_idx, 'team']
-
-    valid_starts = chain.index[chain['valid_pos_start'] > 0]
-    possession_id = 2
-    for i in range(1, len(valid_starts)):
-        cur_pos, prev_pos = valid_starts[i], valid_starts[i - 1]
-        current_team = chain.loc[cur_pos, 'team']
-        previous_team = chain.loc[prev_pos, 'team']
-        if (previous_team == current_team and chain.loc[cur_pos, 'kick_off_goal'] != 1
-                and chain.loc[cur_pos, 'kick_off_period_change'] != 1):
-            chain.loc[cur_pos, 'possession_id'] = np.nan
-        else:
-            chain.loc[cur_pos, 'possession_id'] = possession_id
-            chain.loc[cur_pos, 'possession_team'] = current_team
-            possession_id += 1
-
-    work['possession_id'] = chain['possession_id']
-    work['possession_team'] = chain['possession_team']
-    work[['possession_id', 'possession_team']] = work[['possession_id', 'possession_team']].ffill().bfill()
-
-    work.index = orig_index
-    result = work[['possession_id', 'possession_team']].reindex(df.index)
-    result = result.ffill().bfill()
-    return result
 
 
 def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
-                       chain_check=SEQUENCE_CHAIN_CHECK, suc_evts_in_chain=SEQUENCE_SUC_EVTS_IN_CHAIN,
                        minute_min=None, minute_max=None):
     """
-    Possession sequences per team, using the same windowed possession-chain
-    algorithm found in the open-source WhoScored report notebooks behind
-    insight90.streamlit.app (a "get_possession_chains" style approach,
-    originally from jakeyk11's tutorials). Rather than ending a sequence the
-    instant the opponent's team touches the ball, this looks at a sliding
-    window of the next `chain_check - 1` events: possession only flips to
-    the other team once at least `suc_evts_in_chain` of those events belong
-    to them - so a single missed tackle, aerial, or loose touch doesn't end
-    a sequence, but a sustained spell by the other side does. Sequences also
-    always restart at goals and at the start of a new period (half/extra
-    time). `chain_check=5, suc_evts_in_chain=2` were chosen by testing
-    several combinations against insight90's published numbers for this
-    match (Man Utd 25 sequences of 10+ passes, average 9 passes/sequence;
-    Crystal Palace 10 sequences of 10+, average 6) - this combination came
-    closest (24/13 sequences, 9.69/5.97 average) without an exact source to
-    match bit-for-bit. "Passes" here counts ALL pass attempts in a sequence,
-    not just completed ones - that was also the closest-matching definition.
+    Possession sequences per team: count passes per uninterrupted possession
+    chain, where any opponent event breaks the chain. Goals and period
+    changes also always start a new possession.
 
-    The actual per-event possession_id/possession_team assignment now lives
-    in _assign_possession_ids() above (shared with xGChain/xGBuildup) -
-    this function just aggregates that into per-chain pass counts/team
-    sequence totals, exactly as before the refactor.
+    "Passes" counts ALL pass attempts in a sequence, not just completed ones.
 
     minute_min/minute_max: optional minute-range filter for a windowed
     report. The possession_id assignment always runs on the FULL, unsliced
@@ -2092,7 +1984,7 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     including chains_df's column shape (the 'minute' column is new but
     additive, so no existing caller breaks).
     """
-    possession = _assign_possession_ids(df, chain_check=chain_check, suc_evts_in_chain=suc_evts_in_chain)
+    possession = _assign_possession_ids(df)
 
     work = df[~df['type.displayName'].isin(SEQUENCE_ADMIN_EXCLUDE_TYPES)].copy()
     work['possession_id'] = possession['possession_id']
@@ -2128,15 +2020,12 @@ def compute_sequences(df, min_passes=SEQUENCE_MIN_PASSES,
     return chains_df, team_sequences
 
 
-def _assign_strict_possession_ids(df):
+def _assign_possession_ids(df):
     """
-    Strict possession assignment for xG Buildup / xG Chain: a possession
-    changes the moment ANY event belongs to the other team. This follows
-    the standard analytics definition (StatsBomb / ASA: "uninterrupted by
-    the opposing team attempting any of those same actions") rather than
-    the looser sliding-window used by compute_sequences() (which tolerates
-    a stray opponent touch within a window of N events, and was tuned for
-    "10+ pass sequences" where that tolerance is desirable).
+    Possession assignment: a possession changes the moment ANY event belongs
+    to the other team. This follows the standard analytics definition
+    (StatsBomb / ASA: "uninterrupted by the opposing team attempting any of
+    those same actions").
 
     Administrative events (cards, substitutions, formation changes, etc.)
     are ignored - they don't change possession. Goals and period changes
@@ -2196,10 +2085,8 @@ def compute_xg_buildup(df, sca_out, shot_xg):
     credit for it. A possession with multiple shots adds each shot's own
     xG to every eligible player's running total.
 
-    Uses a STRICT possession definition (any opponent event breaks the
-    chain) following the standard StatsBomb/ASA approach, rather than the
-    looser sliding-window used by compute_sequences() (which was tuned
-    for "10+ pass sequences" and tolerates stray opponent touches).
+    Uses a strict possession definition (any opponent event breaks the
+    chain) following the standard StatsBomb/ASA approach.
 
     df: the full match event dataframe (same one passed to compute_sca()).
     sca_out: compute_sca()'s own output, computed with minute_min=
@@ -2236,7 +2123,7 @@ def compute_xg_buildup(df, sca_out, shot_xg):
             "which preserves sca_out's row order exactly)."
         )
 
-    possession = _assign_strict_possession_ids(df)
+    possession = _assign_possession_ids(df)
     buildup_totals = {}
     touched_players = set()
 
@@ -3497,18 +3384,10 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " Passing tab (open-play only, as defined there); Total SCA is the sum of each player's SCA column;"
         " Progressive Passes is the sum of each player's Progressive Passes column from the Passing tab.",
         "",
-        "10+ Pass Sequences / Avg Passes per Sequence: possession sequences are built using the same"
-        " windowed 'possession chain' algorithm found in the open-source WhoScored report notebooks behind"
-        " insight90.streamlit.app - rather than ending a sequence the instant the opponent's team touches"
-        " the ball, possession only flips to the other team once there's a sustained run of their events"
-        " within a sliding window (a single missed tackle, aerial, or loose touch doesn't end a sequence,"
-        " but a real spell of opponent possession does); sequences also always restart at goals and at the"
-        " start of a new period. The window size and required run-length were tuned by testing several"
-        " combinations against insight90's published numbers for this exact match (25 sequences of 10+"
-        " passes at a 9-pass average for Man Utd, 10 sequences at a 6-pass average for Crystal Palace) -"
-        " the closest match found (24/13 sequences, 9.69/5.97 average) is close but not an exact"
-        " reproduction, since the exact source implementation isn't public. 'Passes' counts ALL pass"
-        " attempts in a sequence (not just completed ones), which was also the closest-matching definition."
+        "10+ Pass Sequences / Avg Passes per Sequence: possession sequences are built by splitting the"
+        " match into uninterrupted chains of one team's events - any event by the opposing team starts a"
+        " new chain. Sequences also always restart at goals and at the start of a new period. 'Passes'"
+        " counts ALL pass attempts in a sequence (not just completed ones)."
         " 10+ Pass Sequences counts sequences with at least 10 passes; Avg Passes per Sequence is the mean"
         " across ALL of a team's sequences for the match, not just the long ones.",
         "",
