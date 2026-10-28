@@ -100,14 +100,32 @@ league_fixtures_url = st.text_input(
 
 only_finished = st.checkbox("Only finished matches", value=True, key="lbulk_only_finished")
 
-max_months = st.number_input(
-    "Maximum months to scan",
-    min_value=1, value=14, step=1,
-    help="Safety cap on how many months to navigate back through. A typical league season "
-         "spans ~11 months (Aug to May/Jun), so 14 gives comfortable headroom. The scan "
-         "also stops early if it finds two consecutive months with no new matches.",
-    key="lbulk_max_months",
-)
+# Month range selector — season-ordered (Aug through Jul)
+_SEASON_MONTHS = [
+    "August", "September", "October", "November", "December",
+    "January", "February", "March", "April", "May", "June", "July",
+]
+# Map month name → calendar month number (1-12)
+_MONTH_NUM = {
+    "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6, "July": 7,
+}
+
+mcol1, mcol2 = st.columns(2)
+from_month = mcol1.selectbox("From month", _SEASON_MONTHS, index=0, key="lbulk_from_month")
+to_month = mcol2.selectbox("To month", _SEASON_MONTHS, index=9, key="lbulk_to_month")  # default May
+
+
+def _month_range_set(from_name, to_name):
+    """Build the set of month numbers (1-12) covered by a season-ordered range."""
+    start_idx = _SEASON_MONTHS.index(from_name)
+    end_idx = _SEASON_MONTHS.index(to_name)
+    if end_idx >= start_idx:
+        return {_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(start_idx, end_idx + 1)}
+    # Wraps (e.g. from=November to=February)
+    return ({_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(start_idx, len(_SEASON_MONTHS))} |
+            {_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(0, end_idx + 1)})
+
 
 manual_urls_text = st.text_area(
     "Paste additional WhoScored match URLs (one per line)",
@@ -122,10 +140,11 @@ if st.button("Scan all months", type="primary", key="lbulk_scan"):
     if league_fixtures_url.strip():
         try:
             fixtures_status = st.empty()
+            allowed_months = _month_range_set(from_month, to_month)
             all_matches = wr.get_all_fixture_urls(
                 league_fixtures_url.strip(),
                 only_finished=only_finished,
-                max_months=int(max_months),
+                month_range=allowed_months,
                 status_cb=fixtures_status.write,
             )
             st.success(f"Found {len(all_matches)} match(es) across all months.")

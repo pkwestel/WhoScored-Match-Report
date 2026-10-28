@@ -586,7 +586,27 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
     return results
 
 
-def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14, status_cb=None):
+def _parse_month_from_label(label):
+    """
+    Extract the calendar month number (1-12) from WhoScored's calendar
+    label (e.g. "Oct 2026" → 10, "May 2025" → 5). Returns None if
+    the label can't be parsed.
+    """
+    if not label:
+        return None
+    _MONTH_ABBR = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    for token in label.strip().split():
+        key = token.lower().rstrip(".,")[:3]
+        if key in _MONTH_ABBR:
+            return _MONTH_ABBR[key]
+    return None
+
+
+def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14,
+                         month_range=None, status_cb=None):
     """
     Scrape ALL months of a WhoScored league fixtures page, navigating
     backwards from the default month through the entire season.
@@ -595,25 +615,25 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14, status
     offset by months_back), this function keeps clicking WhoScored's "<"
     (previous month) arrow and collecting matches from every month until
     either:
-      - max_months total months have been scanned (default 14, covering a
-        full season plus a couple of buffer months), or
+      - it has scanned every month in month_range (if provided), or
+      - max_months total months have been visited (safety cap), or
       - two consecutive months return zero finished matches (meaning we've
         gone past the start of the season).
 
     Returns the same list-of-dicts format as get_fixture_urls(), with
     matches sorted chronologically (oldest first) and deduplicated by URL.
 
-    fixtures_url: the league's Fixtures/Results page on WhoScored (e.g.
-        https://www.whoscored.com/regions/252/tournaments/2/seasons/10743/
-        stages/24533/fixtures/england-premier-league-2025-2026)
+    fixtures_url: the league's Fixtures/Results page on WhoScored.
 
     only_finished: if True (default), keeps only matches whose status
         token is a recognized "finished" marker (FT, AET, PENS, PEN).
 
-    max_months: safety cap on how many months to scan (default 14). A
-        Premier League season spans ~11 months (Aug to May/Jun), so 14
-        gives comfortable headroom. Increase for competitions with a
-        longer calendar.
+    max_months: safety cap on how many months to scan (default 14).
+
+    month_range: optional set of month numbers (1-12) to collect from.
+        When provided, matches are only collected from months in this set,
+        and the scan stops once it navigates past the earliest month in
+        the range. When None, all months are collected (original behavior).
 
     status_cb: optional callable(str) for progress messages.
     """
@@ -633,36 +653,69 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14, status
         all_matches = []
         seen_urls = set()
         consecutive_empty = 0
+        # Track which months from the range we've seen, so we know when
+        # we've covered the full range and can stop.
+        seen_range_months = set()
+        # How many consecutive months we've been OUTSIDE the range (used
+        # to stop early when we've navigated past the start of the range).
+        consecutive_outside_range = 0
 
         for month_idx in range(max_months):
             current_label = _current_calendar_month_label(driver) or f"(month {month_idx + 1})"
+            current_month_num = _parse_month_from_label(current_label)
             _status(f"Scanning {current_label} ({month_idx + 1}/{max_months})...")
 
-            page_source = driver.page_source
-            month_matches, raw_count = _parse_matches_from_page_source(
-                page_source, only_finished
-            )
+            # Check if this month is in the requested range
+            in_range = (month_range is None or
+                        current_month_num is None or
+                        current_month_num in month_range)
 
-            new_count = 0
-            for m in month_matches:
-                if m["match_url"] not in seen_urls:
-                    seen_urls.add(m["match_url"])
-                    all_matches.append(m)
-                    new_count += 1
+            if in_range:
+                consecutive_outside_range = 0
+                if current_month_num is not None and month_range is not None:
+                    seen_range_months.add(current_month_num)
 
-            _status(f"  {current_label}: {new_count} new match(es) "
-                    f"({raw_count} total on page, {len(all_matches)} cumulative)")
+                page_source = driver.page_source
+                month_matches, raw_count = _parse_matches_from_page_source(
+                    page_source, only_finished
+                )
 
-            if new_count == 0:
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    _status(f"Two consecutive months with no new matches - "
-                            f"stopping scan at {current_label}.")
-                    break
+                new_count = 0
+                for m in month_matches:
+                    if m["match_url"] not in seen_urls:
+                        seen_urls.add(m["match_url"])
+                        all_matches.append(m)
+                        new_count += 1
+
+                _status(f"  {current_label}: {new_count} new match(es) "
+                        f"({raw_count} total on page, {len(all_matches)} cumulative)")
+
+                if new_count == 0:
+                    consecutive_empty += 1
+                    if month_range is None and consecutive_empty >= 2:
+                        _status(f"Two consecutive months with no new matches — "
+                                f"stopping scan at {current_label}.")
+                        break
+                else:
+                    consecutive_empty = 0
             else:
-                consecutive_empty = 0
+                consecutive_outside_range += 1
+                _status(f"  {current_label}: skipped (outside selected range)")
 
-            # Navigate to the previous month (unless this is the last iteration)
+                # If we've already collected from at least one month in
+                # the range and we're now outside it going backwards,
+                # we've passed the start of the range — stop.
+                if seen_range_months and consecutive_outside_range >= 1:
+                    _status(f"Reached {current_label}, past the selected range — "
+                            f"stopping scan.")
+                    break
+
+            # Check if we've covered the full requested range
+            if month_range is not None and seen_range_months == month_range:
+                _status(f"All months in selected range scanned.")
+                break
+
+            # Navigate to the previous month
             if month_idx < max_months - 1:
                 try:
                     new_label = _click_prev_month(driver)
@@ -686,9 +739,8 @@ def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14, status
     all_matches.sort(key=_sort_key)
 
     if not all_matches:
-        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_all_months.html")
         raise RuntimeError(
-            f"Scanned {max_months} month(s) but found no matches. WhoScored's page "
+            "Scanned the selected month range but found no matches. WhoScored's page "
             "structure may have changed, or this URL doesn't show fixtures. "
             "Paste match URLs manually instead."
         )
