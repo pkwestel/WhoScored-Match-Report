@@ -586,6 +586,116 @@ def get_fixture_urls(fixtures_url, only_finished=True, months_back=0, status_cb=
     return results
 
 
+def get_all_fixture_urls(fixtures_url, only_finished=True, max_months=14, status_cb=None):
+    """
+    Scrape ALL months of a WhoScored league fixtures page, navigating
+    backwards from the default month through the entire season.
+
+    Unlike get_fixture_urls() which only reads a single month (optionally
+    offset by months_back), this function keeps clicking WhoScored's "<"
+    (previous month) arrow and collecting matches from every month until
+    either:
+      - max_months total months have been scanned (default 14, covering a
+        full season plus a couple of buffer months), or
+      - two consecutive months return zero finished matches (meaning we've
+        gone past the start of the season).
+
+    Returns the same list-of-dicts format as get_fixture_urls(), with
+    matches sorted chronologically (oldest first) and deduplicated by URL.
+
+    fixtures_url: the league's Fixtures/Results page on WhoScored (e.g.
+        https://www.whoscored.com/regions/252/tournaments/2/seasons/10743/
+        stages/24533/fixtures/england-premier-league-2025-2026)
+
+    only_finished: if True (default), keeps only matches whose status
+        token is a recognized "finished" marker (FT, AET, PENS, PEN).
+
+    max_months: safety cap on how many months to scan (default 14). A
+        Premier League season spans ~11 months (Aug to May/Jun), so 14
+        gives comfortable headroom. Increase for competitions with a
+        longer calendar.
+
+    status_cb: optional callable(str) for progress messages.
+    """
+    def _status(msg):
+        print(msg)
+        if status_cb:
+            status_cb(msg)
+
+    _status(f"Opening {fixtures_url} ...")
+    with get_driver(track_network=True) as driver:
+        driver.get(fixtures_url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        _accept_fixtures_cookie_banner(driver)
+
+        all_matches = []
+        seen_urls = set()
+        consecutive_empty = 0
+
+        for month_idx in range(max_months):
+            current_label = _current_calendar_month_label(driver) or f"(month {month_idx + 1})"
+            _status(f"Scanning {current_label} ({month_idx + 1}/{max_months})...")
+
+            page_source = driver.page_source
+            month_matches, raw_count = _parse_matches_from_page_source(
+                page_source, only_finished
+            )
+
+            new_count = 0
+            for m in month_matches:
+                if m["match_url"] not in seen_urls:
+                    seen_urls.add(m["match_url"])
+                    all_matches.append(m)
+                    new_count += 1
+
+            _status(f"  {current_label}: {new_count} new match(es) "
+                    f"({raw_count} total on page, {len(all_matches)} cumulative)")
+
+            if new_count == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    _status(f"Two consecutive months with no new matches - "
+                            f"stopping scan at {current_label}.")
+                    break
+            else:
+                consecutive_empty = 0
+
+            # Navigate to the previous month (unless this is the last iteration)
+            if month_idx < max_months - 1:
+                try:
+                    new_label = _click_prev_month(driver)
+                    _status(f"Navigated back to {new_label}")
+                except RuntimeError as e:
+                    _status(f"Could not navigate further back: {e}")
+                    break
+
+    _status(f"Scan complete: {len(all_matches)} match(es) found across all months.")
+
+    # Sort chronologically (oldest first) by parsing the date headers
+    def _sort_key(m):
+        if m.get("date"):
+            try:
+                from dateutil import parser as _dp
+                return _dp.parse(m["date"]).date()
+            except Exception:
+                pass
+        return datetime.date.max
+
+    all_matches.sort(key=_sort_key)
+
+    if not all_matches:
+        debug_path = os.path.join(os.path.dirname(__file__) or ".", "debug_fixtures_all_months.html")
+        raise RuntimeError(
+            f"Scanned {max_months} month(s) but found no matches. WhoScored's page "
+            "structure may have changed, or this URL doesn't show fixtures. "
+            "Paste match URLs manually instead."
+        )
+
+    return all_matches
+
+
 def _parse_matches_from_page_source(page_source, only_finished=True):
     """
     Extract match dicts from a WhoScored fixtures page's HTML source.
