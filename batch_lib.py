@@ -647,3 +647,163 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
     finally:
         db.close()
     return match_id
+
+
+# =====================================================================
+# SOFASCORE VARIANT - same pipeline, SofaScore instead of FotMob
+# =====================================================================
+
+def run_combined_report_sofascore(ws_url, ss_url, status_cb=None):
+    """
+    Same as run_combined_report() but uses SofaScore instead of FotMob.
+    Intended for pre-2020-21 historical matches where FotMob data isn't
+    available.
+
+    Returns the same dict shape so build_db_stats() and save_report_to_db()
+    work identically (those functions don't care which source the fm_*
+    fields came from - the dict keys and DataFrame column names are the
+    same either way).
+
+    Missing data (sprints, line-breaking passes) is handled gracefully:
+    empty DataFrames are returned, which flow through the rest of the
+    pipeline as zero-filled columns.
+    """
+    import sofascore_report as sr
+
+    def _status(msg):
+        if status_cb:
+            status_cb(msg)
+
+    # ---- WhoScored ----
+    _status(f"Scraping WhoScored: {ws_url.strip()}")
+    df, match_info = wr.scrape_match(ws_url.strip())
+    ws_home_name = match_info.get("home_name")
+    ws_away_name = match_info.get("away_name")
+    ws_match_json = match_info.get("match_json")
+    ws_match_date = match_info.get("match_date")
+
+    _status(f"WhoScored returned: {ws_home_name} vs {ws_away_name} ({ws_match_date or 'no date'})")
+    _status("Computing WhoScored tables...")
+    _, player_totals, team_totals, progressive_received = wr.compute_progressive_passes(df)
+    passes_received = wr.compute_passes_received(df)
+    passing_pairs = wr.compute_passing_pairs(df)
+    team_carries, player_carries, carries_df = wr.compute_carries(df)
+    sca_out = wr.compute_sca(df)
+    shot_pairs = wr.compute_shot_pairs(sca_out)
+    xt_received = wr.compute_xt_received(df)
+    team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
+                                                      passes_received, progressive_received,
+                                                      xt_received=xt_received)
+    passing_out = wr.compute_passing(df, player_totals, sca_out)
+    chains_df, team_sequences = wr.compute_sequences(df)
+    field_tilt = wr.compute_field_tilt(team_summary)
+    ppda = wr.compute_ppda(df)
+    defensive_stats = wr.compute_defensive_stats(df, match_json=ws_match_json)
+    defensive_actions = wr.compute_defensive_actions(df)
+    defensive_action_location = wr.compute_defensive_action_location(df)
+    corners = wr.compute_corners(df)
+    totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
+                                    chains_df, team_sequences, field_tilt, ppda,
+                                    defensive_stats, corners, ws_home_name, ws_away_name)
+    against_totals = wr.compute_against_totals(totals_out)
+    all_passes = wr.compute_all_passes(df)
+    all_touches = wr.compute_all_touches(df)
+    player_windows_ws = wr.extract_player_windows(df)
+    on_off = wr.compute_on_off(df, player_windows_ws, carries_df)
+
+    # ---- SofaScore ----
+    _status("Opening the SofaScore match page (a real Chrome window will pop up)...")
+    ss_match_data, ss_match_id = sr.scrape_match(ss_url.strip())
+    ss_home_name, ss_away_name = sr.extract_team_names(ss_match_data)
+    referee = sr.extract_referee(ss_match_data)
+    kickoff = sr.extract_kickoff_local_str(ss_match_data)
+    matchweek = sr.extract_matchweek(ss_match_data)
+
+    _status("Computing SofaScore tables...")
+    shots_df = sr.compute_shots(ss_match_data)
+    fm_totals_df = sr.compute_totals(ss_match_data, shots_df, ss_home_name, ss_away_name)
+    player_xa = sr.extract_player_xa(ss_match_data)
+    player_minutes = sr.extract_player_minutes(ss_match_data)
+    player_sprints = sr.extract_player_sprints(ss_match_data)          # always empty
+    player_line_breaking_passes = sr.extract_player_line_breaking_passes(ss_match_data)  # always empty
+    player_lineup = sr.extract_player_age_and_start(ss_match_data)
+    player_cards = sr.extract_player_cards(ss_match_data)
+    player_positions = sr.extract_player_positions(ss_match_data)
+    player_npxg = sr.extract_player_npxg(ss_match_data)
+    shot_breakdowns = sr.compute_shot_breakdowns(
+        shots_df, player_xa, player_minutes, player_sprints, player_line_breaking_passes, player_npxg)
+    player_scoring = sr.compute_player_scoring_stats(
+        ss_match_data, shots_df, player_xa, player_minutes, player_sprints, player_npxg)
+    xg_breakdown = sr.compute_xg_breakdown(shots_df, ss_home_name, ss_away_name)
+    player_windows = sr.extract_player_windows(ss_match_data, player_minutes, shots_df)
+    plus_minus = sr.compute_plus_minus(shots_df, player_windows, ss_home_name, ss_away_name)
+    plus_minus_warning = (
+        "Plus Minus is empty - SofaScore didn't return any lineup/substitution data for this "
+        "match."
+    ) if player_windows.empty else None
+
+    wb_fm = sr.build_workbook(shots_df, fm_totals_df, ss_home_name, ss_away_name, ss_match_id,
+                               shot_breakdowns, xg_breakdown, plus_minus)
+
+    # ---- Merge ----
+    _status("Merging Shot Creating Actions + Shots...")
+    combined_shots = cr.compute_combined_shots(sca_out, shots_df)
+
+    xg_buildup = wr.compute_xg_buildup(df, sca_out, combined_shots['xG'])
+    passing_out = cr.merge_xg_buildup(passing_out, xg_buildup)
+
+    wb_ws = wr.build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
+                               defensive_actions, defensive_action_location, passing_pairs,
+                               ws_home_name, ws_away_name, against_totals, shot_pairs, on_off)
+
+    wb = cr.build_combined_workbook(wb_ws, wb_fm, combined_shots, ws_home_name, ws_away_name)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"{wr.sanitize_filename(ws_home_name)}_vs_{wr.sanitize_filename(ws_away_name)}_combined.xlsx"
+
+    team_name_mismatch = (
+        cr.canonical_team_name(ws_home_name) != cr.canonical_team_name(ss_home_name)
+        or cr.canonical_team_name(ws_away_name) != cr.canonical_team_name(ss_away_name)
+    )
+
+    return {
+        "ws_url": ws_url,
+        "fm_url": ss_url,              # stored in the same field for DB compatibility
+        "ws_home_name": ws_home_name,
+        "ws_away_name": ws_away_name,
+        "ws_match_date": ws_match_date,
+        "fm_home_name": ss_home_name,   # same key names for build_db_stats() compat
+        "fm_away_name": ss_away_name,
+        "referee": referee,
+        "kickoff": kickoff,
+        "matchweek": matchweek,
+        "team_name_mismatch": team_name_mismatch,
+        "totals_out": totals_out,
+        "against_totals": against_totals,
+        "team_summary": team_summary,
+        "player_third": player_third,
+        "passing_out": passing_out,
+        "defensive_actions": defensive_actions,
+        "defensive_action_location": defensive_action_location,
+        "passing_pairs": passing_pairs,
+        "shot_pairs": shot_pairs,
+        "combined_shots": combined_shots,
+        "fm_match_id": ss_match_id,     # same key for DB compat
+        "fm_totals_df": fm_totals_df,
+        "player_scoring": player_scoring,
+        "player_lineup": player_lineup,
+        "player_cards": player_cards,
+        "player_positions": player_positions,
+        "xg_breakdown": xg_breakdown,
+        "shot_breakdowns": shot_breakdowns,
+        "plus_minus": plus_minus,
+        "plus_minus_warning": plus_minus_warning,
+        "all_passes": all_passes,
+        "all_touches": all_touches,
+        "wb_bytes": buf.getvalue(),
+        "filename": filename,
+        "n_ws_events": len(df),
+        "n_fm_shots": len(shots_df),
+    }
