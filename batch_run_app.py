@@ -105,17 +105,30 @@ fixtures_url = st.text_input(
          "box below instead.",
 )
 only_finished = st.checkbox("Only keep matches that look finished", value=True)
-months_back = st.number_input(
-    "Months back from WhoScored's own default",
-    min_value=0, value=0, step=1,
-    help="WhoScored's month-navigation arrows are pure client-side JS - the Fixtures URL above is "
-         "IDENTICAL no matter which month you've clicked back to in your own browser tab (confirmed: "
-         "two real WhoScored URLs, one copied while viewing an earlier month and one while viewing a "
-         "later one, came back byte-for-byte the same). So auto-detect always lands on whatever month "
-         "WhoScored itself defaults to on a fresh page load, regardless of what you'd navigated to. "
-         "Leave at 0 for that default month, or set this to how many months earlier you actually want "
-         "(e.g. 1 for last month) - this clicks WhoScored's own '<' arrow that many times first.",
-)
+
+# Month range selector
+_SEASON_MONTHS = [
+    "August", "September", "October", "November", "December",
+    "January", "February", "March", "April", "May", "June", "July",
+]
+_MONTH_NUM = {
+    "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6, "July": 7,
+}
+
+mcol1, mcol2 = st.columns(2)
+from_month = mcol1.selectbox("From month", _SEASON_MONTHS, index=0, key="batch_from_month")
+to_month = mcol2.selectbox("To month", _SEASON_MONTHS, index=9, key="batch_to_month")
+
+
+def _month_range_set(from_name, to_name):
+    """Build the set of month numbers (1-12) covered by a season-ordered range."""
+    start_idx = _SEASON_MONTHS.index(from_name)
+    end_idx = _SEASON_MONTHS.index(to_name)
+    if end_idx >= start_idx:
+        return {_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(start_idx, end_idx + 1)}
+    return ({_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(start_idx, len(_SEASON_MONTHS))} |
+            {_MONTH_NUM[_SEASON_MONTHS[i]] for i in range(0, end_idx + 1)})
 manual_urls_text = st.text_area(
     "Paste additional (or alternate) WhoScored match URLs, one per line",
     height=100,
@@ -128,11 +141,12 @@ if st.button("Build match list", type="primary"):
     if fixtures_url.strip():
         try:
             fixtures_status = st.empty()
-            matches = wr.get_fixture_urls(
+            allowed_months = _month_range_set(from_month, to_month)
+            matches = wr.get_all_fixture_urls(
                 fixtures_url.strip(), only_finished=only_finished,
-                months_back=int(months_back), status_cb=fixtures_status.write,
+                month_range=allowed_months, status_cb=fixtures_status.write,
             )
-            st.success(f"Auto-detected {len(matches)} match(es) from the fixtures page.")
+            st.success(f"Found {len(matches)} match(es) in {from_month}–{to_month} range.")
         except Exception as e:
             st.warning(f"Auto-detect didn't work ({e}) - continuing with manually pasted URLs only.")
             with st.expander("Full error (share this if you want it fixed)"):
