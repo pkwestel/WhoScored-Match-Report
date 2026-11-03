@@ -3844,8 +3844,17 @@ else:
                 st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(defensive_location_totals))
         elif totals_category == "Team Style":
-            team_style_totals = hdb.fetch_season_team_style_totals(
-                db, competition=selected_league, season=selected_season)
+            ts_mode = st.radio(
+                "View", ["For", "Against"], horizontal=True,
+                key="team_style_for_against",
+                help="'For' = what each team did. 'Against' = what opponents did against each team."
+            )
+            if ts_mode == "For":
+                team_style_totals = hdb.fetch_season_team_style_totals(
+                    db, competition=selected_league, season=selected_season)
+            else:
+                team_style_totals = hdb.fetch_season_team_style_against_totals(
+                    db, competition=selected_league, season=selected_season)
             if team_style_totals.empty:
                 st.info(
                     "No Team Style stats saved yet - publish at least one match with 'Save to Database' "
@@ -3856,10 +3865,11 @@ else:
                 st.dataframe(team_style_totals, use_container_width=False, hide_index=True,
                              height=_no_scroll_height(team_style_totals))
                 st.caption(
-                    "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across this "
-                    "team's saved matches (not summed). 10+ Pass Sequences shows both a season total and "
-                    "a per-game average. Total Number of Sprints and Line Breaking Passes are season "
-                    "totals (summed, not averaged)."
+                    "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across "
+                    "saved matches (not summed). 10+ Pass Sequences shows both a season total and "
+                    "a per-game average. Deep Completions, Total Number of Sprints and Line Breaking "
+                    "Passes are season totals (summed). Toggle 'Against' to see the same stats from "
+                    "the opponent's perspective."
                 )
 
     elif _active_tab == "fixtures":

@@ -1054,6 +1054,7 @@ _ADVANCED_STATS_TABLES = [
         ("PPDA", "ws_totals", "PPDA", lambda v: _fmt_adv_decimal(v, 2)),
         ("10+ Pass Sequences", "ws_totals", "10+ Pass Sequences", _fmt_adv_plain_int),
         ("Passes per Sequence", "ws_totals", "Avg Passes per Sequence", lambda v: _fmt_adv_decimal(v, 2)),
+        ("Deep Completions", "ws_totals", "Deep Completions", _fmt_adv_plain_int),
         ("Def Line Height", "ws_totals", "Defensive Action Height (m)", lambda v: _fmt_adv_metres(v, 1)),
     ]),
     ("Shots", [
@@ -3666,8 +3667,8 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
     saved match regardless of season.
     """
     cols = ["Team", "Field Tilt %", "PPDA", "10+ Pass Sequences (Total)",
-            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Def Line Height (m)",
-            "Total Number of Sprints", "Line Breaking Passes"]
+            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Deep Completions",
+            "Def Line Height (m)", "Total Number of Sprints", "Line Breaking Passes"]
     valid_ids = _match_ids_for_competition(db, competition, season)
     stats = {}
 
@@ -3677,6 +3678,7 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
             "ppda_sum": 0.0, "ppda_n": 0,
             "seq_total": 0, "seq_n": 0,
             "passes_per_seq_sum": 0.0, "passes_per_seq_n": 0,
+            "deep_completions_total": 0,
             "def_line_sum": 0.0, "def_line_n": 0,
             "sprints_total": 0,
             "lbp_total": 0,
@@ -3713,6 +3715,13 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
             if pps is not None:
                 row["passes_per_seq_sum"] += float(pps)
                 row["passes_per_seq_n"] += 1
+
+            dc = ws.get("Deep Completions")
+            if dc is not None:
+                try:
+                    row["deep_completions_total"] += int(round(float(dc)))
+                except (TypeError, ValueError):
+                    pass
 
             dlh = ws.get("Defensive Action Height (m)")
             if dlh is not None:
@@ -3761,6 +3770,145 @@ def fetch_season_team_style_totals(db: DB, competition=None, season=None) -> pd.
             "Passes per Sequence": (
                 round(row["passes_per_seq_sum"] / row["passes_per_seq_n"], 2) if row["passes_per_seq_n"] else 0.0
             ),
+            "Deep Completions": row["deep_completions_total"],
+            "Def Line Height (m)": round(row["def_line_sum"] / row["def_line_n"], 1) if row["def_line_n"] else 0.0,
+            "Total Number of Sprints": row["sprints_total"],
+            "Line Breaking Passes": row["lbp_total"],
+        })
+    return pd.DataFrame(records, columns=cols).sort_values("Team").reset_index(drop=True)
+
+
+def fetch_season_team_style_against_totals(db: DB, competition=None, season=None) -> pd.DataFrame:
+    """
+    'Against' version of the Team Style table: for each team, accumulate
+    the OPPONENT's stats from every match. E.g. a team's "10+ Pass Sequences"
+    against is the sum of 10+ Pass Sequences their opponents achieved across
+    all matches. Rate stats (Field Tilt, PPDA, Passes per Sequence, Def Line
+    Height) are averaged from the opponent's values.
+    """
+    cols = ["Team", "Field Tilt %", "PPDA", "10+ Pass Sequences (Total)",
+            "10+ Pass Sequences (Per Game)", "Passes per Sequence", "Deep Completions",
+            "Def Line Height (m)", "Total Number of Sprints", "Line Breaking Passes"]
+    valid_ids = _match_ids_for_competition(db, competition, season)
+
+    # First pass: group all team_match_stats by match_id
+    match_teams = {}  # match_id -> {team: ws_totals_dict}
+    fm_by_match = {}  # match_id -> {team: fm_totals_dict}
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws = extra.get("ws_totals")
+        fm = extra.get("fm_totals")
+        if ws:
+            match_teams.setdefault(match_id, {})[team] = ws
+        if fm:
+            fm_by_match.setdefault(match_id, {})[team] = fm
+
+    # Line Breaking Passes by match+team (summed from player stats)
+    lbp_by_match_team = {}
+    player_cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, team, extra_json in player_cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        lbp_ns = extra.get("fm_line_breaking_passes")
+        if not lbp_ns:
+            continue
+        lbp = lbp_ns.get("Line Breaking Passes")
+        if lbp is None:
+            continue
+        key = (match_id, team)
+        try:
+            lbp_by_match_team[key] = lbp_by_match_team.get(key, 0) + int(round(float(lbp)))
+        except (TypeError, ValueError):
+            pass
+
+    # Second pass: for each match, assign opponent's stats to each team
+    stats = {}
+
+    def _row(team):
+        return stats.setdefault(team, {
+            "field_tilt_sum": 0.0, "field_tilt_n": 0,
+            "ppda_sum": 0.0, "ppda_n": 0,
+            "seq_total": 0, "seq_n": 0,
+            "passes_per_seq_sum": 0.0, "passes_per_seq_n": 0,
+            "deep_completions_total": 0,
+            "def_line_sum": 0.0, "def_line_n": 0,
+            "sprints_total": 0,
+            "lbp_total": 0,
+        })
+
+    for match_id, teams_ws in match_teams.items():
+        team_list = list(teams_ws.keys())
+        if len(team_list) != 2:
+            continue
+        for i, team in enumerate(team_list):
+            opponent = team_list[1 - i]
+            opp_ws = teams_ws.get(opponent, {})
+            row = _row(team)
+
+            field_tilt = opp_ws.get("Field Tilt %")
+            if field_tilt is not None:
+                row["field_tilt_sum"] += float(field_tilt)
+                row["field_tilt_n"] += 1
+
+            ppda = opp_ws.get("PPDA")
+            if ppda is not None:
+                row["ppda_sum"] += float(ppda)
+                row["ppda_n"] += 1
+
+            seq = opp_ws.get("10+ Pass Sequences")
+            if seq is not None:
+                row["seq_total"] += seq
+                row["seq_n"] += 1
+
+            pps = opp_ws.get("Avg Passes per Sequence")
+            if pps is not None:
+                row["passes_per_seq_sum"] += float(pps)
+                row["passes_per_seq_n"] += 1
+
+            dc = opp_ws.get("Deep Completions")
+            if dc is not None:
+                try:
+                    row["deep_completions_total"] += int(round(float(dc)))
+                except (TypeError, ValueError):
+                    pass
+
+            dlh = opp_ws.get("Defensive Action Height (m)")
+            if dlh is not None:
+                row["def_line_sum"] += float(dlh)
+                row["def_line_n"] += 1
+
+            # Sprints: from opponent's fm_totals
+            opp_fm = fm_by_match.get(match_id, {}).get(opponent, {})
+            sprints = opp_fm.get("Number of sprints")
+            if sprints is not None:
+                try:
+                    row["sprints_total"] += int(round(float(sprints)))
+                except (TypeError, ValueError):
+                    pass
+
+            # Line Breaking Passes: from opponent's player stats
+            opp_lbp = lbp_by_match_team.get((match_id, opponent), 0)
+            row["lbp_total"] += opp_lbp
+
+    if not stats:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for team, row in stats.items():
+        records.append({
+            "Team": team,
+            "Field Tilt %": round(row["field_tilt_sum"] / row["field_tilt_n"], 1) if row["field_tilt_n"] else 0.0,
+            "PPDA": round(row["ppda_sum"] / row["ppda_n"], 2) if row["ppda_n"] else 0.0,
+            "10+ Pass Sequences (Total)": row["seq_total"],
+            "10+ Pass Sequences (Per Game)": round(row["seq_total"] / row["seq_n"], 2) if row["seq_n"] else 0.0,
+            "Passes per Sequence": (
+                round(row["passes_per_seq_sum"] / row["passes_per_seq_n"], 2) if row["passes_per_seq_n"] else 0.0
+            ),
+            "Deep Completions": row["deep_completions_total"],
             "Def Line Height (m)": round(row["def_line_sum"] / row["def_line_n"], 1) if row["def_line_n"] else 0.0,
             "Total Number of Sprints": row["sprints_total"],
             "Line Breaking Passes": row["lbp_total"],
