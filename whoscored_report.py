@@ -3179,7 +3179,7 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
         'Progressive Carries', 'Carries into Final Third', "Carries into Opponent's Box",
         'Total Passes', 'Crosses Attempted', 'Crosses Completed',
         'Passes into Final Third', "Passes into Opponent's Box",
-        'Deep Completions', 'Progressive Passes', '10+ Pass Sequences', 'Avg Passes per Sequence',
+        'Progressive Passes', '10+ Pass Sequences', 'Avg Passes per Sequence', 'Deep Completions',
         'Tackles', 'Successful Tackles', 'Interceptions', 'Blocked Passes', 'Blocked Shots',
         'Field Tilt %', 'PPDA',
         'Defensive Action Height (m)', 'Corners',
