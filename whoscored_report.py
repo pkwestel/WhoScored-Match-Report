@@ -77,6 +77,8 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     Final third = x >= 66.6 (x only, 0-100 normalized scale).
   - Attacking box = inside the opponent's 18-yard box (18 yards deep,
     44 yards wide, centered on goal).
+  - Deep Completions: open-play completed passes ending within 20 yards
+    of the opponent's goal line (any width, not just inside the box).
   - Passing tab (per player, by team): Passes Completed/Attempted count all
     pass types; Passes Forward = attempts moving the ball's X coordinate
     forward regardless of success; Headed = pass attempts with a HeadPass
@@ -175,6 +177,7 @@ DEFENSIVE_START_CUTOFF = 40  # % of pitch (x < this is "defending 40%"), for pas
 
 BOX_DEPTH_YD = 18
 BOX_WIDTH_YD = 44
+DEEP_COMPLETION_YD = 20  # "Deep Completions" = open-play completed passes ending within this many yards of goal
 
 OWN_THIRD_MAX = 33.3
 MIDDLE_THIRD_MAX = 66.6
@@ -1185,6 +1188,11 @@ def dist_to_goal_yd(x, y):
 
 def in_box(x, y):
     return (to_yd_x(x) >= BOX_X_MIN) & (to_yd_y(y) >= BOX_Y_MIN) & (to_yd_y(y) <= BOX_Y_MAX)
+
+
+def in_deep_zone(x):
+    """True when x (0-100 normalized) is within DEEP_COMPLETION_YD yards of goal."""
+    return to_yd_x(x) >= (GOAL_X_YD - DEEP_COMPLETION_YD)
 
 
 def in_zone14(x, y):
@@ -2267,6 +2275,8 @@ def _classify_passes(df):
                                    & (passes['x'] < MIDDLE_THIRD_MAX) & (passes['endX'] >= MIDDLE_THIRD_MAX))
     passes['into_box'] = (passes['completed'] & passes['is_open_play']
                            & (~in_box(passes['x'], passes['y'])) & in_box(passes['endX'], passes['endY']))
+    passes['deep_completion'] = (passes['completed'] & passes['is_open_play']
+                                  & in_deep_zone(passes['endX']))
     passes['shot_assist'] = passes['qn'].apply(lambda s: 'ShotAssist' in s)
     # xT delta per pass: only for completed passes (failed passes don't move
     # the ball), clamped to >= 0 (a backward pass has xT = 0, not negative).
@@ -2303,6 +2313,7 @@ def compute_passing(df, player_totals, sca_out):
         crosses_completed=('open_play_cross_completed', 'sum'),
         into_final_third=('into_final_third', 'sum'),
         into_box=('into_box', 'sum'),
+        deep_completions=('deep_completion', 'sum'),
         shot_assists=('shot_assist', 'sum'),
         xt_pass=('xt_pass', 'sum'),
     ).reset_index().rename(columns={'playerName': 'player'})
@@ -2334,7 +2345,7 @@ def compute_passing(df, player_totals, sca_out):
     grouped = grouped.merge(sca_df, on=['team', 'player'], how='outer')
     numeric_cols = ['passes_completed', 'passes_attempted', 'passes_forward', 'headed',
                      'crosses_attempted', 'crosses_completed', 'into_final_third', 'into_box',
-                     'shot_assists', 'progressive_passes', 'SCA']
+                     'deep_completions', 'shot_assists', 'progressive_passes', 'SCA']
     for c in numeric_cols:
         if c in grouped.columns:
             grouped[c] = grouped[c].fillna(0).astype(int)
@@ -2350,6 +2361,7 @@ def compute_passing(df, player_totals, sca_out):
         'crosses_completed': 'Crosses Completed',
         'into_final_third': 'Passes into Final 1/3',
         'into_box': 'Passes into the Box',
+        'deep_completions': 'Deep Completions',
         'progressive_passes': 'Progressive Passes',
         'shot_assists': 'Shot Assists',
         'xt_pass': 'xT',
@@ -2357,7 +2369,7 @@ def compute_passing(df, player_totals, sca_out):
     grouped = grouped[[
         'team', 'player', 'Passes Completed', 'Passes Attempted', 'Passes Forward', 'Headed',
         'Crosses Attempted', 'Crosses Completed', 'Passes into Final 1/3', 'Passes into the Box',
-        'Progressive Passes', 'Shot Assists', 'SCA', 'xT',
+        'Deep Completions', 'Progressive Passes', 'Shot Assists', 'SCA', 'xT',
     ]]
     grouped = grouped.sort_values(['team', 'Passes Attempted'], ascending=[True, False])
 
@@ -3123,6 +3135,7 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
         'Crosses Completed': ('Crosses Completed', 'sum'),
         'Passes into Final Third': ('Passes into Final 1/3', 'sum'),
         "Passes into Opponent's Box": ('Passes into the Box', 'sum'),
+        'Deep Completions': ('Deep Completions', 'sum'),
         'Total SCA': ('SCA', 'sum'),
     })
 
@@ -3166,7 +3179,7 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
         'Progressive Carries', 'Carries into Final Third', "Carries into Opponent's Box",
         'Total Passes', 'Crosses Attempted', 'Crosses Completed',
         'Passes into Final Third', "Passes into Opponent's Box",
-        'Progressive Passes', '10+ Pass Sequences', 'Avg Passes per Sequence',
+        'Deep Completions', 'Progressive Passes', '10+ Pass Sequences', 'Avg Passes per Sequence',
         'Tackles', 'Successful Tackles', 'Interceptions', 'Blocked Passes', 'Blocked Shots',
         'Field Tilt %', 'PPDA',
         'Defensive Action Height (m)', 'Corners',
@@ -3781,7 +3794,9 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         "Completed are OPEN PLAY only - passes with the 'Cross' qualifier, excluding any also tagged as a"
         " corner or free kick (direct or indirect). Passes into Final 1/3 and Passes into the Box are"
         " completed, open-play passes only (excluding corners, free kicks, throw-ins, goal kicks, and"
-        " keeper throws) that start outside that zone and end inside it. Progressive Passes uses the same"
+        " keeper throws) that start outside that zone and end inside it. Deep Completions are completed,"
+        f" open-play passes ending within {DEEP_COMPLETION_YD} yards of the opponent's goal line (any width,"
+        " not restricted to inside the box). Progressive Passes uses the same"
         " rolling-window definition described earlier in this Notes tab. Shot Assists is read directly from WhoScored's"
         " own 'ShotAssist' qualifier on the pass event (the pass immediately preceding a shot attempt),"
         " rather than re-derived from the Shot Creating Actions search. SCA is the combined total of times a"
