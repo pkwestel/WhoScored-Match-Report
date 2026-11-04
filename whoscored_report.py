@@ -2276,7 +2276,7 @@ def _classify_passes(df):
     passes['into_box'] = (passes['completed'] & passes['is_open_play']
                            & (~in_box(passes['x'], passes['y'])) & in_box(passes['endX'], passes['endY']))
     passes['deep_completion'] = (passes['completed'] & passes['is_open_play']
-                                  & in_deep_zone(passes['endX']))
+                                  & in_deep_zone(passes['x']) & in_deep_zone(passes['endX']))
     passes['shot_assist'] = passes['qn'].apply(lambda s: 'ShotAssist' in s)
     # xT delta per pass: only for completed passes (failed passes don't move
     # the ball), clamped to >= 0 (a backward pass has xT = 0, not negative).
