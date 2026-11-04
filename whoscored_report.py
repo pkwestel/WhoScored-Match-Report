@@ -2313,7 +2313,6 @@ def compute_passing(df, player_totals, sca_out):
         crosses_completed=('open_play_cross_completed', 'sum'),
         into_final_third=('into_final_third', 'sum'),
         into_box=('into_box', 'sum'),
-        deep_completions=('deep_completion', 'sum'),
         shot_assists=('shot_assist', 'sum'),
         xt_pass=('xt_pass', 'sum'),
     ).reset_index().rename(columns={'playerName': 'player'})
@@ -2345,7 +2344,7 @@ def compute_passing(df, player_totals, sca_out):
     grouped = grouped.merge(sca_df, on=['team', 'player'], how='outer')
     numeric_cols = ['passes_completed', 'passes_attempted', 'passes_forward', 'headed',
                      'crosses_attempted', 'crosses_completed', 'into_final_third', 'into_box',
-                     'deep_completions', 'shot_assists', 'progressive_passes', 'SCA']
+                     'shot_assists', 'progressive_passes', 'SCA']
     for c in numeric_cols:
         if c in grouped.columns:
             grouped[c] = grouped[c].fillna(0).astype(int)
@@ -2361,7 +2360,6 @@ def compute_passing(df, player_totals, sca_out):
         'crosses_completed': 'Crosses Completed',
         'into_final_third': 'Passes into Final 1/3',
         'into_box': 'Passes into the Box',
-        'deep_completions': 'Deep Completions',
         'progressive_passes': 'Progressive Passes',
         'shot_assists': 'Shot Assists',
         'xt_pass': 'xT',
@@ -2369,7 +2367,7 @@ def compute_passing(df, player_totals, sca_out):
     grouped = grouped[[
         'team', 'player', 'Passes Completed', 'Passes Attempted', 'Passes Forward', 'Headed',
         'Crosses Attempted', 'Crosses Completed', 'Passes into Final 1/3', 'Passes into the Box',
-        'Deep Completions', 'Progressive Passes', 'Shot Assists', 'SCA', 'xT',
+        'Progressive Passes', 'Shot Assists', 'SCA', 'xT',
     ]]
     grouped = grouped.sort_values(['team', 'Passes Attempted'], ascending=[True, False])
 
@@ -3097,7 +3095,8 @@ def compute_defensive_action_location(df):
 # 5e. TOTALS (team-level rollup)
 # ============================================================
 def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, team_sequences,
-                    field_tilt, ppda, defensive_stats, corners, home_name, away_name):
+                    field_tilt, ppda, defensive_stats, corners, home_name, away_name,
+                    df=None):
     """
     One row per team, rolling up numbers already computed elsewhere:
     Shots = count of shot events (rows in sca_out); Possession % is each
@@ -3135,9 +3134,17 @@ def compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, t
         'Crosses Completed': ('Crosses Completed', 'sum'),
         'Passes into Final Third': ('Passes into Final 1/3', 'sum'),
         "Passes into Opponent's Box": ('Passes into the Box', 'sum'),
-        'Deep Completions': ('Deep Completions', 'sum'),
         'Total SCA': ('SCA', 'sum'),
     })
+
+    # Deep Completions: team-level only, computed from classified passes
+    if df is not None:
+        cp = _classify_passes(df)
+        deep_team = cp[cp['deep_completion']].groupby('team').size().rename('Deep Completions')
+        passing_team = passing_team.join(deep_team, how='left')
+        passing_team['Deep Completions'] = passing_team['Deep Completions'].fillna(0).astype(int)
+    else:
+        passing_team['Deep Completions'] = 0
 
     prog = team_totals.set_index('team')[['progressive_passes']].rename(
         columns={'progressive_passes': 'Progressive Passes'})
@@ -3987,7 +3994,7 @@ def main():
 
     print("Computing totals...")
     totals_out = compute_totals(team_summary, team_totals, passing_out, sca_out, chains_df, team_sequences,
-                                 field_tilt, ppda, defensive_stats, corners, home_name, away_name)
+                                 field_tilt, ppda, defensive_stats, corners, home_name, away_name, df=df)
 
     print("Computing against totals...")
     against_totals = compute_against_totals(totals_out)
