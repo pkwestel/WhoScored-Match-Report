@@ -379,7 +379,6 @@ def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_lin
 # into any hdb.fetch_*()/query-param call.
 TEAM_DISPLAY_NAMES = {
     "Man City": "Manchester City",
-    "Man Utd": "Manchester United",
     "Hull": "Hull City",
     "Bayern": "Bayern Munich",
     "Porto": "FC Porto",

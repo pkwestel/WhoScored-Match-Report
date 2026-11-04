@@ -480,7 +480,7 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     # between the pitch and any of them.
     pitch_h = 10.0
     top_pad_in = _TITLE_TOP_PAD_IN  # 3-line title block + top-right date - see that constant's comment
-    bottom_pad_in = 0.5  # one row of stat-line text, below the pitch (no key anymore)
+    bottom_pad_in = 0.8 if len(stat_items) >= 4 else 0.5  # two rows when 4+ stat items
     fig_h = pitch_h + top_pad_in + bottom_pad_in
     fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
     fig = plt.figure(figsize=(fig_w, fig_h))
@@ -519,12 +519,27 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     # Stat line: moved below the pitch (per request - the color key that
     # used to live down here is gone entirely). Caller decides exactly which
     # stats/colors go here (see docstring above).
-    stats_y = 0.22 / fig_h
+    # Use two rows when there are 4+ items to avoid overlapping text.
     n = len(stat_items)
-    for i, (text, color) in enumerate(stat_items):
-        x = (i + 0.5) / n
-        fig.text(x, stats_y, text, color=color, fontsize=11.5, fontweight="bold",
-                  fontname=PASS_MAP_FONT, ha="center", va="center")
+    if n >= 4:
+        row1 = stat_items[:3]
+        row2 = stat_items[3:]
+        row1_y = 0.30 / fig_h
+        row2_y = 0.10 / fig_h
+        for i, (text, color) in enumerate(row1):
+            x = (i + 0.5) / len(row1)
+            fig.text(x, row1_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
+        for i, (text, color) in enumerate(row2):
+            x = (i + 0.5) / len(row2)
+            fig.text(x, row2_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
+    else:
+        stats_y = 0.22 / fig_h
+        for i, (text, color) in enumerate(stat_items):
+            x = (i + 0.5) / n
+            fig.text(x, stats_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
 
     return fig
 
