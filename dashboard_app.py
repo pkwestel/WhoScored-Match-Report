@@ -57,7 +57,8 @@ import pandas as pd
 import streamlit as st
 
 import history_db as hdb
-from pitch_viz import (plot_pass_map, plot_touch_map, PASS_CATEGORY_COLORS, TITLE_COLOR,
+from pitch_viz import (plot_pass_map, plot_carry_map, plot_touch_map,
+                       PASS_CATEGORY_COLORS, CARRY_CATEGORY_COLORS, TITLE_COLOR,
                        HOME_TEAM_COLOR, AWAY_TEAM_COLOR)
 from app_logo import logo_img_tag
 
@@ -1407,6 +1408,105 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
         file_name=f"{player.replace(' ', '_')}_{title_suffix.lower().replace(' ', '_')}.png",
         mime="image/png",
         key=f"passmap_download_{mode}",
+    )
+    plt.close(fig)
+
+
+def _render_carry_map(db, matches, show_minute_slider=False):
+    """
+    Carries Map: draws every inferred carry for the selected player in
+    the selected match, following the same layout/flow as _render_pass_map().
+    """
+    if matches.empty:
+        st.info("No matches published yet.")
+        return
+    match_id, match_label = _match_picker(matches, key="carrymap_match")
+
+    # Zone filter uses carry origin (x, y)
+    zone_x_col, zone_y_col = "x", "y"
+
+    all_match_carries = hdb.fetch_carries(db, match_id)
+    if all_match_carries.empty:
+        st.info(
+            f"No carry data saved for {match_label} - this match was likely published before the "
+            "Carries Map feature was added. Re-run 'Save to Database' for it in the "
+            "combined report app to backfill it."
+        )
+        return
+
+    players = sorted(all_match_carries["player"].dropna().unique())
+    if not players:
+        st.info(f"No carries recorded for {match_label}.")
+        return
+    player, zone = _player_and_zone_row(
+        players, player_key="carrymap_player", zone_key=f"carrymap_zone_{match_id}"
+    )
+
+    minute_min = minute_max = None
+    if show_minute_slider:
+        max_minute = hdb.fetch_match_max_minute(db, match_id)
+        minute_min, minute_max = _minute_range_slider(f"carrymap_minutes_{match_id}", max_minute)
+
+    player_carries = hdb.fetch_carries(db, match_id, player=player,
+                                        minute_min=minute_min, minute_max=minute_max)
+    player_carries = player_carries[_pitch_zone_mask(player_carries, zone, zone_x_col, zone_y_col)]
+
+    if player_carries.empty:
+        st.info(f"No carries found for {player}"
+                + ("" if zone == "All zones" else " in this pitch zone")
+                + ("" if minute_min is None else " in this minute range") + ".")
+        return
+
+    # Rename DB columns to match pitch_viz convention
+    player_carries = player_carries.rename(columns={"end_x": "endX", "end_y": "endY"})
+
+    home_team = _display_team_name(matches.loc[matches["match_id"] == match_id, "home_team"].iloc[0])
+    away_team = _display_team_name(matches.loc[matches["match_id"] == match_id, "away_team"].iloc[0])
+    match_date_raw = matches.loc[matches["match_id"] == match_id, "match_date"].iloc[0]
+    match_date, _ = _split_date_and_kickoff(match_date_raw)
+    competition_raw = matches.loc[matches["match_id"] == match_id, "competition"].iloc[0]
+    competition = competition_raw if pd.notna(competition_raw) else None
+    player_team = (_display_team_name(player_carries["team"].iloc[0])
+                    if "team" in player_carries.columns and not player_carries.empty else None)
+
+    total = len(player_carries)
+    progressive = int(player_carries["is_progressive"].sum())
+    into_final_third = int(player_carries["into_final_third"].sum())
+    into_box = int(player_carries["into_box"].sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Carries", total)
+    c2.metric("Progressive", progressive)
+    c3.metric("Into Final Third", into_final_third)
+    c4.metric("Into Box", into_box)
+
+    stat_items = [
+        (f"{total} Carries", TITLE_COLOR),
+        (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
+        (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
+        (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+    ]
+    xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
+    if xt_total > 0:
+        stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
+
+    fig = plot_carry_map(player_carries, player, player_team, home_team, away_team, stat_items,
+                          match_date=match_date, competition=competition)
+
+    png_buf = io.BytesIO()
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+    png_buf.seek(0)
+    st.image(png_buf, width=420)
+
+    download_buf = io.BytesIO()
+    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+    download_buf.seek(0)
+    st.download_button(
+        label="Download Carries Map (PNG)",
+        data=download_buf,
+        file_name=f"{player.replace(' ', '_')}_carries_map.png",
+        mime="image/png",
+        key="carrymap_download",
     )
     plt.close(fig)
 
@@ -2787,9 +2887,9 @@ def _render_match_detail(db, match_id):
     # Map - the same relative position as the main dashboard's own tab bar
     # (see _DASH_TABS), just one level down on a single match's report.
     (mt_totals, mt_players, mt_shots, mt_advanced, mt_passmap, mt_passrecv,
-     mt_pass_pairs, mt_shot_pairs, mt_touchmap) = st.tabs(
+     mt_carrymap, mt_pass_pairs, mt_shot_pairs, mt_touchmap) = st.tabs(
         ["Team Totals", "Player Stats", "Shots", "Advanced Stats", "Pass Map", "Passes Received",
-         "Pass Pairs", "Shot Pairs", "Touch Map"]
+         "Carries Map", "Pass Pairs", "Shot Pairs", "Touch Map"]
     )
 
     with mt_totals:
@@ -2951,6 +3051,9 @@ def _render_match_detail(db, match_id):
 
     with mt_passrecv:
         _render_pass_map(db, matches_for_this_match, mode="receiver", show_minute_slider=True)
+
+    with mt_carrymap:
+        _render_carry_map(db, matches_for_this_match, show_minute_slider=True)
 
     with mt_pass_pairs:
         _render_match_pairs_tab(db, "pass", match_id, row["Home Team"], row["Away Team"])

@@ -87,6 +87,21 @@ PASS_CATEGORY_STYLE = {
 # of ordinary completed passes overlap them.
 PASS_CATEGORY_DRAW_ORDER = ["Incomplete", "Completed", "Progressive", "Key Pass"]
 
+# ── Carry map categories ──
+CARRY_CATEGORY_COLORS = {
+    "Normal": "#4a4a4a",            # dark charcoal - same as Completed passes
+    "Progressive": "#2f9bf0",       # sky blue - same as progressive passes
+    "Into Final Third": "#1fa252",  # green - distinctive from passes
+    "Into Box": "#d32f2f",          # red - most dangerous carries
+}
+CARRY_CATEGORY_STYLE = {
+    "Normal": {"lw": 1.6, "alpha": 0.7},
+    "Progressive": {"lw": 2.0, "alpha": 0.9},
+    "Into Final Third": {"lw": 2.2, "alpha": 0.95},
+    "Into Box": {"lw": 2.6, "alpha": 1.0},
+}
+CARRY_CATEGORY_DRAW_ORDER = ["Normal", "Progressive", "Into Final Third", "Into Box"]
+
 # Touch map colormap - reuses colors already established elsewhere in this
 # palette (the Progressive blue and Incomplete orange from PASS_CATEGORY_
 # COLORS, plus the Key Pass purple as the "hottest" end) rather than
@@ -520,6 +535,78 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     # used to live down here is gone entirely). Caller decides exactly which
     # stats/colors go here (see docstring above).
     # Use two rows when there are 4+ items to avoid overlapping text.
+    n = len(stat_items)
+    if n >= 4:
+        row1 = stat_items[:3]
+        row2 = stat_items[3:]
+        row1_y = 0.30 / fig_h
+        row2_y = 0.10 / fig_h
+        for i, (text, color) in enumerate(row1):
+            x = (i + 0.5) / len(row1)
+            fig.text(x, row1_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
+        for i, (text, color) in enumerate(row2):
+            x = (i + 0.5) / len(row2)
+            fig.text(x, row2_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
+    else:
+        stats_y = 0.22 / fig_h
+        for i, (text, color) in enumerate(stat_items):
+            x = (i + 0.5) / n
+            fig.text(x, stats_y, text, color=color, fontsize=11.5, fontweight="bold",
+                      fontname=PASS_MAP_FONT, ha="center", va="center")
+
+    return fig
+
+
+def plot_carry_map(carries_df, player_name, player_team, home_name, away_name, stat_items,
+                    title_suffix="Carries Map", subtitle=None, match_date=None, competition=None):
+    """
+    Carries Map: same layout/pitch/logo/watermark as plot_pass_map(), but
+    draws inferred carries instead of passes. Each carry is rendered as a
+    line from start to end with an arrowhead (rather than the circle-at-end
+    style used for passes) to visually distinguish carries from passes at
+    a glance. carries_df needs 'category', 'x', 'y', 'endX', 'endY' columns.
+    """
+    length, width = PITCH_LEN_M, PITCH_WID_M
+    pad = PITCH_PAD_M
+    pitch_h = 10.0
+    top_pad_in = _TITLE_TOP_PAD_IN
+    bottom_pad_in = 0.8 if len(stat_items) >= 4 else 0.5
+    fig_h = pitch_h + top_pad_in + bottom_pad_in
+    fig_w = pitch_h * (width + 2 * pad) / (length + 2 * pad)
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    fig.patch.set_facecolor(MAIN_BG)
+
+    bottom_frac = bottom_pad_in / fig_h
+    axes_h_frac = pitch_h / fig_h
+    ax = fig.add_axes([0.03, bottom_frac, 0.94, axes_h_frac])
+    draw_pitch(ax)
+
+    _draw_corner_logo(fig, fig_w, fig_h, _load_logo(LOGO_PATH), side="left")
+    if _is_man_utd(player_team):
+        _draw_corner_logo(fig, fig_w, fig_h, _load_logo(MANU_LOGO_PATH), side="right")
+
+    for category in CARRY_CATEGORY_DRAW_ORDER:
+        cat_carries = carries_df[carries_df["category"] == category]
+        color = CARRY_CATEGORY_COLORS[category]
+        style = CARRY_CATEGORY_STYLE[category]
+        lw, alpha = style["lw"], style["alpha"]
+        for _, c in cat_carries.iterrows():
+            x0, y0 = _to_m_y(c["y"]), _to_m_x(c["x"])
+            x1, y1 = _to_m_y(c["endY"]), _to_m_x(c["endX"])
+            # Arrow style for carries: a line with a small arrowhead at the
+            # end, distinguishing carries from passes (which use circle-at-end).
+            dx, dy = x1 - x0, y1 - y0
+            ax.annotate("", xy=(x1, y1), xytext=(x0, y0),
+                         arrowprops=dict(arrowstyle="-|>", color=color, lw=lw,
+                                         mutation_scale=12, alpha=alpha),
+                         zorder=2)
+
+    _draw_title_block(fig, fig_h, player_name, player_team, home_name, away_name,
+                       subtitle, title_suffix, match_date, competition)
+
+    # Stat line below pitch - same two-row logic as plot_pass_map()
     n = len(stat_items)
     if n >= 4:
         row1 = stat_items[:3]

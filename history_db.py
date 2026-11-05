@@ -384,6 +384,46 @@ def init_schema(db: DB):
             UNIQUE(match_id, team, player, minute, second, x, y)
         )
     """)
+    # Individual carries (inferred from event gaps) - one row per carry,
+    # with full pitch coordinates and category. Backs the Carries Map
+    # the same way the passes table backs the Pass Map.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS carries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id        TEXT NOT NULL REFERENCES matches(match_id),
+            team            TEXT,
+            player          TEXT,
+            cumulative_mins REAL,
+            x               REAL,
+            y               REAL,
+            end_x           REAL,
+            end_y           REAL,
+            is_progressive  INTEGER,
+            into_final_third INTEGER,
+            into_box        INTEGER,
+            xt_carry        REAL,
+            category        TEXT,
+            UNIQUE(match_id, team, player, cumulative_mins, x, y)
+        )
+    """ if db.backend == "sqlite" else """
+        CREATE TABLE IF NOT EXISTS carries (
+            id              SERIAL PRIMARY KEY,
+            match_id        TEXT NOT NULL REFERENCES matches(match_id),
+            team            TEXT,
+            player          TEXT,
+            cumulative_mins REAL,
+            x               REAL,
+            y               REAL,
+            end_x           REAL,
+            end_y           REAL,
+            is_progressive  INTEGER,
+            into_final_third INTEGER,
+            into_box        INTEGER,
+            xt_carry        REAL,
+            category        TEXT,
+            UNIQUE(match_id, team, player, cumulative_mins, x, y)
+        )
+    """)
     db.commit()
 
 
@@ -535,6 +575,39 @@ def upsert_touches(db: DB, match_id, touches_df: pd.DataFrame):
         ))
 
 
+def upsert_carries(db: DB, match_id, carries_df: pd.DataFrame):
+    """
+    Bulk-loads whoscored_report.compute_all_carries()'s output (one row per
+    inferred carry, with coordinates and category) - backs the Carries Map
+    the same way upsert_passes() backs the Pass Map.
+    """
+    if carries_df is None or carries_df.empty:
+        return
+    for _, r in carries_df.iterrows():
+        db.execute("""
+            INSERT INTO carries (match_id, team, player, cumulative_mins,
+                                  x, y, end_x, end_y, is_progressive,
+                                  into_final_third, into_box, xt_carry, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id, team, player, cumulative_mins, x, y) DO UPDATE SET
+                end_x            = excluded.end_x,
+                end_y            = excluded.end_y,
+                is_progressive   = excluded.is_progressive,
+                into_final_third = excluded.into_final_third,
+                into_box         = excluded.into_box,
+                xt_carry         = excluded.xt_carry,
+                category         = excluded.category
+        """, (
+            str(match_id), _text(r.get("team")), _text(r.get("player")),
+            _num(r.get("cumulative_mins")),
+            _num(r.get("x")), _num(r.get("y")),
+            _num(r.get("endX")), _num(r.get("endY")),
+            int(bool(r.get("is_progressive"))), int(bool(r.get("into_final_third"))),
+            int(bool(r.get("into_box"))), _num(r.get("xt_carry")),
+            _text(r.get("category")),
+        ))
+
+
 def _num(v):
     """NaN/None -> None (so it round-trips through the DB as NULL, not the string 'nan')."""
     return None if v is None or (isinstance(v, float) and pd.isna(v)) else float(v)
@@ -610,7 +683,7 @@ def _find_stale_duplicate_match_ids(db: DB, match_id, home_team, away_team, matc
 
 def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, player_stats: dict,
                     shots_df: pd.DataFrame = None, passes_df: pd.DataFrame = None,
-                    touches_df: pd.DataFrame = None,
+                    touches_df: pd.DataFrame = None, carries_df: pd.DataFrame = None,
                     competition=None, match_date=None, ws_events=None, fm_shots=None, referee=None,
                     matchweek=None, ws_url=None, fm_url=None):
     """
@@ -623,6 +696,8 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
     passes_df:    whoscored_report.compute_all_passes() output, or None to skip
                   (e.g. publishing a FotMob-only report with no event data).
     touches_df:   whoscored_report.compute_all_touches() output, or None to
+                  skip (same reasoning as passes_df).
+    carries_df:   whoscored_report.compute_all_carries() output, or None to
                   skip (same reasoning as passes_df).
     referee:      fotmob_report.extract_referee() output, or None if unknown.
     matchweek:    fotmob_report.extract_matchweek() output, or None if unknown -
@@ -639,7 +714,7 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
         # regardless of what match_id string this particular scrape/URL
         # happened to produce.
         for _stale_id in _find_stale_duplicate_match_ids(db, match_id, home_team, away_team, match_date):
-            for _table in ("shots", "passes", "touches", "team_match_stats", "player_match_stats", "matches"):
+            for _table in ("shots", "passes", "touches", "carries", "team_match_stats", "player_match_stats", "matches"):
                 db.execute(f"DELETE FROM {_table} WHERE match_id = ?", (_stale_id,))
 
         upsert_match(db, match_id, home_team, away_team, competition, match_date, ws_events,
@@ -656,7 +731,7 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
         # this match_id first (inside the same transaction as the upserts
         # below, so a failed save still rolls back cleanly) guarantees the
         # old version can never linger and pollute aggregates.
-        for _table in ("shots", "passes", "touches", "team_match_stats", "player_match_stats"):
+        for _table in ("shots", "passes", "touches", "carries", "team_match_stats", "player_match_stats"):
             db.execute(f"DELETE FROM {_table} WHERE match_id = ?", (str(match_id),))
         for team, extra in team_stats.items():
             upsert_team_stats(db, match_id, team, extra, is_home=(team == home_team))
@@ -668,6 +743,8 @@ def publish_report(db: DB, match_id, home_team, away_team, team_stats: dict, pla
             upsert_passes(db, match_id, passes_df)
         if touches_df is not None:
             upsert_touches(db, match_id, touches_df)
+        if carries_df is not None:
+            upsert_carries(db, match_id, carries_df)
         db.commit()
     except Exception:
         db.rollback()
@@ -1976,6 +2053,42 @@ def fetch_passes(db: DB, match_id=None, passer=None, receiver=None, completed_on
         # dropdowns already .dropna() this column, so turning it into a
         # real null here is enough to make it disappear as a "player".
         df["receiver"] = df["receiver"].replace({"NaN": None, "nan": None, "": None})
+    return df
+
+
+def fetch_carries(db: DB, match_id=None, player=None, team=None,
+                   minute_min=None, minute_max=None) -> pd.DataFrame:
+    """
+    Carries for one match (pass a match_id), or across every published match
+    (leave match_id=None) for a season-long Carries Map - optionally filtered
+    to one player and/or one team. Column names come back as end_x/end_y (the
+    DB's column names) - callers rename to endX/endY before handing off to
+    pitch_viz.plot_carry_map().
+    """
+    sql = "SELECT * FROM carries WHERE 1=1"
+    params = []
+    if match_id is not None:
+        sql += " AND match_id = ?"
+        params.append(str(match_id))
+    if team is not None:
+        sql += " AND team = ?"
+        params.append(team)
+    if player is not None:
+        sql += " AND player = ?"
+        params.append(player)
+    if minute_min is not None:
+        sql += " AND cumulative_mins >= ?"
+        params.append(minute_min)
+    if minute_max is not None:
+        sql += " AND cumulative_mins <= ?"
+        params.append(minute_max)
+    cur = db.execute(sql, tuple(params))
+    cols = [d[0] for d in cur.description]
+    df = pd.DataFrame(cur.fetchall(), columns=cols)
+    if not df.empty:
+        df["is_progressive"] = df["is_progressive"].astype(bool)
+        df["into_final_third"] = df["into_final_third"].astype(bool)
+        df["into_box"] = df["into_box"].astype(bool)
     return df
 
 

@@ -124,6 +124,9 @@ if st.button("Generate Combined Report", type="primary"):
                 # the ball rather than just passes - backs the dashboard's
                 # (single-match and season-long) touch heat map.
                 all_touches = wr.compute_all_touches(df)
+                # Same reasoning - every inferred carry with coordinates,
+                # backs the dashboard's Carries Map.
+                all_carries = wr.compute_all_carries(df)
                 player_windows = wr.extract_player_windows(df)
                 on_off = wr.compute_on_off(df, player_windows, carries_df)
 
@@ -247,6 +250,7 @@ if st.button("Generate Combined Report", type="primary"):
                 "plus_minus_warning": plus_minus_warning,
                 "all_passes": all_passes,
                 "all_touches": all_touches,
+                "all_carries": all_carries,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_ws_events": len(df),
@@ -382,10 +386,12 @@ if report:
                 # (report["kickoff"]) over the date picker above when it's
                 # available. See save_report_to_db()'s own docstring.
                 match_id = bl.save_report_to_db(db_url, report, competition, match_date.isoformat())
+                n_carries = len(report.get('all_carries') or [])
                 st.success(
                     f"Saved match {match_id} to the database, including "
-                    f"{len(report['all_passes'])} passes and {len(report['all_touches'])} touches "
-                    "for the dashboard's Pass Map/Passes Received/Heat Map tabs."
+                    f"{len(report['all_passes'])} passes, {len(report['all_touches'])} touches "
+                    f"and {n_carries} carries "
+                    "for the dashboard's Pass Map/Passes Received/Carries Map/Heat Map tabs."
                 )
             except Exception as e:
                 st.error(f"Couldn't save to the database: {e}")

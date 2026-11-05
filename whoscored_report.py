@@ -1873,6 +1873,7 @@ def compute_carries(df, minute_min=None, minute_max=None):
         carry_records.append({
             'team': cur['team'], 'player': nxt['playerName'],
             'cumulative_mins': cur['cumulative_mins'],
+            'x': sx, 'y': sy, 'endX': ex, 'endY': ey,
             'is_progressive': bool(is_progressive),
             'into_final_third': bool(end_third == 'Final third' and start_third != 'Final third'),
             'into_box': bool(ends_in_box and not starts_in_box),
@@ -1880,8 +1881,8 @@ def compute_carries(df, minute_min=None, minute_max=None):
         })
 
     carries_df = pd.DataFrame(carry_records) if carry_records else pd.DataFrame(
-        columns=['team', 'player', 'cumulative_mins', 'is_progressive', 'into_final_third', 'into_box',
-                 'xt_carry'])
+        columns=['team', 'player', 'cumulative_mins', 'x', 'y', 'endX', 'endY',
+                 'is_progressive', 'into_final_third', 'into_box', 'xt_carry'])
 
     # carries_df returned to callers (e.g. compute_on_off()) is ALWAYS the
     # full-match version, unfiltered - only the team_carries/player_carries
@@ -1916,6 +1917,41 @@ def compute_carries(df, minute_min=None, minute_max=None):
     # player_carries above only have whole-match totals, which isn't enough
     # for an on/off split.
     return team_carries, player_carries, carries_df
+
+
+def classify_carry_category(row):
+    """Classify a carry into a category for the carries map, analogous to
+    classify_pass_category() for pass maps. Priority order:
+      Into Box > Into Final Third > Progressive > Normal
+    """
+    if row.get('into_box'):
+        return 'Into Box'
+    if row.get('into_final_third'):
+        return 'Into Final Third'
+    if row.get('is_progressive'):
+        return 'Progressive'
+    return 'Normal'
+
+
+def compute_all_carries(df):
+    """
+    Every inferred carry in the match (any player), with coordinates and
+    category classification - the carry equivalent of compute_all_passes().
+    Computed once for the whole match so publishing every player's carries
+    to the history database doesn't mean re-running the carry-detection
+    loop once per player.
+
+    Returns a DataFrame with columns: team, player, cumulative_mins,
+    x, y, endX, endY, is_progressive, into_final_third, into_box,
+    xt_carry, category.
+    """
+    out_cols = ['team', 'player', 'cumulative_mins', 'x', 'y', 'endX', 'endY',
+                'is_progressive', 'into_final_third', 'into_box', 'xt_carry', 'category']
+    _, _, carries_df = compute_carries(df)
+    if carries_df.empty:
+        return pd.DataFrame(columns=out_cols)
+    carries_df['category'] = carries_df.apply(classify_carry_category, axis=1)
+    return carries_df[out_cols].reset_index(drop=True)
 
 
 # ============================================================

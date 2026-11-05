@@ -141,6 +141,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     against_totals = wr.compute_against_totals(totals_out)
     all_passes = wr.compute_all_passes(df)
     all_touches = wr.compute_all_touches(df)
+    all_carries = wr.compute_all_carries(df)
     player_windows = wr.extract_player_windows(df)
     on_off = wr.compute_on_off(df, player_windows, carries_df)
 
@@ -257,6 +258,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
         "plus_minus_warning": plus_minus_warning,
         "all_passes": all_passes,
         "all_touches": all_touches,
+        "all_carries": all_carries,
         "wb_bytes": buf.getvalue(),
         "filename": filename,
         "n_ws_events": len(df),
@@ -637,6 +639,7 @@ def save_report_to_db(db_url, report, competition, match_date_iso):
             shots_df=report["combined_shots"],
             passes_df=report["all_passes"],
             touches_df=report["all_touches"],
+            carries_df=report.get("all_carries"),
             competition=competition, match_date=match_date,
             ws_events=report["n_ws_events"], fm_shots=report["n_fm_shots"],
             referee=report.get("referee"),
@@ -708,6 +711,7 @@ def run_combined_report_sofascore(ws_url, ss_url, status_cb=None):
     against_totals = wr.compute_against_totals(totals_out)
     all_passes = wr.compute_all_passes(df)
     all_touches = wr.compute_all_touches(df)
+    all_carries = wr.compute_all_carries(df)
     player_windows_ws = wr.extract_player_windows(df)
     on_off = wr.compute_on_off(df, player_windows_ws, carries_df)
 
@@ -802,6 +806,7 @@ def run_combined_report_sofascore(ws_url, ss_url, status_cb=None):
         "plus_minus_warning": plus_minus_warning,
         "all_passes": all_passes,
         "all_touches": all_touches,
+        "all_carries": all_carries,
         "wb_bytes": buf.getvalue(),
         "filename": filename,
         "n_ws_events": len(df),
