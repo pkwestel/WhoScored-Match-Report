@@ -704,13 +704,15 @@ _FREEZE_HEADER_ROW_H_PX = 37  # approximate rendered height of one header row - 
 
 
 def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key=None,
-                                freeze_header=False, team_for_player_links=None):
+                                freeze_header=False, team_for_player_links=None,
+                                diff_cols=()):
     """
     Generic two-row-header HTML table: a merged group-header row (colspan,
     one per (label, [cols]) in `groups`) sitting above the real per-column
     labels - what powers both the Team Page's General Stats table (see
     _render_general_stats_table()) and its Playing Time table (see
-    _render_playing_time_table()). Neither st.dataframe nor
+    _render_playing_time_table()). diff_cols: column names whose cell text
+    should be colored dark green (>0) or dark red (<0). Neither st.dataframe nor
     _render_data_table_html above (both single flat header rows) can do a
     merged group header.
 
@@ -765,6 +767,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
     if df.empty:
         return
 
+    diff_cols = set(diff_cols)
     active_column, active_direction = None, None
     if sort_key is not None:
         is_total_row = df["Player"] == "Team Total" if "Player" in df.columns else None
@@ -852,6 +855,13 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                 cell_html = f"{val:.2f}"
             else:
                 cell_html = html.escape(str(val))
+            # Conditional green/red coloring for difference columns
+            diff_color = ""
+            if col in diff_cols and isinstance(val, (int, float)) and not isinstance(val, bool):
+                if val > 0:
+                    diff_color = " color:#1a7a1a; font-weight:bold;"
+                elif val < 0:
+                    diff_color = " color:#b71c1c; font-weight:bold;"
             # Make Player column cells clickable links to the Player Page
             # when team_for_player_links is set and this isn't the
             # "Team Total" row.
@@ -862,7 +872,7 @@ def _render_grouped_stats_table(df, ungrouped, groups, decimal_cols=(), sort_key
                     cell_html = (f'<a href="{player_url}" target="_self" '
                                  f'style="color:#4a9eff; text-decoration:underline;">'
                                  f'{cell_html}</a>')
-            style = f'padding:6px 14px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;'
+            style = f'padding:6px 14px; border:1px solid #ddd; text-align:{align}; white-space:nowrap;{diff_color}'
             if freeze_header and i == 0:
                 # Frozen first column's body cells need their own opaque
                 # background (rather than inheriting the table's default
@@ -928,6 +938,8 @@ def _render_playing_time_table(plus_minus_df):
         plus_minus_df, ["Player"],
         [("Totals", totals_cols), ("Per 90", per90_cols)],
         decimal_cols={"xG", "xG Against", "xG Difference"},
+        diff_cols={"Goal Difference", "xG Difference",
+                   "Goal Difference (Per 90)", "xG Difference (Per 90)"},
     )
 
 
