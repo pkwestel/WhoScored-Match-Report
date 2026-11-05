@@ -155,7 +155,7 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing totals..."):
                 totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
                                                 chains_df, team_sequences, field_tilt, ppda,
-                                                defensive_stats, corners, home_name, away_name)
+                                                defensive_stats, corners, home_name, away_name, df=df_windowed)
                 against_totals = wr.compute_against_totals(totals_out)
             with st.spinner("Computing On/Off splits..."):
                 # extract_player_windows/carries_df are always the FULL-

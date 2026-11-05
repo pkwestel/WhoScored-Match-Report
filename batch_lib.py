@@ -137,7 +137,7 @@ def run_combined_report(ws_url, fm_url, fm_out_dir, status_cb=None):
     corners = wr.compute_corners(df)
     totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
                                     chains_df, team_sequences, field_tilt, ppda,
-                                    defensive_stats, corners, ws_home_name, ws_away_name)
+                                    defensive_stats, corners, ws_home_name, ws_away_name, df=df)
     against_totals = wr.compute_against_totals(totals_out)
     all_passes = wr.compute_all_passes(df)
     all_touches = wr.compute_all_touches(df)
@@ -704,7 +704,7 @@ def run_combined_report_sofascore(ws_url, ss_url, status_cb=None):
     corners = wr.compute_corners(df)
     totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
                                     chains_df, team_sequences, field_tilt, ppda,
-                                    defensive_stats, corners, ws_home_name, ws_away_name)
+                                    defensive_stats, corners, ws_home_name, ws_away_name, df=df)
     against_totals = wr.compute_against_totals(totals_out)
     all_passes = wr.compute_all_passes(df)
     all_touches = wr.compute_all_touches(df)

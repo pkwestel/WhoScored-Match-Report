@@ -112,7 +112,7 @@ if st.button("Generate Combined Report", type="primary"):
                 corners = wr.compute_corners(df)
                 totals_out = wr.compute_totals(team_summary, team_totals, passing_out, sca_out,
                                                 chains_df, team_sequences, field_tilt, ppda,
-                                                defensive_stats, corners, ws_home_name, ws_away_name)
+                                                defensive_stats, corners, ws_home_name, ws_away_name, df=df)
                 against_totals = wr.compute_against_totals(totals_out)
                 # Every pass in the match (both ends, all outcomes) - computed
                 # once here rather than per-player, purely so "Save to
