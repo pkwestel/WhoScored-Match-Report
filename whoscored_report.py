@@ -2312,7 +2312,7 @@ def _classify_passes(df):
     passes['into_box'] = (passes['completed'] & passes['is_open_play']
                            & (~in_box(passes['x'], passes['y'])) & in_box(passes['endX'], passes['endY']))
     passes['deep_completion'] = (passes['completed'] & passes['is_open_play']
-                                  & (passes['x'] >= MIDDLE_THIRD_MAX) & in_deep_zone(passes['endX']))
+                                  & in_deep_zone(passes['x']) & in_deep_zone(passes['endX']))
     passes['shot_assist'] = passes['qn'].apply(lambda s: 'ShotAssist' in s)
     # xT delta per pass: only for completed passes (failed passes don't move
     # the ball), clamped to >= 0 (a backward pass has xT = 0, not negative).
@@ -3838,8 +3838,8 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " corner or free kick (direct or indirect). Passes into Final 1/3 and Passes into the Box are"
         " completed, open-play passes only (excluding corners, free kicks, throw-ins, goal kicks, and"
         " keeper throws) that start outside that zone and end inside it. Deep Completions are completed,"
-        f" open-play passes ending within {DEEP_COMPLETION_YD} yards of the opponent's goal line (any width,"
-        " not restricted to inside the box). Progressive Passes uses the same"
+        f" open-play passes starting and ending within {DEEP_COMPLETION_YD} yards of the opponent's goal line"
+        " (any width, not restricted to inside the box). Progressive Passes uses the same"
         " rolling-window definition described earlier in this Notes tab. Shot Assists is read directly from WhoScored's"
         " own 'ShotAssist' qualifier on the pass event (the pass immediately preceding a shot attempt),"
         " rather than re-derived from the Shot Creating Actions search. SCA is the combined total of times a"
