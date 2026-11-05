@@ -1956,6 +1956,121 @@ def _render_season_touchmap(db):
     plt.close(fig)
 
 
+def _render_season_carry_map(db):
+    """
+    Carries Map aggregated across every published match in ONE selected
+    competition - every inferred carry a player has made, plotted on one
+    pitch with arrowhead-style lines.  Same League/Season/Team/Player/Zone/
+    Matchweek scoping as _render_season_touchmap() above.
+    """
+    all_carries = hdb.fetch_carries(db)
+    if all_carries.empty:
+        st.info(
+            "No carry data saved yet. This needs matches saved AFTER the carries table was added - "
+            "re-run 'Save to Database' on your matches in the combined report app to backfill it."
+        )
+        return
+
+    available_leagues = hdb.fetch_available_competitions(db)
+    if not available_leagues:
+        st.info("No matches saved yet - publish at least one match with 'Save to Database' first.")
+        return
+    league = _narrow_selectbox("League", available_leagues, key="season_carrymap_league")
+    matches = hdb.fetch_matches(db)
+    season, keep_ids, restrict_to_man_utd = _season_map_scope(
+        matches, league, key=f"season_carrymap_season_{league}"
+    )
+    if season is None:
+        st.info(f"No matches saved yet for {league}.")
+        return
+    matches_in_scope = matches[matches["match_id"].astype(str).isin(keep_ids)] if not matches.empty else matches
+
+    all_carries = all_carries[all_carries["match_id"].astype(str).isin(keep_ids)]
+    if restrict_to_man_utd:
+        all_carries = all_carries[all_carries["team"].apply(hdb._is_man_utd)]
+        st.caption(
+            "Only Man Utd has complete data saved for earlier seasons right now, "
+            "so other clubs are hidden here until that catches up."
+        )
+    if all_carries.empty:
+        st.info(f"No carry data saved yet for {season} {league}"
+                + (" (Man Utd only, for now)." if restrict_to_man_utd else "."))
+        return
+
+    team_filter = _team_filter_picker(all_carries, "team", key=f"season_carrymap_team_{league}_{season}")
+    scoped = all_carries[all_carries["team"] == team_filter]
+    players = sorted(scoped["player"].dropna().unique())
+    if not players:
+        st.info("No players found for this filter.")
+        return
+    player, zone = _player_and_zone_row(
+        players,
+        player_key=f"season_carrymap_player_{league}_{season}_{team_filter}",
+        zone_key=f"season_carrymap_zone_{league}_{season}_{team_filter}",
+    )
+
+    keep_ids, _mw_narrowed = _matchweek_range_slider(
+        f"season_carrymap_matchweek_{league}_{season}_{team_filter}", matches_in_scope
+    )
+
+    player_carries = hdb.fetch_carries(db, player=player, team=team_filter)
+    player_carries = player_carries[player_carries["match_id"].astype(str).isin(keep_ids)]
+    player_carries = player_carries[_pitch_zone_mask(player_carries, zone, "x", "y")]
+    if player_carries.empty:
+        st.info(f"No carries found for {player} in {league}"
+                + ("" if zone == "All zones" else " in this pitch zone") + ".")
+        return
+
+    player_carries = player_carries.rename(columns={"end_x": "endX", "end_y": "endY"})
+    n_matches = player_carries["match_id"].nunique()
+
+    total = len(player_carries)
+    progressive = int(player_carries["is_progressive"].sum())
+    into_final_third = int(player_carries["into_final_third"].sum())
+    into_box = int(player_carries["into_box"].sum())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Matches", n_matches)
+    c2.metric("Total Carries", total)
+    c3.metric("Progressive", progressive)
+    c4.metric("Into Final Third", into_final_third)
+    c5.metric("Into Box", into_box)
+
+    stat_items = [
+        (f"{total} Carries", TITLE_COLOR),
+        (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
+        (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
+        (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+    ]
+    xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
+    if xt_total > 0:
+        stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
+
+    player_team = _display_team_name(team_filter)
+    subtitle = (_current_season_and_league(db, player_carries["match_id"].unique().tolist())
+                or f"Season - {n_matches} match(es)")
+
+    fig = plot_carry_map(player_carries, player, player_team, None, None, stat_items,
+                          title_suffix="All Carries", subtitle=subtitle)
+
+    png_buf = io.BytesIO()
+    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+    png_buf.seek(0)
+    st.image(png_buf, width=420)
+
+    download_buf = io.BytesIO()
+    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+    download_buf.seek(0)
+    st.download_button(
+        label="Download Season Carries Map (PNG)",
+        data=download_buf,
+        file_name=f"{player.replace(' ', '_')}_season_carries_map.png",
+        mime="image/png",
+        key="season_carrymap_download",
+    )
+    plt.close(fig)
+
+
 def _render_pairs_tab(db, mode):
     """
     Shared renderer for the Pass Pairs / Shot Pairs tabs - "look and
@@ -3350,6 +3465,7 @@ _DASH_TABS = [
     ("season_passmap", "Season Pass Map"),
     ("season_passrecv", "Season Passes Received"),
     ("season_touchmap", "Season Touch Map"),
+    ("season_carrymap", "Season Carries Map"),
 ]
 _DASH_TAB_SLUGS = {slug for slug, _ in _DASH_TABS}
 
@@ -3569,7 +3685,7 @@ def _render_player_page(db, player, team):
         )
     selected_match_id = match_options[match_label]
 
-    map_tabs = st.tabs(["Pass Map", "Passes Received", "Touch Map"])
+    map_tabs = st.tabs(["Pass Map", "Passes Received", "Touch Map", "Carries Map"])
 
     with map_tabs[0]:
         if selected_match_id is not None:
@@ -3673,6 +3789,52 @@ def _render_player_page(db, player, team):
             subtitle = f"{season}" if selected_match_id is None else match_label
             fig = plot_touch_map(player_touches, player, _display_team_name(team),
                                   subtitle=subtitle)
+            png_buf = io.BytesIO()
+            fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+            png_buf.seek(0)
+            st.image(png_buf, width=420)
+            plt.close(fig)
+
+    with map_tabs[3]:
+        if selected_match_id is not None:
+            player_carries = hdb.fetch_carries(db, match_id=selected_match_id, player=player, team=team)
+        else:
+            player_carries = hdb.fetch_carries(db, player=player, team=team)
+            if player_matches:
+                keep_ids = {str(mid) for mid, _, _ in player_matches}
+                player_carries = player_carries[player_carries["match_id"].astype(str).isin(keep_ids)]
+
+        if player_carries.empty:
+            st.info("No carry data found.")
+        else:
+            player_carries = player_carries.rename(columns={"end_x": "endX", "end_y": "endY"})
+            n_matches = player_carries["match_id"].nunique()
+            total = len(player_carries)
+            progressive = int(player_carries["is_progressive"].sum())
+            into_final_third = int(player_carries["into_final_third"].sum())
+            into_box = int(player_carries["into_box"].sum())
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Matches", n_matches)
+            c2.metric("Total Carries", total)
+            c3.metric("Progressive", progressive)
+            c4.metric("Into Final Third", into_final_third)
+            c5.metric("Into Box", into_box)
+
+            stat_items = [
+                (f"{total} Carries", TITLE_COLOR),
+                (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
+                (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
+                (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+            ]
+            xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
+            if xt_total > 0:
+                stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
+
+            subtitle = f"{season}" if selected_match_id is None else match_label
+            fig = plot_carry_map(player_carries, player, _display_team_name(team),
+                                  None, None, stat_items,
+                                  title_suffix="All Carries", subtitle=subtitle)
             png_buf = io.BytesIO()
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
             png_buf.seek(0)
@@ -4270,6 +4432,9 @@ else:
 
     elif _active_tab == "season_touchmap":
         _render_season_touchmap(db)
+
+    elif _active_tab == "season_carrymap":
+        _render_season_carry_map(db)
 
     elif _active_tab == "pass_pairs":
         _render_pairs_tab(db, mode="pass")
