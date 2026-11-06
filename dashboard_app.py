@@ -3727,6 +3727,17 @@ def _render_player_page(db, player, team):
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
             png_buf.seek(0)
             st.image(png_buf, width=420)
+
+            download_buf = io.BytesIO()
+            fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+            download_buf.seek(0)
+            st.download_button(
+                label="Download Pass Map (PNG)",
+                data=download_buf,
+                file_name=f"{player.replace(' ', '_')}_pass_map.png",
+                mime="image/png",
+                key="player_page_passmap_download",
+            )
             plt.close(fig)
 
     with map_tabs[1]:
@@ -3767,6 +3778,17 @@ def _render_player_page(db, player, team):
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
             png_buf.seek(0)
             st.image(png_buf, width=420)
+
+            download_buf = io.BytesIO()
+            fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+            download_buf.seek(0)
+            st.download_button(
+                label="Download Passes Received (PNG)",
+                data=download_buf,
+                file_name=f"{player.replace(' ', '_')}_passes_received.png",
+                mime="image/png",
+                key="player_page_passrecv_download",
+            )
             plt.close(fig)
 
     with map_tabs[2]:
@@ -3793,6 +3815,17 @@ def _render_player_page(db, player, team):
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
             png_buf.seek(0)
             st.image(png_buf, width=420)
+
+            download_buf = io.BytesIO()
+            fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+            download_buf.seek(0)
+            st.download_button(
+                label="Download Touch Map (PNG)",
+                data=download_buf,
+                file_name=f"{player.replace(' ', '_')}_touch_map.png",
+                mime="image/png",
+                key="player_page_touchmap_download",
+            )
             plt.close(fig)
 
     with map_tabs[3]:
@@ -3839,6 +3872,17 @@ def _render_player_page(db, player, team):
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
             png_buf.seek(0)
             st.image(png_buf, width=420)
+
+            download_buf = io.BytesIO()
+            fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+            download_buf.seek(0)
+            st.download_button(
+                label="Download Carries Map (PNG)",
+                data=download_buf,
+                file_name=f"{player.replace(' ', '_')}_carries_map.png",
+                mime="image/png",
+                key="player_page_carrymap_download",
+            )
             plt.close(fig)
 
     # ── Passing Pairs / Shot Pairs ──
