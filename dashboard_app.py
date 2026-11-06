@@ -3577,18 +3577,42 @@ def _render_player_page(db, player, team):
     match-by-match stats, season maps, and pair tables.  Linked from the
     Team Page's General Stats table (see _render_general_stats_table()'s
     team_for_player_links parameter).
+
+    The `team` from the URL is the team that was clicked to reach this
+    page, but a player may have played for DIFFERENT teams in different
+    seasons (e.g. a January transfer).  We use fetch_player_team_seasons()
+    to discover every (team, season) this player appears in, show ALL
+    those seasons in the dropdown, and resolve the correct team for
+    whichever season is selected - so switching to 2026-27 for a player
+    who transferred from Brighton to Man Utd automatically shows Man Utd.
     """
-    # ── Season / Competition filters ──
-    seasons = hdb.fetch_available_seasons(db, team=team)
-    if not seasons:
-        st.info("No matches published yet.")
+    # ── Discover all team/season combos for this player ──
+    team_seasons = hdb.fetch_player_team_seasons(db, player)
+    if not team_seasons:
+        st.info("No matches published yet for this player.")
         return
 
-    # Default to the most recent season (index 0)
+    # Build season list from ALL teams, not just the URL team
+    all_seasons = sorted({ts["season"] for ts in team_seasons}, reverse=True)
+
+    # Build a lookup: season -> list of teams the player played for
+    season_to_teams = {}
+    for ts in team_seasons:
+        season_to_teams.setdefault(ts["season"], []).append(ts["team"])
+
+    # Default season: prefer the most recent season, but if the URL team
+    # has data, start with its most recent season
+    url_team_seasons = [ts["season"] for ts in team_seasons if ts["team"] == team]
+    default_season_idx = 0
+    if url_team_seasons:
+        best = max(url_team_seasons)
+        if best in all_seasons:
+            default_season_idx = all_seasons.index(best)
+
     title_col, filter_col = st.columns([5, 2])
     with filter_col:
         season = st.selectbox(
-            "Season", seasons, index=0,
+            "Season", all_seasons, index=default_season_idx,
             key="player_page_season", label_visibility="collapsed",
         )
         st.markdown(
@@ -3597,16 +3621,28 @@ def _render_player_page(db, player, team):
             unsafe_allow_html=True,
         )
 
+    # Resolve the correct team for the selected season
+    teams_this_season = season_to_teams.get(season, [])
+    if team in teams_this_season:
+        # URL team played in this season - keep it
+        active_team = team
+    elif teams_this_season:
+        # Player was at a different team this season - switch
+        active_team = teams_this_season[0]
+    else:
+        # Shouldn't happen, but fall back to URL team
+        active_team = team
+
     with title_col:
         st.markdown(
             f'<div style="font-size:2em; font-weight:bold;">{html.escape(player)}</div>'
             f'<div style="font-size:1.1em; color:#555;">'
-            f'{_display_team_name(team)} &middot; {season}</div>',
+            f'{_display_team_name(active_team)} &middot; {season}</div>',
             unsafe_allow_html=True,
         )
 
-    # Competition filter
-    competitions = hdb.fetch_team_competitions(db, team, season)
+    # Competition filter - use active_team, not URL team
+    competitions = hdb.fetch_team_competitions(db, active_team, season)
     comp_options = competitions + (["Both"] if len(competitions) > 1 else [])
     comp_col, _spacer = st.columns([1, 4])
     with comp_col:
@@ -3618,13 +3654,16 @@ def _render_player_page(db, player, team):
     # "Both" means no filter
     comp_filter = None if competition == "Both" else competition
 
-    # Back link to team page
-    team_url = _team_page_url(team)
+    # Back link to team page - link to the active team, not necessarily the URL team
+    team_url = _team_page_url(active_team)
     st.markdown(
-        f'<a href="{team_url}" target="_self" style="font-size:0.9em;">← Back to {_display_team_name(team)}</a>',
+        f'<a href="{team_url}" target="_self" style="font-size:0.9em;">← Back to {_display_team_name(active_team)}</a>',
         unsafe_allow_html=True,
     )
     st.markdown("<div style='height:1.0em;'></div>", unsafe_allow_html=True)
+
+    # From here on, use active_team instead of the URL team
+    team = active_team
 
     # ── Match Log Tabs ──
     st.subheader("Match Log")

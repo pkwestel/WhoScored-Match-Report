@@ -4352,3 +4352,50 @@ def fetch_player_matches(db, player, team, season, competition=None):
         label = f"{venue} {opponent} ({m['match_date']})"
         result.append((match_id, m["match_date"], label))
     return result
+
+
+def fetch_player_team_seasons(db: DB, player: str) -> list:
+    """
+    Every (team, season) pair a player has appeared in, derived from
+    player_match_stats joined with matches.  Returns a list of dicts:
+        [{"team": "Man Utd", "season": "2026-27", "appearances": 15}, ...]
+    sorted by season descending then team alphabetically.  Used by the
+    Player Page to let the team context switch when the season changes
+    (a player who transferred mid-career has different teams in different
+    seasons).
+    """
+    matches_df = fetch_matches(db)
+    if matches_df.empty:
+        return []
+    matches_df = matches_df.copy()
+    matches_df["season"] = matches_df["match_date"].apply(_season_label)
+
+    cur = db.execute(
+        "SELECT DISTINCT match_id, team FROM player_match_stats WHERE player = ?",
+        (player,),
+    )
+    player_rows = cur.fetchall()
+    if not player_rows:
+        return []
+
+    # Build a mapping of match_id -> season
+    mid_to_season = dict(zip(
+        matches_df["match_id"].astype(str),
+        matches_df["season"],
+    ))
+
+    from collections import Counter
+    team_season_counts = Counter()
+    for match_id, team in player_rows:
+        season = mid_to_season.get(str(match_id))
+        if season:
+            team_season_counts[(team, season)] += 1
+
+    result = []
+    for (team, season), count in team_season_counts.items():
+        if not _is_man_utd(team) and season in _HIDDEN_SEASONS:
+            continue
+        result.append({"team": team, "season": season, "appearances": count})
+
+    result.sort(key=lambda r: (r["season"], r["team"]), reverse=True)
+    return result
