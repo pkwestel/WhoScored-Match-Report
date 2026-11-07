@@ -379,6 +379,7 @@ def _render_shooting_table(shooting_df, sort_key="shooting", team_for_player_lin
 # text a widget/table/chart actually renders, not the value passed back
 # into any hdb.fetch_*()/query-param call.
 TEAM_DISPLAY_NAMES = {
+    "Man Utd": "Manchester United",
     "Man City": "Manchester City",
     "Hull": "Hull City",
     "Bayern": "Bayern Munich",
@@ -1352,7 +1353,7 @@ def _render_pass_map(db, matches, mode, show_minute_slider=False):
     match_date, _ = _split_date_and_kickoff(match_date_raw)
     competition_raw = matches.loc[matches["match_id"] == match_id, "competition"].iloc[0]
     competition = competition_raw if pd.notna(competition_raw) else None
-    player_team = (_display_team_name(player_passes["team"].iloc[0])
+    player_team = (player_passes["team"].iloc[0]
                     if "team" in player_passes.columns and not player_passes.empty else None)
 
     total = len(player_passes)
@@ -1466,7 +1467,7 @@ def _render_carry_map(db, matches, show_minute_slider=False):
     match_date, _ = _split_date_and_kickoff(match_date_raw)
     competition_raw = matches.loc[matches["match_id"] == match_id, "competition"].iloc[0]
     competition = competition_raw if pd.notna(competition_raw) else None
-    player_team = (_display_team_name(player_carries["team"].iloc[0])
+    player_team = (player_carries["team"].iloc[0]
                     if "team" in player_carries.columns and not player_carries.empty else None)
 
     total = len(player_carries)
@@ -1798,7 +1799,7 @@ def _render_season_pass_map(db, mode):
     # team_filter is always a real, required team now (see
     # _team_filter_picker()'s own docstring) - no "All teams"/fallback
     # branch needed here any more.
-    player_team = _display_team_name(team_filter)
+    player_team = team_filter
 
     # Line 2 of the title: "{current season} {league}" (e.g. "2026-27
     # Premier League") derived from these actual matches - see
@@ -1927,7 +1928,7 @@ def _render_season_touchmap(db):
     # team_filter is always a real, required team now (see
     # _team_filter_picker()'s own docstring) - no "All teams"/fallback
     # branch needed here any more.
-    player_team = _display_team_name(team_filter)
+    player_team = team_filter
 
     # Line 2 of the title: "{current season} {league}" - see
     # _current_season_and_league()'s own docstring; falls back to the
@@ -2046,7 +2047,7 @@ def _render_season_carry_map(db):
     if xt_total > 0:
         stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
 
-    player_team = _display_team_name(team_filter)
+    player_team = team_filter
     subtitle = (_current_season_and_league(db, player_carries["match_id"].unique().tolist())
                 or f"Season - {n_matches} match(es)")
 
@@ -2272,7 +2273,7 @@ def _render_pair_pass_map(db, team, passer, receiver, match_id, season_match_ids
         subtitle = (_current_season_and_league(db, pair_passes["match_id"].unique().tolist())
                     or f"Season - {n_matches} match(es)")
 
-    fig = plot_pass_map(pair_passes, receiver, _display_team_name(team), home_team, away_team, stat_items,
+    fig = plot_pass_map(pair_passes, receiver, team, home_team, away_team, stat_items,
                          title_suffix=f"Passes Received from {passer}",
                          subtitle=subtitle, match_date=match_date, competition=competition)
 
@@ -2796,7 +2797,7 @@ def _render_match_touchmap(db, match_id, home_team, away_team, match_date=None, 
                 + ("" if zone == "All zones" else " in this pitch zone")
                 + ("" if minute_min is None else " in this minute range") + ".")
         return
-    player_team = (_display_team_name(player_touches["team"].iloc[0])
+    player_team = (player_touches["team"].iloc[0]
                     if "team" in player_touches.columns and not player_touches.empty else None)
     date_part, _ = _split_date_and_kickoff(match_date)
 
@@ -3759,7 +3760,7 @@ def _render_player_page(db, player, team):
                 (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
             ]
             subtitle = f"{season}" if selected_match_id is None else match_label
-            fig = plot_pass_map(player_passes, player, _display_team_name(team),
+            fig = plot_pass_map(player_passes, player, team,
                                 None, None, stat_items,
                                 title_suffix="All Passes", subtitle=subtitle)
             png_buf = io.BytesIO()
@@ -3810,7 +3811,7 @@ def _render_player_page(db, player, team):
                 (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
             ]
             subtitle = f"{season}" if selected_match_id is None else match_label
-            fig = plot_pass_map(recv_passes, player, _display_team_name(team),
+            fig = plot_pass_map(recv_passes, player, team,
                                 None, None, stat_items,
                                 title_suffix="All Passes Received", subtitle=subtitle)
             png_buf = io.BytesIO()
@@ -3848,7 +3849,7 @@ def _render_player_page(db, player, team):
             c2.metric("Total Touches", len(player_touches))
 
             subtitle = f"{season}" if selected_match_id is None else match_label
-            fig = plot_touch_map(player_touches, player, _display_team_name(team),
+            fig = plot_touch_map(player_touches, player, team,
                                   subtitle=subtitle)
             png_buf = io.BytesIO()
             fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -3904,7 +3905,7 @@ def _render_player_page(db, player, team):
                 stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
 
             subtitle = f"{season}" if selected_match_id is None else match_label
-            fig = plot_carry_map(player_carries, player, _display_team_name(team),
+            fig = plot_carry_map(player_carries, player, team,
                                   None, None, stat_items,
                                   title_suffix="All Carries", subtitle=subtitle)
             png_buf = io.BytesIO()
