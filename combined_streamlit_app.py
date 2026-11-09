@@ -386,7 +386,8 @@ if report:
                 # (report["kickoff"]) over the date picker above when it's
                 # available. See save_report_to_db()'s own docstring.
                 match_id = bl.save_report_to_db(db_url, report, competition, match_date.isoformat())
-                n_carries = len(report.get('all_carries') or [])
+                _carries = report.get('all_carries')
+                n_carries = len(_carries) if _carries is not None else 0
                 st.success(
                     f"Saved match {match_id} to the database, including "
                     f"{len(report['all_passes'])} passes, {len(report['all_touches'])} touches "
