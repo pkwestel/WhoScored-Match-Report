@@ -414,34 +414,57 @@ if results:
     # whatever's picked) - run separate batches if a batch mixes leagues.
     competition = st.selectbox("Competition", ["Premier League", "UEFA Champions League"], index=0)
 
+    # Identify which matches have empty FotMob data BEFORE the save button,
+    # so the user can check "Save anyway" for individual matches that had
+    # a FotMob scrape hiccup but still have good WhoScored data (passes,
+    # carries, touches, etc.) worth keeping.
+    fm_empty_indices = []
+    for i, r in enumerate(results):
+        if not r["success"]:
+            continue
+        report = r["report"]
+        fm_totals_df = report.get("fm_totals_df")
+        if fm_totals_df is None or fm_totals_df.empty or "Goals" not in fm_totals_df.columns:
+            fm_empty_indices.append(i)
+
+    if fm_empty_indices:
+        st.warning(
+            f"**{len(fm_empty_indices)} match(es) have empty FotMob data** (no Goals/Shots/xG). "
+            "This usually means FotMob's page didn't load fully during the scrape (ad redirect, "
+            "timeout, etc.). These matches will be skipped unless you check 'Save anyway' below — "
+            "saving without FotMob data preserves all WhoScored stats (passes, carries, touches, "
+            "progressive passes, etc.) but Score/xG will show as blank on the Fixtures tab. "
+            "You can re-scrape just the missing match later to fill in the xG."
+        )
+        for idx in fm_empty_indices:
+            report = results[idx]["report"]
+            st.checkbox(
+                f"Save anyway: {report['ws_home_name']} vs {report['ws_away_name']} (no xG data)",
+                value=False,
+                key=f"batch_save_anyway_{idx}",
+            )
+
     if st.button("Save all successful matches to the database", type="primary"):
         any_saved = False
-        for r in results:
+        for i, r in enumerate(results):
             if not r["success"]:
                 continue
             report = r["report"]
-            # Same safety check as combined_streamlit_app.py's single-match
-            # "Save to Database" - a match whose FotMob shot map came back
-            # empty (transient scrape hiccup, e.g. an ad redirect mid-scrape)
-            # would otherwise SILENTLY overwrite any already-saved good
-            # FotMob stats for this match with blanks (saves fully replace,
-            # not merge - see history_db.publish_report()'s docstring). A
-            # batch run has no per-match interactive confirmation, so the
-            # safe default is to skip saving that one match and flag it,
-            # rather than either blocking the whole batch or corrupting data
-            # silently - re-run just that match through the single-match
-            # combined report app (which does let you confirm and save
-            # anyway) if you're sure the blank data is correct.
             fm_totals_df = report.get("fm_totals_df")
-            if fm_totals_df is None or fm_totals_df.empty or "Goals" not in fm_totals_df.columns:
+            fm_is_empty = fm_totals_df is None or fm_totals_df.empty or "Goals" not in fm_totals_df.columns
+            if fm_is_empty and not st.session_state.get(f"batch_save_anyway_{i}", False):
                 st.warning(
-                    f"Skipped {report['ws_home_name']} vs {report['ws_away_name']}: FotMob's scrape "
-                    "came back with no Goals/Shots/xG data at all, so saving would overwrite any "
-                    "existing good FotMob stats for this match with blanks. Re-scrape it, or save it "
-                    "individually via the single-match combined report app if the blank data is "
-                    "actually correct."
+                    f"Skipped {report['ws_home_name']} vs {report['ws_away_name']}: FotMob data is "
+                    "empty. Check 'Save anyway' above and click save again to force it, or re-scrape "
+                    "the match to get proper xG data."
                 )
                 continue
+            if fm_is_empty:
+                st.info(
+                    f"Saving {report['ws_home_name']} vs {report['ws_away_name']} WITHOUT FotMob "
+                    "xG data (WhoScored stats only). Re-scrape via the combined report app later "
+                    "to fill in xG."
+                )
             match_date = report["match_date"]
             match_date_iso = match_date.isoformat() if hasattr(match_date, "isoformat") else str(match_date)
             try:
