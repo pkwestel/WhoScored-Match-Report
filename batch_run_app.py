@@ -256,6 +256,13 @@ if matches:
     st.write(f"{len(matches)} match(es) in this batch - uncheck any you don't want to run, and fix up "
              "URLs/dates as needed:")
 
+    def _batch_select_all():
+        val = st.session_state.get("batch_select_all", False)
+        for _j in range(len(matches)):
+            st.session_state[f"batch_include_{_j}"] = val
+
+    st.checkbox("Select all", value=False, key="batch_select_all", on_change=_batch_select_all)
+
     for i, m in enumerate(matches):
         with st.container(border=True):
             label = f"{m.get('home_name') or '?'} vs {m.get('away_name') or '?'}"

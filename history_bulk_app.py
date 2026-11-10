@@ -230,6 +230,13 @@ if matches:
     # -----------------------------------------------------------------------
     st.write("Check the matches you want to run:")
 
+    def _hbulk_select_all():
+        val = st.session_state.get("hbulk_select_all", False)
+        for _j in range(len(matches)):
+            st.session_state[_row_key("include", _j)] = val
+
+    st.checkbox("Select all", value=False, key="hbulk_select_all", on_change=_hbulk_select_all)
+
     for i, m in enumerate(matches):
         with st.container(border=True):
             label = f"{m.get('home_name') or '?'} vs {m.get('away_name') or '?'}"

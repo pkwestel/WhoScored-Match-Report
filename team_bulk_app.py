@@ -280,6 +280,13 @@ if matches:
     # -----------------------------------------------------------------------
     st.write(f"**{len(matches)} match(es)** — check the ones you want to run:")
 
+    def _tbulk_select_all():
+        val = st.session_state.get("tbulk_select_all", False)
+        for _j in range(len(matches)):
+            st.session_state[_row_key("include", _j)] = val
+
+    st.checkbox("Select all", value=False, key="tbulk_select_all", on_change=_tbulk_select_all)
+
     for i, m in enumerate(matches):
         with st.container(border=True):
             label = f"{m.get('home_name') or '?'} vs {m.get('away_name') or '?'}"
