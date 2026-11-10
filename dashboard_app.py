@@ -1157,6 +1157,13 @@ def _player_and_zone_row(players, player_key, zone_key, zone_index=0, format_fun
 # (x 66.6-83.3) crossed with the middle of the pitch's 3 vertical thirds
 # (y 33.3-66.6).
 _PITCH_ZONE_OPTIONS = ["All zones", "Own Third", "Middle Third", "Attacking Third", "Zone 14"]
+_ZONE_TITLE_PREFIX = {
+    "All zones": "All",
+    "Own Third": "Own 1/3",
+    "Middle Third": "Middle 1/3",
+    "Attacking Third": "Final 1/3",
+    "Zone 14": "Zone 14",
+}
 _PITCH_THIRD_X_BOUNDS = {
     "Own Third": (0.0, 33.3),
     "Middle Third": (33.3, 66.6),
@@ -1786,7 +1793,8 @@ def _render_season_pass_map(db, mode):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
-        title_suffix = "All Passes"
+        _zp = _ZONE_TITLE_PREFIX.get(zone, "All")
+        title_suffix = f"{_zp} Passes"
     else:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Matches", n_matches)
@@ -1798,7 +1806,8 @@ def _render_season_pass_map(db, mode):
             (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
             (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
         ]
-        title_suffix = "All Passes Received"
+        _zp = _ZONE_TITLE_PREFIX.get(zone, "All")
+        title_suffix = f"{_zp} Passes Received"
 
     # team_filter is always a real, required team now (see
     # _team_filter_picker()'s own docstring) - no "All teams"/fallback
@@ -1941,7 +1950,7 @@ def _render_season_touchmap(db):
                 or f"Season - {n_matches} match(es)")
 
     fig = plot_touch_map(player_touches, player, player_team=player_team,
-                          subtitle=subtitle, title_suffix="All Touches", stat_items=stat_items)
+                          subtitle=subtitle, title_suffix=f"{_ZONE_TITLE_PREFIX.get(zone, 'All')} Touches", stat_items=stat_items)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -2059,7 +2068,7 @@ def _render_season_carry_map(db):
                 or f"Season - {n_matches} match(es)")
 
     fig = plot_carry_map(player_carries, player, player_team, None, None, stat_items,
-                          title_suffix="All Carries", subtitle=subtitle)
+                          title_suffix=f"{_ZONE_TITLE_PREFIX.get(zone, 'All')} Carries", subtitle=subtitle)
 
     png_buf = io.BytesIO()
     fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
@@ -3795,7 +3804,7 @@ def _render_player_page(db, player, team):
                 subtitle = f"{season}" if selected_match_id is None else match_label
                 fig = plot_pass_map(player_passes, player, team,
                                     None, None, stat_items,
-                                    title_suffix="All Passes", subtitle=subtitle)
+                                    title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes", subtitle=subtitle)
                 png_buf = io.BytesIO()
                 fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
                 png_buf.seek(0)
@@ -3851,7 +3860,7 @@ def _render_player_page(db, player, team):
                 subtitle = f"{season}" if selected_match_id is None else match_label
                 fig = plot_pass_map(recv_passes, player, team,
                                     None, None, stat_items,
-                                    title_suffix="All Passes Received", subtitle=subtitle)
+                                    title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes Received", subtitle=subtitle)
                 png_buf = io.BytesIO()
                 fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
                 png_buf.seek(0)
@@ -3892,8 +3901,10 @@ def _render_player_page(db, player, team):
                 c2.metric("Total Touches", len(player_touches))
 
                 subtitle = f"{season}" if selected_match_id is None else match_label
+                _zp_t = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
+                _touch_suffix = f"{_zp_t} Touches" if _zp_t != "All" else "Touch Map"
                 fig = plot_touch_map(player_touches, player, team,
-                                      subtitle=subtitle)
+                                      subtitle=subtitle, title_suffix=_touch_suffix)
                 png_buf = io.BytesIO()
                 fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
                 png_buf.seek(0)
@@ -3956,9 +3967,10 @@ def _render_player_page(db, player, team):
                     stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
 
                 subtitle = f"{season}" if selected_match_id is None else match_label
+                _zp_c = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
                 fig = plot_carry_map(player_carries, player, team,
                                       None, None, stat_items,
-                                      title_suffix="All Carries", subtitle=subtitle)
+                                      title_suffix=f"{_zp_c} Carries", subtitle=subtitle)
                 png_buf = io.BytesIO()
                 fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
                 png_buf.seek(0)
