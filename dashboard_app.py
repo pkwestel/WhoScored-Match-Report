@@ -1475,17 +1475,21 @@ def _render_carry_map(db, matches, show_minute_slider=False):
     into_final_third = int(player_carries["into_final_third"].sum())
     into_box = int(player_carries["into_box"].sum())
 
-    c1, c2, c3, c4 = st.columns(4)
+    carry_to_shot = int(player_carries["ends_with_shot"].sum()) if "ends_with_shot" in player_carries.columns else 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Carries", total)
     c2.metric("Progressive", progressive)
     c3.metric("Into Final Third", into_final_third)
     c4.metric("Into Box", into_box)
+    c5.metric("Carry to Shot", carry_to_shot)
 
     stat_items = [
         (f"{total} Carries", TITLE_COLOR),
         (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
         (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
         (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+        (f"{carry_to_shot} Carry to Shot", CARRY_CATEGORY_COLORS["Carry to Shot"]),
     ]
     xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
     if xt_total > 0:
@@ -2029,19 +2033,22 @@ def _render_season_carry_map(db):
     progressive = int(player_carries["is_progressive"].sum())
     into_final_third = int(player_carries["into_final_third"].sum())
     into_box = int(player_carries["into_box"].sum())
+    carry_to_shot = int(player_carries["ends_with_shot"].sum()) if "ends_with_shot" in player_carries.columns else 0
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Matches", n_matches)
     c2.metric("Total Carries", total)
     c3.metric("Progressive", progressive)
     c4.metric("Into Final Third", into_final_third)
     c5.metric("Into Box", into_box)
+    c6.metric("Carry to Shot", carry_to_shot)
 
     stat_items = [
         (f"{total} Carries", TITLE_COLOR),
         (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
         (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
         (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+        (f"{carry_to_shot} Carry to Shot", CARRY_CATEGORY_COLORS["Carry to Shot"]),
     ]
     xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
     if xt_total > 0:
@@ -3927,19 +3934,22 @@ def _render_player_page(db, player, team):
                 progressive = int(player_carries["is_progressive"].sum())
                 into_final_third = int(player_carries["into_final_third"].sum())
                 into_box = int(player_carries["into_box"].sum())
+                carry_to_shot = int(player_carries["ends_with_shot"].sum()) if "ends_with_shot" in player_carries.columns else 0
 
-                c1, c2, c3, c4, c5 = st.columns(5)
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
                 c1.metric("Matches", n_matches)
                 c2.metric("Total Carries", total)
                 c3.metric("Progressive", progressive)
                 c4.metric("Into Final Third", into_final_third)
                 c5.metric("Into Box", into_box)
+                c6.metric("Carry to Shot", carry_to_shot)
 
                 stat_items = [
                     (f"{total} Carries", TITLE_COLOR),
                     (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
                     (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
                     (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+                    (f"{carry_to_shot} Carry to Shot", CARRY_CATEGORY_COLORS["Carry to Shot"]),
                 ]
                 xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
                 if xt_total > 0:

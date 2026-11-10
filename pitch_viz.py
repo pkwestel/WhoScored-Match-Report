@@ -92,15 +92,17 @@ CARRY_CATEGORY_COLORS = {
     "Normal": "#4a4a4a",            # dark charcoal - same as Completed passes
     "Progressive": "#2f9bf0",       # sky blue - same as progressive passes
     "Into Final Third": "#1fa252",  # green - distinctive from passes
-    "Into Box": "#d32f2f",          # red - most dangerous carries
+    "Into Box": "#1b5e20",          # dark green - carries entering the box
+    "Carry to Shot": "#4a148c",     # dark purple - carries ending with a shot
 }
 CARRY_CATEGORY_STYLE = {
     "Normal": {"lw": 1.6, "alpha": 0.7},
     "Progressive": {"lw": 2.0, "alpha": 0.9},
     "Into Final Third": {"lw": 2.2, "alpha": 0.95},
     "Into Box": {"lw": 2.6, "alpha": 1.0},
+    "Carry to Shot": {"lw": 2.8, "alpha": 1.0},
 }
-CARRY_CATEGORY_DRAW_ORDER = ["Normal", "Progressive", "Into Final Third", "Into Box"]
+CARRY_CATEGORY_DRAW_ORDER = ["Normal", "Progressive", "Into Final Third", "Into Box", "Carry to Shot"]
 
 # Touch map colormap - reuses colors already established elsewhere in this
 # palette (the Progressive blue and Incomplete orange from PASS_CATEGORY_

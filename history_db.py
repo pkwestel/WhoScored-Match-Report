@@ -214,6 +214,11 @@ def init_schema(db: DB):
         db.commit()
     except Exception:
         db.rollback()
+    try:
+        db.execute("ALTER TABLE carries ADD COLUMN ends_with_shot INTEGER")
+        db.commit()
+    except Exception:
+        db.rollback()
     db.execute("""
         CREATE TABLE IF NOT EXISTS team_match_stats (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +406,7 @@ def init_schema(db: DB):
             is_progressive  INTEGER,
             into_final_third INTEGER,
             into_box        INTEGER,
+            ends_with_shot  INTEGER,
             xt_carry        REAL,
             category        TEXT,
             UNIQUE(match_id, team, player, cumulative_mins, x, y)
@@ -419,6 +425,7 @@ def init_schema(db: DB):
             is_progressive  INTEGER,
             into_final_third INTEGER,
             into_box        INTEGER,
+            ends_with_shot  INTEGER,
             xt_carry        REAL,
             category        TEXT,
             UNIQUE(match_id, team, player, cumulative_mins, x, y)
@@ -587,14 +594,16 @@ def upsert_carries(db: DB, match_id, carries_df: pd.DataFrame):
         db.execute("""
             INSERT INTO carries (match_id, team, player, cumulative_mins,
                                   x, y, end_x, end_y, is_progressive,
-                                  into_final_third, into_box, xt_carry, category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  into_final_third, into_box, ends_with_shot,
+                                  xt_carry, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(match_id, team, player, cumulative_mins, x, y) DO UPDATE SET
                 end_x            = excluded.end_x,
                 end_y            = excluded.end_y,
                 is_progressive   = excluded.is_progressive,
                 into_final_third = excluded.into_final_third,
                 into_box         = excluded.into_box,
+                ends_with_shot   = excluded.ends_with_shot,
                 xt_carry         = excluded.xt_carry,
                 category         = excluded.category
         """, (
@@ -603,7 +612,8 @@ def upsert_carries(db: DB, match_id, carries_df: pd.DataFrame):
             _num(r.get("x")), _num(r.get("y")),
             _num(r.get("endX")), _num(r.get("endY")),
             int(bool(r.get("is_progressive"))), int(bool(r.get("into_final_third"))),
-            int(bool(r.get("into_box"))), _num(r.get("xt_carry")),
+            int(bool(r.get("into_box"))), int(bool(r.get("ends_with_shot"))),
+            _num(r.get("xt_carry")),
             _text(r.get("category")),
         ))
 

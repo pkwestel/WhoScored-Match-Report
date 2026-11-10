@@ -1870,6 +1870,12 @@ def compute_carries(df, minute_min=None, minute_max=None):
         # start to end location (positive = moved to a more dangerous zone).
         xt_delta = _xt_value(ex, ey) - _xt_value(sx, sy)
 
+        # Does this carry end with a shot by the same player?
+        # nxt is the event that terminates the carry — if it's a shot
+        # (isShot flag from WhoScored), the carrier shot immediately
+        # after receiving/carrying the ball.
+        ends_with_shot = bool(nxt.get('isShot') == True)
+
         carry_records.append({
             'team': cur['team'], 'player': nxt['playerName'],
             'cumulative_mins': cur['cumulative_mins'],
@@ -1877,12 +1883,14 @@ def compute_carries(df, minute_min=None, minute_max=None):
             'is_progressive': bool(is_progressive),
             'into_final_third': bool(end_third == 'Final third' and start_third != 'Final third'),
             'into_box': bool(ends_in_box and not starts_in_box),
+            'ends_with_shot': ends_with_shot,
             'xt_carry': max(0.0, xt_delta),
         })
 
     carries_df = pd.DataFrame(carry_records) if carry_records else pd.DataFrame(
         columns=['team', 'player', 'cumulative_mins', 'x', 'y', 'endX', 'endY',
-                 'is_progressive', 'into_final_third', 'into_box', 'xt_carry'])
+                 'is_progressive', 'into_final_third', 'into_box', 'ends_with_shot',
+                 'xt_carry'])
 
     # carries_df returned to callers (e.g. compute_on_off()) is ALWAYS the
     # full-match version, unfiltered - only the team_carries/player_carries
@@ -1922,8 +1930,10 @@ def compute_carries(df, minute_min=None, minute_max=None):
 def classify_carry_category(row):
     """Classify a carry into a category for the carries map, analogous to
     classify_pass_category() for pass maps. Priority order:
-      Into Box > Into Final Third > Progressive > Normal
+      Carry to Shot > Into Box > Into Final Third > Progressive > Normal
     """
+    if row.get('ends_with_shot'):
+        return 'Carry to Shot'
     if row.get('into_box'):
         return 'Into Box'
     if row.get('into_final_third'):
@@ -1946,7 +1956,8 @@ def compute_all_carries(df):
     xt_carry, category.
     """
     out_cols = ['team', 'player', 'cumulative_mins', 'x', 'y', 'endX', 'endY',
-                'is_progressive', 'into_final_third', 'into_box', 'xt_carry', 'category']
+                'is_progressive', 'into_final_third', 'into_box', 'ends_with_shot',
+                'xt_carry', 'category']
     _, _, carries_df = compute_carries(df)
     if carries_df.empty:
         return pd.DataFrame(columns=out_cols)
