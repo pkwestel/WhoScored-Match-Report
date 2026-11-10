@@ -1863,8 +1863,14 @@ def compute_carries(df, minute_min=None, minute_max=None):
         # Progressive: moves the ball >=10 (of these units) closer to goal,
         # or enters the box. Carries starting in a team's own third still
         # count, but carries ENDING in their own third are excluded.
-        is_progressive = ((progress >= PROGRESSIVE_YARD_THRESHOLD) or ends_in_box) and \
-                          (end_third != 'Own third')
+        # Carries that START inside the box only count as progressive if
+        # they meet the distance threshold (the ends_in_box shortcut
+        # doesn't apply when already in the box).
+        if starts_in_box:
+            is_progressive = (progress >= PROGRESSIVE_YARD_THRESHOLD)
+        else:
+            is_progressive = ((progress >= PROGRESSIVE_YARD_THRESHOLD) or ends_in_box) and \
+                              (end_third != 'Own third')
 
         # xT delta for this carry: threat gained by moving the ball from
         # start to end location (positive = moved to a more dangerous zone).
