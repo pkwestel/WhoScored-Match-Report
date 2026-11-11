@@ -335,6 +335,13 @@ if matches:
         st.warning("Max delay < min delay - using min for both.")
         max_delay = min_delay
 
+    auto_save = st.checkbox(
+        "Automatically save to database",
+        help="After all matches are scraped, every successful match is saved to the "
+             "database automatically — one click does everything.",
+        key="tbulk_auto_save",
+    )
+
     if st.button("Run batch", type="primary", key="tbulk_run"):
         to_run = []
         for i in range(len(matches)):
@@ -382,6 +389,43 @@ if matches:
                     time.sleep(delay)
 
             st.session_state["tbulk_run_results"] = results
+
+            # --- Auto-save: save ALL successful matches after scraping completes ---
+            if auto_save:
+                _auto_db_url = st.session_state.get(
+                    "tbulk_db_url",
+                    os.environ.get("DATABASE_URL", "sqlite:///history.db"))
+                _auto_comp = st.session_state.get("tbulk_competition", "Premier League")
+                save_progress = st.progress(0.0)
+                save_status = st.empty()
+                successful = [r for r in results if r["success"]]
+                n_saved = 0
+                for si, r in enumerate(successful):
+                    report = r["report"]
+                    fm_totals_df = report.get("fm_totals_df")
+                    if (fm_totals_df is None or fm_totals_df.empty
+                            or "Goals" not in fm_totals_df.columns):
+                        save_status.warning(
+                            f"Skipped {report['ws_home_name']} vs "
+                            f"{report['ws_away_name']}: FotMob data empty.")
+                    else:
+                        try:
+                            match_date_iso = (
+                                report["match_date"].isoformat()
+                                if hasattr(report["match_date"], "isoformat")
+                                else str(report["match_date"]))
+                            match_id = batch_lib.save_report_to_db(
+                                _auto_db_url, report, _auto_comp, match_date_iso)
+                            n_saved += 1
+                            save_status.write(
+                                f"Saving {si + 1}/{len(successful)}: "
+                                f"{report['ws_home_name']} vs {report['ws_away_name']} ✓")
+                        except Exception as save_err:
+                            save_status.error(
+                                f"Failed to save {report['ws_home_name']} vs "
+                                f"{report['ws_away_name']}: {save_err}")
+                    save_progress.progress((si + 1) / len(successful))
+                st.success(f"Auto-save complete: {n_saved}/{len(successful)} matches saved.")
 
 # ---------------------------------------------------------------------------
 # Step 4 + 5: review results, then save to database
