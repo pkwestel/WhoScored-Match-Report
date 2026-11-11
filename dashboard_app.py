@@ -669,14 +669,24 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     """, unsafe_allow_html=True)
 
 
-def _render_sticky_col_table(df):
+def _render_sticky_col_table(df, sort_col=None, sort_asc=True):
     """
     Render a DataFrame as an HTML table with the first column frozen
     (CSS position:sticky) so it stays visible when scrolling horizontally.
     Used for the wide Team Stats tables on the League Overview page.
+
+    sort_col / sort_asc: optional pre-sort before rendering.
     """
     if df.empty:
         return
+    if sort_col and sort_col in df.columns:
+        sort_series = pd.to_numeric(df[sort_col], errors="coerce")
+        if sort_series.notna().any():
+            df = df.assign(_sort=sort_series).sort_values(
+                "_sort", ascending=sort_asc, na_position="last"
+            ).drop(columns="_sort").reset_index(drop=True)
+        else:
+            df = df.sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
     cols = list(df.columns)
     # Sticky styling for the first column (header + body)
     sticky_th = (
@@ -4202,28 +4212,41 @@ else:
             _render_data_table_html(league_table, link_columns=("Team",), sort_key="league_table")
 
         st.subheader("Team Stats")
-        # Narrow column (see _narrow_selectbox()) rather than a plain full-
-        # width st.selectbox() - this dropdown's options are all short
-        # words/phrases, so letting it stretch across the entire page (the
-        # previous behavior) left a lot of dead space to its right.
-        totals_category = _narrow_selectbox(
-            "Category", ["Shots", "Passing", "Touches", "Defensive Actions",
-                         "Defensive Action Location", "Team Style"],
-            key="team_totals_category"
-        )
+        # Controls row: Category | For/Against | Sort by | Direction
+        _cat_col, _fa_col, _sort_col, _dir_col = st.columns([2, 1.2, 2, 1.2])
+        with _cat_col:
+            totals_category = st.selectbox(
+                "Category", ["Shots", "Passing", "Touches", "Defensive Actions",
+                             "Defensive Action Location", "Team Style"],
+                key="team_totals_category"
+            )
+        # For/Against toggle — Shots already merges both sides; for
+        # Passing/Touches/Defensive Actions/Defensive Action Location
+        # the DB only stores "For" stats, so only Shots and Team Style
+        # have a real "Against" option.
+        _fa_categories = {"Shots", "Team Style"}
+        with _fa_col:
+            if totals_category in _fa_categories:
+                ts_mode = st.radio(
+                    "View", ["For", "Against"], horizontal=True,
+                    key="team_stats_for_against",
+                    help="'For' = what each team did. 'Against' = what opponents did against each team."
+                )
+            else:
+                ts_mode = "For"
+                st.markdown("<div style='height:54px'></div>", unsafe_allow_html=True)
+
+        # ------ build the DataFrame for the selected category ------
+        _ts_df = pd.DataFrame()
+        _ts_empty_msg = None
+
         if totals_category == "Shots":
             shot_for_df, shot_against_df = hdb.fetch_season_shot_totals(
                 db, competition=selected_league, season=selected_season)
             if shot_for_df.empty and shot_against_df.empty:
-                st.info("No shots saved yet - publish at least one match with 'Save to Database' first.")
+                _ts_empty_msg = "No shots saved yet - publish at least one match with 'Save to Database' first."
             else:
                 def _shot_side_totals(df, suffix):
-                    # 'xG per Shot' placed right after this side's own 'xG'
-                    # column (rather than at the very end of out_cols) so
-                    # that, once the For/Against sides are merged below,
-                    # 'xG per Shot For' lands right before 'Shots Against'
-                    # and 'xG per Shot Against' lands last - per request -
-                    # with no extra reordering needed after the merge.
                     out_cols = ["Team", f"Shots {suffix}", f"Goals {suffix}", f"xG {suffix}",
                                 f"xG per Shot {suffix}"]
                     if df.empty:
@@ -4232,13 +4255,6 @@ else:
                     agg = agg.rename(columns={"Shots": f"Shots {suffix}", "Goals": f"Goals {suffix}",
                                                "Total xG": f"xG {suffix}"})
                     agg[f"xG {suffix}"] = agg[f"xG {suffix}"].round(2)
-                    # Total xG / Shots - 0 (rather than NaN/inf) for a team
-                    # with 0 shots on this side, same "no fabricated rate"
-                    # convention as _per90()'s own 0-minutes case elsewhere.
-                    # Dividing by 1 (a harmless placeholder) on those 0-shot
-                    # rows and then overwriting them with a flat 0.0 avoids
-                    # ever computing a real 0/0 - cleaner than a pd.NA round
-                    # trip, which triggers a pandas downcasting warning.
                     shots_col = agg[f"Shots {suffix}"]
                     safe_denominator = shots_col.where(shots_col != 0, 1)
                     agg[f"xG per Shot {suffix}"] = (
@@ -4246,94 +4262,87 @@ else:
                     )
                     return agg[out_cols]
 
-                shot_totals = _shot_side_totals(shot_for_df, "For").merge(
-                    _shot_side_totals(shot_against_df, "Against"), on="Team", how="outer"
-                ).fillna(0)
-                for c in shot_totals.columns:
+                if ts_mode == "For":
+                    _ts_df = _shot_side_totals(shot_for_df, "For")
+                    if not shot_against_df.empty:
+                        _ts_df = _ts_df.merge(
+                            _shot_side_totals(shot_against_df, "Against"), on="Team", how="outer"
+                        ).fillna(0)
+                else:
+                    _ts_df = _shot_side_totals(shot_against_df, "Against")
+                    if not shot_for_df.empty:
+                        _ts_df = _ts_df.merge(
+                            _shot_side_totals(shot_for_df, "For"), on="Team", how="outer"
+                        ).fillna(0)
+                for c in _ts_df.columns:
                     if c != "Team":
-                        shot_totals[c] = shot_totals[c].astype(float if "xG" in c else int)
-                shot_totals = shot_totals.sort_values("Shots For", ascending=False).reset_index(drop=True)
-                # Plain st.dataframe (Team is no longer a link on this
-                # table - see the League Table above for why IT still is,
-                # and _render_team_page()'s Possession/Passing/Defensive
-                # tables for the same tradeoff) - clicking any column
-                # header sorts natively, instantly, with no page reload at
-                # all, since this is a real Streamlit grid widget rather
-                # than our own HTML table + link/dropdown sort mechanism.
-                # Team column relabeled for display only (_display_team_name())
-                # right before rendering - nothing downstream re-filters this
-                # DataFrame by Team afterward, so this is safe to do in place.
-                shot_totals["Team"] = shot_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(shot_totals)
+                        _ts_df[c] = _ts_df[c].astype(float if "xG" in c else int)
         elif totals_category == "Passing":
-            passing_totals = hdb.fetch_season_passing_totals(
+            _ts_df = hdb.fetch_season_passing_totals(
                 db, competition=selected_league, season=selected_season)
-            if passing_totals.empty:
-                st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
-            else:
-                passing_totals["Team"] = passing_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(passing_totals)
+            if _ts_df.empty:
+                _ts_empty_msg = "No passing stats saved yet - publish at least one match with 'Save to Database' first."
         elif totals_category == "Touches":
-            touches_totals = hdb.fetch_season_touches_totals(
+            _ts_df = hdb.fetch_season_touches_totals(
                 db, competition=selected_league, season=selected_season)
-            if touches_totals.empty:
-                st.info(
+            if _ts_df.empty:
+                _ts_empty_msg = (
                     "No touch data saved yet. This needs matches saved AFTER the touches table was "
                     "added - re-run 'Save to Database' on your matches in the combined report app to "
                     "backfill it."
                 )
+        elif totals_category == "Defensive Actions":
+            _ts_df = hdb.fetch_season_defensive_totals(
+                db, competition=selected_league, season=selected_season)
+            if _ts_df.empty:
+                _ts_empty_msg = (
+                    "No defensive stats saved yet - publish at least one match with 'Save to Database' "
+                    "first."
+                )
+        elif totals_category == "Defensive Action Location":
+            _ts_df = hdb.fetch_season_defensive_location_totals(
+                db, competition=selected_league, season=selected_season)
+            if _ts_df.empty:
+                _ts_empty_msg = (
+                    "No defensive action location data saved yet. This namespace was added partway "
+                    "through this project - re-run 'Save to Database' on your matches in the combined "
+                    "report app to backfill it."
+                )
+        elif totals_category == "Team Style":
+            if ts_mode == "For":
+                _ts_df = hdb.fetch_season_team_style_totals(
+                    db, competition=selected_league, season=selected_season)
             else:
-                touches_totals["Team"] = touches_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(touches_totals)
+                _ts_df = hdb.fetch_season_team_style_against_totals(
+                    db, competition=selected_league, season=selected_season)
+            if _ts_df.empty:
+                _ts_empty_msg = (
+                    "No Team Style stats saved yet - publish at least one match with 'Save to Database' "
+                    "first."
+                )
+
+        if _ts_empty_msg:
+            st.info(_ts_empty_msg)
+        elif not _ts_df.empty:
+            # Sort controls — populated from the actual columns
+            sortable_cols = [c for c in _ts_df.columns if c != "Team"]
+            with _sort_col:
+                sort_by = st.selectbox("Sort by", sortable_cols, index=0,
+                                       key="team_stats_sort_col")
+            with _dir_col:
+                sort_dir = st.radio("Direction", ["High to Low", "Low to High"],
+                                    horizontal=True, key="team_stats_sort_dir")
+            _ts_df["Team"] = _ts_df["Team"].map(_display_team_name)
+            _render_sticky_col_table(_ts_df, sort_col=sort_by,
+                                     sort_asc=(sort_dir == "Low to High"))
+            if totals_category == "Touches":
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
                     "in the combined report app to backfill it. Total Touches/thirds/Attacking Box are "
                     "unaffected and cover every match with saved touch data."
                 )
-        elif totals_category == "Defensive Actions":
-            defensive_totals = hdb.fetch_season_defensive_totals(
-                db, competition=selected_league, season=selected_season)
-            if defensive_totals.empty:
-                st.info(
-                    "No defensive stats saved yet - publish at least one match with 'Save to Database' "
-                    "first."
-                )
-            else:
-                defensive_totals["Team"] = defensive_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(defensive_totals)
-        elif totals_category == "Defensive Action Location":
-            defensive_location_totals = hdb.fetch_season_defensive_location_totals(
-                db, competition=selected_league, season=selected_season)
-            if defensive_location_totals.empty:
-                st.info(
-                    "No defensive action location data saved yet. This namespace was added partway "
-                    "through this project - re-run 'Save to Database' on your matches in the combined "
-                    "report app to backfill it."
-                )
-            else:
-                defensive_location_totals["Team"] = defensive_location_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(defensive_location_totals)
-        elif totals_category == "Team Style":
-            ts_mode = st.radio(
-                "View", ["For", "Against"], horizontal=True,
-                key="team_style_for_against",
-                help="'For' = what each team did. 'Against' = what opponents did against each team."
-            )
-            if ts_mode == "For":
-                team_style_totals = hdb.fetch_season_team_style_totals(
-                    db, competition=selected_league, season=selected_season)
-            else:
-                team_style_totals = hdb.fetch_season_team_style_against_totals(
-                    db, competition=selected_league, season=selected_season)
-            if team_style_totals.empty:
-                st.info(
-                    "No Team Style stats saved yet - publish at least one match with 'Save to Database' "
-                    "first."
-                )
-            else:
-                team_style_totals["Team"] = team_style_totals["Team"].map(_display_team_name)
-                _render_sticky_col_table(team_style_totals)
+            if totals_category == "Team Style":
                 st.caption(
                     "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across "
                     "saved matches (not summed). 10+ Pass Sequences shows both a season total and "
