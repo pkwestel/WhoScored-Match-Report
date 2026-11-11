@@ -495,7 +495,7 @@ def plot_pass_map(passes_df, player_name, player_team, home_name, away_name, sta
     # Title/subtitle/stat-line and the color key get small, fixed-inch
     # margins (not a fraction of the whole figure) so there's no dead space
     # between the pitch and any of them.
-    pitch_h = 10.0
+    pitch_h = 9.0
     top_pad_in = _TITLE_TOP_PAD_IN  # 3-line title block + top-right date - see that constant's comment
     bottom_pad_in = 0.8 if len(stat_items) >= 4 else 0.5  # two rows when 4+ stat items
     fig_h = pitch_h + top_pad_in + bottom_pad_in
@@ -572,7 +572,7 @@ def plot_carry_map(carries_df, player_name, player_team, home_name, away_name, s
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
-    pitch_h = 10.0
+    pitch_h = 9.0
     top_pad_in = _TITLE_TOP_PAD_IN
     bottom_pad_in = 0.8 if len(stat_items) >= 4 else 0.5
     fig_h = pitch_h + top_pad_in + bottom_pad_in
@@ -660,7 +660,7 @@ def plot_touch_map(touches_df, player_name, player_team=None, home_name=None, aw
     """
     length, width = PITCH_LEN_M, PITCH_WID_M
     pad = PITCH_PAD_M
-    pitch_h = 10.0
+    pitch_h = 9.0
     top_pad_in = _TITLE_TOP_PAD_IN  # 3-line title block + top-right date - see that constant's comment
     bottom_pad_in = 0.5
     fig_h = pitch_h + top_pad_in + bottom_pad_in

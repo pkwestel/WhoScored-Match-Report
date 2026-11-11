@@ -4610,3 +4610,315 @@ def fetch_player_team_seasons(db: DB, player: str) -> list:
 
     result.sort(key=lambda r: (r["season"], r["team"]), reverse=True)
     return result
+
+
+# ============================================================
+# Team Page — Per-Match Log tables (one row per match for a
+# single team, with Date / Opponent / H/A context columns)
+# ============================================================
+
+def _team_match_context(db: DB, team, season, competition=None):
+    """
+    Build a list of dicts with per-match context for *team* in *season*:
+    match_id, Date, Opponent, H/A — ordered oldest-first.  Callers merge
+    their category-specific stats into this context.
+    """
+    matches = fetch_matches(db)
+    if matches.empty:
+        return []
+    scope = matches[
+        ((matches["home_team"] == team) | (matches["away_team"] == team))
+    ].copy()
+    scope["_season"] = scope["match_date"].apply(_season_label)
+    scope = scope[scope["_season"] == season]
+    if competition is not None:
+        scope = scope[scope["competition"] == competition]
+    scope = scope.sort_values("match_date")
+    rows = []
+    for _, r in scope.iterrows():
+        is_home = r["home_team"] == team
+        opponent = r["away_team"] if is_home else r["home_team"]
+        rows.append({
+            "match_id": str(r["match_id"]),
+            "Date": r["match_date"],
+            "Opponent": opponent,
+            "H/A": "H" if is_home else "A",
+        })
+    return rows
+
+
+def fetch_team_match_log_shots(db: DB, team, season, competition=None,
+                               against=False) -> pd.DataFrame:
+    """
+    Per-match shot stats for *team* — one row per match with
+    Date / Opponent / H/A / Shots / Goals / Total xG.
+    against=True shows the OPPONENT's shot stats for each match instead.
+    """
+    ctx = _team_match_context(db, team, season, competition)
+    if not ctx:
+        return pd.DataFrame()
+    ctx_ids = {r["match_id"] for r in ctx}
+
+    shots = fetch_shots(db)
+    if shots.empty:
+        return pd.DataFrame()
+
+    matches_meta = fetch_matches(db)[["match_id", "home_team", "away_team"]]
+    merged = shots.merge(matches_meta, on="match_id", how="inner")
+    merged["match_id"] = merged["match_id"].astype(str)
+    merged = merged[merged["match_id"].isin(ctx_ids)]
+
+    if against:
+        # For "against": attribute each shot to the OPPONENT it was taken against
+        def _opp(r):
+            if r["team"] == r["home_team"]:
+                return r["away_team"]
+            if r["team"] == r["away_team"]:
+                return r["home_team"]
+            return None
+        merged["_target_team"] = merged.apply(_opp, axis=1)
+        merged = merged.dropna(subset=["_target_team"])
+        group_col = "_target_team"
+    else:
+        group_col = "team"
+        merged = merged[merged["team"] == team]
+
+    if against:
+        merged = merged[merged["_target_team"] == team]
+
+    agg = (merged.groupby("match_id")
+           .agg(Shots=("id", "size"),
+                Goals=("outcome", lambda s: int((s == "Goal").sum())),
+                **{"Total xG": ("xg", "sum")})
+           .reset_index())
+    agg["Total xG"] = agg["Total xG"].round(2)
+    agg["match_id"] = agg["match_id"].astype(str)
+
+    ctx_df = pd.DataFrame(ctx)
+    result = ctx_df.merge(agg, on="match_id", how="left")
+    for c in ("Shots", "Goals"):
+        result[c] = result[c].fillna(0).astype(int)
+    result["Total xG"] = result["Total xG"].fillna(0.0).round(2)
+    return result[["Date", "Opponent", "H/A", "Shots", "Goals", "Total xG"]].reset_index(drop=True)
+
+
+def fetch_team_match_log_passing(db: DB, team, season, competition=None,
+                                 against=False) -> pd.DataFrame:
+    """
+    Per-match passing stats for *team* — one row per match.
+    against=True shows the opponent's passing stats for each match.
+    """
+    ctx = _team_match_context(db, team, season, competition)
+    if not ctx:
+        return pd.DataFrame()
+    ctx_ids = {r["match_id"] for r in ctx}
+
+    # Build per-(match_id, team) passing sums from player_match_stats
+    match_team_passing = {}
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, pteam, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if mid not in ctx_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        passing = extra.get("ws_passing")
+        if not passing:
+            continue
+        agg = match_team_passing.setdefault(mid, {}).setdefault(pteam, {})
+        for k, v in passing.items():
+            if isinstance(v, (int, float)):
+                agg[k] = agg.get(k, 0) + v
+
+    # Resolve which team's stats to show per match
+    ctx_df = pd.DataFrame(ctx)
+    records = []
+    for _, row in ctx_df.iterrows():
+        mid = row["match_id"]
+        match_data = match_team_passing.get(mid, {})
+        if against:
+            opp = row["Opponent"]
+            stats = match_data.get(opp, {})
+        else:
+            stats = match_data.get(team, {})
+        completed = stats.get("Passes Completed", 0)
+        attempted = stats.get("Passes Attempted", 0)
+        crosses_c = stats.get("Crosses Completed", 0)
+        crosses_a = stats.get("Crosses Attempted", 0)
+        records.append({
+            "Date": row["Date"], "Opponent": row["Opponent"], "H/A": row["H/A"],
+            "Completed": completed, "Attempted": attempted,
+            "Completion %": round(completed / attempted * 100, 1) if attempted else 0.0,
+            "Forward": stats.get("Passes Forward", 0),
+            "Crosses Att": crosses_a, "Crosses Comp": crosses_c,
+            "Cross %": round(crosses_c / crosses_a * 100, 1) if crosses_a else 0.0,
+            "into Final 1/3": stats.get("Passes into Final 1/3", 0),
+            "into Box": stats.get("Passes into the Box", 0),
+            "Progressive": stats.get("Progressive Passes", 0),
+            "Shot Assists": stats.get("Shot Assists", 0),
+            "SCA": stats.get("SCA", 0),
+        })
+    return pd.DataFrame(records)
+
+
+def fetch_team_match_log_touches(db: DB, team, season, competition=None,
+                                 against=False) -> pd.DataFrame:
+    """
+    Per-match touches/carries stats for *team* — one row per match.
+    against=True shows the opponent's touch stats for each match.
+    """
+    ctx = _team_match_context(db, team, season, competition)
+    if not ctx:
+        return pd.DataFrame()
+    ctx_ids = {r["match_id"] for r in ctx}
+
+    # Raw touches from the touches table
+    touches_all = fetch_touches(db)
+    touch_by_match_team = {}
+    if not touches_all.empty:
+        touches_all = touches_all.copy()
+        touches_all["match_id"] = touches_all["match_id"].astype(str)
+        touches_all = touches_all[touches_all["match_id"].isin(ctx_ids)]
+        touches_all["_third"] = touches_all["x"].apply(_pitch_third)
+        touches_all["_in_box"] = touches_all.apply(
+            lambda r: _in_attacking_box(r["x"], r["y"]), axis=1)
+        for (mid, t), g in touches_all.groupby(["match_id", "team"]):
+            touch_by_match_team[(str(mid), t)] = {
+                "Total Touches": len(g),
+                "Own Third": int((g["_third"] == "Own third").sum()),
+                "Middle Third": int((g["_third"] == "Middle third").sum()),
+                "Final Third": int((g["_third"] == "Final third").sum()),
+                "Attacking Box": int(g["_in_box"].sum()),
+            }
+
+    # Carry stats from team_match_stats 'ws_touches'
+    carry_by_match_team = {}
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, t, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if mid not in ctx_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws = extra.get("ws_touches")
+        if ws:
+            carry_by_match_team[(mid, t)] = {
+                k: ws.get(k, 0) for k in
+                ("Progressive Carries", "Carries into Final Third", "Carries into Box")
+            }
+
+    # Passes received from player_match_stats 'ws_touches'
+    recv_by_match_team = {}
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, t, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if mid not in ctx_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws = extra.get("ws_touches")
+        if not ws:
+            continue
+        key = (mid, t)
+        agg = recv_by_match_team.setdefault(key, {
+            "Passes Received": 0, "Progressive Passes Received": 0,
+        })
+        for k in ("Passes Received", "Progressive Passes Received"):
+            v = ws.get(k)
+            if isinstance(v, (int, float)):
+                agg[k] += v
+
+    ctx_df = pd.DataFrame(ctx)
+    records = []
+    for _, row in ctx_df.iterrows():
+        mid = row["match_id"]
+        lookup_team = row["Opponent"] if against else team
+        t = touch_by_match_team.get((mid, lookup_team), {})
+        c = carry_by_match_team.get((mid, lookup_team), {})
+        r = recv_by_match_team.get((mid, lookup_team), {})
+        total = t.get("Total Touches", 0)
+        records.append({
+            "Date": row["Date"], "Opponent": row["Opponent"], "H/A": row["H/A"],
+            "Touches": total,
+            "Own 1/3": t.get("Own Third", 0),
+            "Mid 1/3": t.get("Middle Third", 0),
+            "Final 1/3": t.get("Final Third", 0),
+            "Att Box": t.get("Attacking Box", 0),
+            "Prog Carries": c.get("Progressive Carries", 0),
+            "Carries Final 1/3": c.get("Carries into Final Third", 0),
+            "Carries Box": c.get("Carries into Box", 0),
+            "Pass Recv": r.get("Passes Received", 0),
+            "Prog Pass Recv": r.get("Progressive Passes Received", 0),
+        })
+    return pd.DataFrame(records)
+
+
+def fetch_team_match_log_team_style(db: DB, team, season, competition=None,
+                                    against=False) -> pd.DataFrame:
+    """
+    Per-match Team Style stats for *team* — one row per match.
+    against=True shows the opponent's Team Style stats for each match.
+    """
+    ctx = _team_match_context(db, team, season, competition)
+    if not ctx:
+        return pd.DataFrame()
+    ctx_ids = {r["match_id"] for r in ctx}
+
+    # team_match_stats for ws_totals + fm_totals
+    tms_data = {}  # (match_id, team) -> stats dict
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, t, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if mid not in ctx_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws = extra.get("ws_totals", {})
+        fm = extra.get("fm_totals", {})
+        tms_data[(mid, t)] = {
+            "Field Tilt %": ws.get("field_tilt"),
+            "PPDA": ws.get("ppda"),
+            "10+ Pass Seq": ws.get("sequences_10plus"),
+            "Pass/Seq": ws.get("passes_per_sequence"),
+            "Deep Comp": ws.get("deep_completions"),
+            "Def Line (m)": ws.get("defensive_line_height"),
+            "Sprints": fm.get("Number of sprints"),
+        }
+
+    # Line breaking passes from player_match_stats
+    lbp_data = {}  # (match_id, team) -> total
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, t, extra_json in cur.fetchall():
+        mid = str(match_id)
+        if mid not in ctx_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        lbp = extra.get("fm_line_breaking_passes", {})
+        v = lbp.get("Line Breaking Passes")
+        if isinstance(v, (int, float)):
+            lbp_data[(mid, t)] = lbp_data.get((mid, t), 0) + v
+
+    ctx_df = pd.DataFrame(ctx)
+    records = []
+    for _, row in ctx_df.iterrows():
+        mid = row["match_id"]
+        lookup_team = row["Opponent"] if against else team
+        s = tms_data.get((mid, lookup_team), {})
+        lbp = lbp_data.get((mid, lookup_team), 0)
+
+        def _fmt(v):
+            if v is None:
+                return None
+            try:
+                return round(float(v), 1)
+            except (TypeError, ValueError):
+                return None
+
+        records.append({
+            "Date": row["Date"], "Opponent": row["Opponent"], "H/A": row["H/A"],
+            "Field Tilt %": _fmt(s.get("Field Tilt %")),
+            "PPDA": _fmt(s.get("PPDA")),
+            "10+ Pass Seq": s.get("10+ Pass Seq"),
+            "Pass/Seq": _fmt(s.get("Pass/Seq")),
+            "Deep Comp": s.get("Deep Comp"),
+            "Def Line (m)": _fmt(s.get("Def Line (m)")),
+            "Sprints": s.get("Sprints"),
+            "Line Break Pass": lbp if lbp else 0,
+        })
+    return pd.DataFrame(records)

@@ -676,9 +676,10 @@ def _render_sticky_col_table(df, sort_col=None, sort_asc=True):
     Used for the wide Team Stats tables on the League Overview page.
 
     sort_col / sort_asc: optional pre-sort before rendering.
+    Returns the (sorted) DataFrame so callers can offer CSV download.
     """
     if df.empty:
-        return
+        return df
     if sort_col and sort_col in df.columns:
         sort_series = pd.to_numeric(df[sort_col], errors="coerce")
         if sort_series.notna().any():
@@ -730,6 +731,7 @@ def _render_sticky_col_table(df, sort_col=None, sort_asc=True):
         </table>
     </div>
     """, unsafe_allow_html=True)
+    return df
 
 
 def _render_fixtures_like_table(df):
@@ -3430,15 +3432,67 @@ def _render_team_page(db, team, season=None):
 
     st.markdown("<div style='height:1.6em;'></div>", unsafe_allow_html=True)
 
-    # Match log - this team's own slice of the Fixtures tab's table (same
-    # columns, same renderer - see _render_fixtures_like_table()), oldest
-    # match on top since fetch_team_match_log() is already ascending.
+    # Match log — tabbed view: Results (the original fixture table) plus
+    # per-match breakdowns for Shots, Passing, Touches, and Team Style.
+    # Each category-specific tab has its own For/Against toggle.
     st.subheader("Match Log")
-    match_log = hdb.fetch_team_match_log(db, team, season, competition=competition)
-    if match_log.empty:
-        st.info(f"No matches saved yet for {_display_team_name(team)} in {season}.")
-    else:
-        _render_fixtures_like_table(match_log)
+    _ml_tab_names = ["Results", "Shots", "Passing", "Touches", "Team Style"]
+    _ml_tabs = st.tabs(_ml_tab_names)
+
+    with _ml_tabs[0]:
+        match_log = hdb.fetch_team_match_log(db, team, season, competition=competition)
+        if match_log.empty:
+            st.info(f"No matches saved yet for {_display_team_name(team)} in {season}.")
+        else:
+            _render_fixtures_like_table(match_log)
+
+    # --- Shots match log ---
+    with _ml_tabs[1]:
+        _ml_shots_against = st.toggle("Against", key="ml_shots_against",
+                                      help="Show opponent shot stats for each match")
+        _ml_shots = hdb.fetch_team_match_log_shots(
+            db, team, season, competition=competition, against=_ml_shots_against)
+        if _ml_shots.empty:
+            st.info("No shot data available.")
+        else:
+            _ml_shots["Opponent"] = _ml_shots["Opponent"].map(_display_team_name)
+            _render_sticky_col_table(_ml_shots)
+
+    # --- Passing match log ---
+    with _ml_tabs[2]:
+        _ml_pass_against = st.toggle("Against", key="ml_passing_against",
+                                     help="Show opponent passing stats for each match")
+        _ml_passing = hdb.fetch_team_match_log_passing(
+            db, team, season, competition=competition, against=_ml_pass_against)
+        if _ml_passing.empty:
+            st.info("No passing data available.")
+        else:
+            _ml_passing["Opponent"] = _ml_passing["Opponent"].map(_display_team_name)
+            _render_sticky_col_table(_ml_passing)
+
+    # --- Touches match log ---
+    with _ml_tabs[3]:
+        _ml_touch_against = st.toggle("Against", key="ml_touches_against",
+                                      help="Show opponent touch stats for each match")
+        _ml_touches = hdb.fetch_team_match_log_touches(
+            db, team, season, competition=competition, against=_ml_touch_against)
+        if _ml_touches.empty:
+            st.info("No touch data available.")
+        else:
+            _ml_touches["Opponent"] = _ml_touches["Opponent"].map(_display_team_name)
+            _render_sticky_col_table(_ml_touches)
+
+    # --- Team Style match log ---
+    with _ml_tabs[4]:
+        _ml_style_against = st.toggle("Against", key="ml_style_against",
+                                      help="Show opponent Team Style stats for each match")
+        _ml_style = hdb.fetch_team_match_log_team_style(
+            db, team, season, competition=competition, against=_ml_style_against)
+        if _ml_style.empty:
+            st.info("No Team Style data available.")
+        else:
+            _ml_style["Opponent"] = _ml_style["Opponent"].map(_display_team_name)
+            _render_sticky_col_table(_ml_style)
 
     # Shooting table - season-cumulative per-player shooting stats drawn
     # from fm_scoring (Shots, Goals, NPxG, PS-xG) and the shots table
@@ -4341,8 +4395,14 @@ else:
                 sort_dir = st.radio("Direction", ["High to Low", "Low to High"],
                                     horizontal=True, key="team_stats_sort_dir")
             _ts_df["Team"] = _ts_df["Team"].map(_display_team_name)
-            _render_sticky_col_table(_ts_df, sort_col=sort_by,
-                                     sort_asc=(sort_dir == "Low to High"))
+            _sorted_df = _render_sticky_col_table(
+                _ts_df, sort_col=sort_by,
+                sort_asc=(sort_dir == "Low to High"))
+            if _sorted_df is not None and not _sorted_df.empty:
+                _csv = _sorted_df.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇ Download CSV", _csv,
+                                   file_name=f"team_stats_{totals_category.lower().replace(' ', '_')}.csv",
+                                   mime="text/csv", key="team_stats_csv_dl")
             if totals_category == "Touches":
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
