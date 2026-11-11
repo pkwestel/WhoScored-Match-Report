@@ -669,6 +669,59 @@ def _render_data_table_html(df, link_columns=(), raw_html_columns=(), sort_key=N
     """, unsafe_allow_html=True)
 
 
+def _render_sticky_col_table(df):
+    """
+    Render a DataFrame as an HTML table with the first column frozen
+    (CSS position:sticky) so it stays visible when scrolling horizontally.
+    Used for the wide Team Stats tables on the League Overview page.
+    """
+    if df.empty:
+        return
+    cols = list(df.columns)
+    # Sticky styling for the first column (header + body)
+    sticky_th = (
+        'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; color:#333; '
+        'text-align:left; white-space:nowrap; position:sticky; left:0; z-index:2;'
+    )
+    sticky_td = (
+        'padding:6px 14px; border:1px solid #ddd; text-align:left; '
+        'white-space:nowrap; position:sticky; left:0; z-index:1; background:var(--bg, #fff);'
+    )
+    normal_th = (
+        'padding:6px 14px; border:1px solid #ddd; background:#f0f2f6; color:#333; '
+        'text-align:right; white-space:nowrap;'
+    )
+    normal_td = 'padding:6px 14px; border:1px solid #ddd; text-align:right; white-space:nowrap;'
+
+    header_cells = f'<th style="{sticky_th}">{html.escape(str(cols[0]))}</th>'
+    header_cells += "".join(
+        f'<th style="{normal_th}">{html.escape(str(c))}</th>' for c in cols[1:]
+    )
+    body_rows = []
+    for _, r in df.iterrows():
+        first_val = html.escape(str(r[cols[0]])) if pd.notna(r[cols[0]]) else "-"
+        cells = f'<td style="{sticky_td}">{first_val}</td>'
+        for c in cols[1:]:
+            val = r[c]
+            cell_html = "-" if pd.isna(val) else html.escape(str(val))
+            cells += f'<td style="{normal_td}">{cell_html}</td>'
+        body_rows.append(f"<tr>{cells}</tr>")
+    st.markdown(f"""
+    <style>
+        @media (prefers-color-scheme: dark) {{
+            :root {{ --bg: #0e1117; }}
+        }}
+        :root {{ --bg: #fff; }}
+    </style>
+    <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse; font-size:0.95em;">
+            <thead><tr>{header_cells}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _render_fixtures_like_table(df):
     """
     Shared renderer for any fetch_fixtures()-shaped DataFrame (match_id,
@@ -4211,8 +4264,7 @@ else:
                 # right before rendering - nothing downstream re-filters this
                 # DataFrame by Team afterward, so this is safe to do in place.
                 shot_totals["Team"] = shot_totals["Team"].map(_display_team_name)
-                st.dataframe(shot_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(shot_totals))
+                _render_sticky_col_table(shot_totals)
         elif totals_category == "Passing":
             passing_totals = hdb.fetch_season_passing_totals(
                 db, competition=selected_league, season=selected_season)
@@ -4220,8 +4272,7 @@ else:
                 st.info("No passing stats saved yet - publish at least one match with 'Save to Database' first.")
             else:
                 passing_totals["Team"] = passing_totals["Team"].map(_display_team_name)
-                st.dataframe(passing_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(passing_totals))
+                _render_sticky_col_table(passing_totals)
         elif totals_category == "Touches":
             touches_totals = hdb.fetch_season_touches_totals(
                 db, competition=selected_league, season=selected_season)
@@ -4233,8 +4284,7 @@ else:
                 )
             else:
                 touches_totals["Team"] = touches_totals["Team"].map(_display_team_name)
-                st.dataframe(touches_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(touches_totals))
+                _render_sticky_col_table(touches_totals)
                 st.caption(
                     "Progressive Carries, Carries into Final Third/Box, and Passes Received show 0 for "
                     "matches saved before this stat was added to the database - re-save an older match "
@@ -4251,8 +4301,7 @@ else:
                 )
             else:
                 defensive_totals["Team"] = defensive_totals["Team"].map(_display_team_name)
-                st.dataframe(defensive_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(defensive_totals))
+                _render_sticky_col_table(defensive_totals)
         elif totals_category == "Defensive Action Location":
             defensive_location_totals = hdb.fetch_season_defensive_location_totals(
                 db, competition=selected_league, season=selected_season)
@@ -4264,8 +4313,7 @@ else:
                 )
             else:
                 defensive_location_totals["Team"] = defensive_location_totals["Team"].map(_display_team_name)
-                st.dataframe(defensive_location_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(defensive_location_totals))
+                _render_sticky_col_table(defensive_location_totals)
         elif totals_category == "Team Style":
             ts_mode = st.radio(
                 "View", ["For", "Against"], horizontal=True,
@@ -4285,8 +4333,7 @@ else:
                 )
             else:
                 team_style_totals["Team"] = team_style_totals["Team"].map(_display_team_name)
-                st.dataframe(team_style_totals, use_container_width=False, hide_index=True,
-                             height=_no_scroll_height(team_style_totals))
+                _render_sticky_col_table(team_style_totals)
                 st.caption(
                     "Field Tilt/PPDA/Passes per Sequence/Def Line Height are plain averages across "
                     "saved matches (not summed). 10+ Pass Sequences shows both a season total and "
