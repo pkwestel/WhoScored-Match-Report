@@ -4224,7 +4224,7 @@ else:
         # Passing/Touches/Defensive Actions/Defensive Action Location
         # the DB only stores "For" stats, so only Shots and Team Style
         # have a real "Against" option.
-        _fa_categories = {"Shots", "Team Style"}
+        _fa_categories = {"Shots", "Passing", "Touches", "Team Style"}
         with _fa_col:
             if totals_category in _fa_categories:
                 ts_mode = st.radio(
@@ -4278,13 +4278,21 @@ else:
                     if c != "Team":
                         _ts_df[c] = _ts_df[c].astype(float if "xG" in c else int)
         elif totals_category == "Passing":
-            _ts_df = hdb.fetch_season_passing_totals(
-                db, competition=selected_league, season=selected_season)
+            if ts_mode == "For":
+                _ts_df = hdb.fetch_season_passing_totals(
+                    db, competition=selected_league, season=selected_season)
+            else:
+                _ts_df = hdb.fetch_season_passing_against_totals(
+                    db, competition=selected_league, season=selected_season)
             if _ts_df.empty:
                 _ts_empty_msg = "No passing stats saved yet - publish at least one match with 'Save to Database' first."
         elif totals_category == "Touches":
-            _ts_df = hdb.fetch_season_touches_totals(
-                db, competition=selected_league, season=selected_season)
+            if ts_mode == "For":
+                _ts_df = hdb.fetch_season_touches_totals(
+                    db, competition=selected_league, season=selected_season)
+            else:
+                _ts_df = hdb.fetch_season_touches_against_totals(
+                    db, competition=selected_league, season=selected_season)
             if _ts_df.empty:
                 _ts_empty_msg = (
                     "No touch data saved yet. This needs matches saved AFTER the touches table was "

@@ -3640,6 +3640,75 @@ def fetch_season_passing_totals(db: DB, competition=None, season=None) -> pd.Dat
         "Passes Attempted", ascending=False).reset_index(drop=True)
 
 
+def fetch_season_passing_against_totals(db: DB, competition=None, season=None) -> pd.DataFrame:
+    """
+    'Against' version of the Passing table: for each team, accumulate
+    the OPPONENT's passing stats from every match.
+    """
+    cols = ["Team", "Passes Completed", "Passes Attempted", "Pass Completion %",
+            "Passes Forward", "Headed", "Crosses Attempted", "Crosses Completed",
+            "Cross Completion %", "Passes into Final 1/3", "Passes into the Box",
+            "Progressive Passes", "Shot Assists", "SCA"]
+    valid_ids = _match_ids_for_competition(db, competition, season)
+
+    # Group player_match_stats by (match_id, team)
+    match_team_passing = {}  # match_id -> {team: {stat: sum}}
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        passing = extra.get("ws_passing")
+        if not passing:
+            continue
+        agg = match_team_passing.setdefault(match_id, {}).setdefault(team, {})
+        for k, v in passing.items():
+            if isinstance(v, (int, float)):
+                agg[k] = agg.get(k, 0) + v
+
+    # For each match, assign opponent's stats to each team
+    sums = {}
+    for match_id, teams in match_team_passing.items():
+        team_list = list(teams.keys())
+        if len(team_list) != 2:
+            continue
+        for i, team in enumerate(team_list):
+            opponent = team_list[1 - i]
+            opp_passing = teams.get(opponent, {})
+            agg = sums.setdefault(team, {})
+            for k, v in opp_passing.items():
+                if isinstance(v, (int, float)):
+                    agg[k] = agg.get(k, 0) + v
+
+    if not sums:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for team, agg in sums.items():
+        completed = agg.get("Passes Completed", 0)
+        attempted = agg.get("Passes Attempted", 0)
+        crosses_c = agg.get("Crosses Completed", 0)
+        crosses_a = agg.get("Crosses Attempted", 0)
+        records.append({
+            "Team": team,
+            "Passes Completed": completed,
+            "Passes Attempted": attempted,
+            "Pass Completion %": round(completed / attempted * 100, 1) if attempted else 0.0,
+            "Passes Forward": agg.get("Passes Forward", 0),
+            "Headed": agg.get("Headed", 0),
+            "Crosses Attempted": crosses_a,
+            "Crosses Completed": crosses_c,
+            "Cross Completion %": round(crosses_c / crosses_a * 100, 1) if crosses_a else 0.0,
+            "Passes into Final 1/3": agg.get("Passes into Final 1/3", 0),
+            "Passes into the Box": agg.get("Passes into the Box", 0),
+            "Progressive Passes": agg.get("Progressive Passes", 0),
+            "Shot Assists": agg.get("Shot Assists", 0),
+            "SCA": agg.get("SCA", 0),
+        })
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Passes Attempted", ascending=False).reset_index(drop=True)
+
+
 def fetch_season_defensive_totals(db: DB, competition=None, season=None) -> pd.DataFrame:
     """
     Season-cumulative defensive totals per team, summed across every player
@@ -4196,6 +4265,138 @@ def fetch_season_touches_totals(db: DB, competition=None, season=None) -> pd.Dat
             "Attacking Box %": round(box / total * 100, 1) if total else 0.0,
             "xT Carry": round(received_totals.get("xT Carry", 0.0), 2),
             "xT Received": round(received_totals.get("xT Received", 0.0), 2),
+        })
+    return pd.DataFrame(records, columns=cols).sort_values(
+        "Total Touches", ascending=False).reset_index(drop=True)
+
+
+def fetch_season_touches_against_totals(db: DB, competition=None, season=None) -> pd.DataFrame:
+    """
+    'Against' version of the Touches table: for each team, accumulate
+    the OPPONENT's touch stats from every match.
+    """
+    cols = ["Team", "Total Touches", "Own Third", "Middle Third", "Final Third", "Attacking Box",
+            "Progressive Carries", "Carries into Final Third", "Carries into Box",
+            "Passes Received", "Progressive Passes Received",
+            "Own Third %", "Middle Third %", "Final Third %", "Attacking Box %",
+            "xT Carry", "xT Received"]
+
+    valid_ids = _match_ids_for_competition(db, competition, season)
+    touches = fetch_touches(db)
+    if touches.empty:
+        return pd.DataFrame(columns=cols)
+    if valid_ids is not None:
+        touches = touches[touches["match_id"].astype(str).isin(valid_ids)]
+        if touches.empty:
+            return pd.DataFrame(columns=cols)
+
+    touches = touches.copy()
+    touches["_third"] = touches["x"].apply(_pitch_third)
+    touches["_in_box"] = touches.apply(lambda r: _in_attacking_box(r["x"], r["y"]), axis=1)
+
+    # Build opponent map from touches: match_id -> set of teams
+    match_teams_map = {}
+    for mid, team in touches[["match_id", "team"]].drop_duplicates().values:
+        match_teams_map.setdefault(str(mid), set()).add(team)
+
+    # Compute raw touch counts per (match_id, team)
+    touch_by_match_team = {}
+    for (mid, team), g in touches.groupby(["match_id", "team"]):
+        total = len(g)
+        own = int((g["_third"] == "Own third").sum())
+        mid_t = int((g["_third"] == "Middle third").sum())
+        final = int((g["_third"] == "Final third").sum())
+        box = int(g["_in_box"].sum())
+        touch_by_match_team[(str(mid), team)] = {
+            "Total Touches": total, "Own Third": own, "Middle Third": mid_t,
+            "Final Third": final, "Attacking Box": box,
+        }
+
+    # team_match_stats' 'ws_touches' by (match_id, team)
+    carry_by_match_team = {}
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws_touches = extra.get("ws_touches")
+        if not ws_touches:
+            continue
+        carry_by_match_team[(str(match_id), team)] = {
+            k: ws_touches.get(k, 0) for k in
+            ("Progressive Carries", "Carries into Final Third", "Carries into Box")
+        }
+
+    # player_match_stats' 'ws_touches' by (match_id, team)
+    received_by_match_team = {}
+    cur = db.execute("SELECT match_id, team, extra_json FROM player_match_stats")
+    for match_id, team, extra_json in cur.fetchall():
+        if valid_ids is not None and str(match_id) not in valid_ids:
+            continue
+        extra = json.loads(extra_json) if extra_json else {}
+        ws_touches = extra.get("ws_touches")
+        if not ws_touches:
+            continue
+        key = (str(match_id), team)
+        agg = received_by_match_team.setdefault(key, {
+            "Passes Received": 0, "Progressive Passes Received": 0,
+            "xT Carry": 0.0, "xT Received": 0.0,
+        })
+        for k in ("Passes Received", "Progressive Passes Received", "xT Carry", "xT Received"):
+            v = ws_touches.get(k)
+            if isinstance(v, (int, float)):
+                agg[k] += v
+
+    # Assign opponent stats to each team
+    against_sums = {}
+    for mid_str, team_set in match_teams_map.items():
+        team_list = list(team_set)
+        if len(team_list) != 2:
+            continue
+        for i, team in enumerate(team_list):
+            opponent = team_list[1 - i]
+            agg = against_sums.setdefault(team, {
+                "Total Touches": 0, "Own Third": 0, "Middle Third": 0,
+                "Final Third": 0, "Attacking Box": 0,
+                "Progressive Carries": 0, "Carries into Final Third": 0,
+                "Carries into Box": 0,
+                "Passes Received": 0, "Progressive Passes Received": 0,
+                "xT Carry": 0.0, "xT Received": 0.0,
+            })
+            opp_touch = touch_by_match_team.get((mid_str, opponent), {})
+            for k in ("Total Touches", "Own Third", "Middle Third", "Final Third", "Attacking Box"):
+                agg[k] += opp_touch.get(k, 0)
+            opp_carry = carry_by_match_team.get((mid_str, opponent), {})
+            for k in ("Progressive Carries", "Carries into Final Third", "Carries into Box"):
+                agg[k] += opp_carry.get(k, 0)
+            opp_recv = received_by_match_team.get((mid_str, opponent), {})
+            for k in ("Passes Received", "Progressive Passes Received", "xT Carry", "xT Received"):
+                agg[k] += opp_recv.get(k, 0)
+
+    if not against_sums:
+        return pd.DataFrame(columns=cols)
+
+    records = []
+    for team, agg in against_sums.items():
+        total = agg["Total Touches"]
+        own = agg["Own Third"]
+        mid_t = agg["Middle Third"]
+        final = agg["Final Third"]
+        box = agg["Attacking Box"]
+        records.append({
+            "Team": team, "Total Touches": total,
+            "Own Third": own, "Middle Third": mid_t, "Final Third": final, "Attacking Box": box,
+            "Progressive Carries": agg["Progressive Carries"],
+            "Carries into Final Third": agg["Carries into Final Third"],
+            "Carries into Box": agg["Carries into Box"],
+            "Passes Received": agg["Passes Received"],
+            "Progressive Passes Received": agg["Progressive Passes Received"],
+            "Own Third %": round(own / total * 100, 1) if total else 0.0,
+            "Middle Third %": round(mid_t / total * 100, 1) if total else 0.0,
+            "Final Third %": round(final / total * 100, 1) if total else 0.0,
+            "Attacking Box %": round(box / total * 100, 1) if total else 0.0,
+            "xT Carry": round(agg["xT Carry"], 2),
+            "xT Received": round(agg["xT Received"], 2),
         })
     return pd.DataFrame(records, columns=cols).sort_values(
         "Total Touches", ascending=False).reset_index(drop=True)
