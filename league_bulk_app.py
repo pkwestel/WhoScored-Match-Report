@@ -316,6 +316,13 @@ if matches:
         st.warning("Max delay < min delay — using min for both.")
         max_delay = min_delay
 
+    auto_save = st.checkbox(
+        "Automatically save to database",
+        help="Each successful match is saved to the database immediately after scraping — "
+             "no need to click 'Save' afterwards.",
+        key="lbulk_auto_save",
+    )
+
     if st.button("Run batch", type="primary", key="lbulk_run"):
         to_run = []
         for i in range(len(matches)):
@@ -330,9 +337,20 @@ if matches:
         if not to_run:
             st.error("No matches checked to run.")
         else:
+            # Resolve auto-save settings once before the loop
+            _auto_save = auto_save
+            _auto_db_url = None
+            _auto_comp = None
+            if _auto_save:
+                _auto_db_url = st.session_state.get(
+                    "lbulk_db_url",
+                    os.environ.get("DATABASE_URL", "sqlite:///history.db"))
+                _auto_comp = st.session_state.get("lbulk_competition", "Premier League")
+
             results = []
             progress = st.progress(0.0)
             status_area = st.empty()
+            auto_save_area = st.empty()
             for idx, entry in enumerate(to_run):
                 n = len(to_run)
                 if not entry["fm_url"]:
@@ -351,6 +369,31 @@ if matches:
                         report["match_date"] = entry["match_date"]
                         results.append({"ws_url": entry["ws_url"], "success": True,
                                          "report": report})
+
+                        # Auto-save if enabled
+                        if _auto_save and _auto_db_url:
+                            try:
+                                fm_totals_df = report.get("fm_totals_df")
+                                if (fm_totals_df is None or fm_totals_df.empty
+                                        or "Goals" not in fm_totals_df.columns):
+                                    auto_save_area.warning(
+                                        f"Auto-save skipped {report['ws_home_name']} vs "
+                                        f"{report['ws_away_name']}: FotMob data empty.")
+                                else:
+                                    match_date_iso = (
+                                        entry["match_date"].isoformat()
+                                        if hasattr(entry["match_date"], "isoformat")
+                                        else str(entry["match_date"]))
+                                    match_id = batch_lib.save_report_to_db(
+                                        _auto_db_url, report, _auto_comp, match_date_iso)
+                                    auto_save_area.success(
+                                        f"Auto-saved {report['ws_home_name']} vs "
+                                        f"{report['ws_away_name']} (match_id={match_id})")
+                            except Exception as save_err:
+                                auto_save_area.error(
+                                    f"Auto-save failed for {report['ws_home_name']} vs "
+                                    f"{report['ws_away_name']}: {save_err}")
+
                     except Exception as e:
                         status_area.write(f"Match {idx + 1}/{n}: FAILED ({e})")
                         results.append({"ws_url": entry["ws_url"], "success": False,
