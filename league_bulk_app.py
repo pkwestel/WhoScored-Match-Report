@@ -196,31 +196,6 @@ if st.button("Scan all months", type="primary", key="lbulk_scan"):
                             all_matches[i]["fm_url"] = saved_fm
         if n_dup:
             st.info(f"{n_dup} of {len(all_matches)} match(es) already in the database.")
-
-        # --- Auto-run: FotMob auto-matching ---
-        matched = 0
-        fm_progress = st.progress(0.0)
-        for i, m in enumerate(all_matches):
-            if m.get("fm_url"):
-                # Already have a FotMob URL (from DB or prior run)
-                matched += 1
-            elif m.get("home_name") and m.get("away_name"):
-                match_date = datetime.date.today()
-                if m.get("date"):
-                    try:
-                        match_date = _dateparser.parse(m["date"]).date()
-                    except Exception:
-                        pass
-                try:
-                    found = fr.find_fotmob_match_url(
-                        match_date.isoformat(), m["home_name"], m["away_name"])
-                    all_matches[i]["fm_url"] = found or ""
-                    if found:
-                        matched += 1
-                except Exception:
-                    all_matches[i]["fm_url"] = ""
-            fm_progress.progress((i + 1) / len(all_matches))
-        st.success(f"Auto-matched {matched} of {len(all_matches)} match(es) to FotMob.")
         st.session_state["lbulk_matches"] = all_matches
 
 
