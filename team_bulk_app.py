@@ -362,11 +362,17 @@ if matches:
         st.warning("Max delay < min delay - using min for both.")
         max_delay = min_delay
 
-    auto_save = st.checkbox(
+    _as_col1, _as_col2 = st.columns([1, 1])
+    auto_save = _as_col1.checkbox(
         "Automatically save to database",
         help="After all matches are scraped, every successful match is saved to the "
              "database automatically — one click does everything.",
         key="tbulk_auto_save",
+    )
+    auto_save_comp = _as_col2.selectbox(
+        "Competition (for auto-save)",
+        ["Premier League", "UEFA Champions League"],
+        index=0, key="tbulk_auto_save_comp",
     )
 
     if st.button("Run batch", type="primary", key="tbulk_run"):
@@ -422,7 +428,7 @@ if matches:
                 _auto_db_url = st.session_state.get(
                     "tbulk_db_url",
                     os.environ.get("DATABASE_URL", "sqlite:///history.db"))
-                _auto_comp = st.session_state.get("tbulk_competition", "Premier League")
+                _auto_comp = st.session_state.get("tbulk_auto_save_comp", "Premier League")
                 save_progress = st.progress(0.0)
                 save_status = st.empty()
                 successful = [r for r in results if r["success"]]
