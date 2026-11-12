@@ -152,6 +152,29 @@ if st.button("Scan all months", type="primary", key="hbulk_scan"):
 
     if not all_matches:
         st.error("No matches found — check the URL, or paste match URLs manually.")
+    else:
+        # --- Auto-run: check for already-saved matches in DB ---
+        _auto_db = os.environ.get("DATABASE_URL", "sqlite:///history.db")
+        _auto_db = st.session_state.get("hbulk_db_url", _auto_db)
+        n_dup = 0
+        for i, m in enumerate(all_matches):
+            row_date = datetime.date.today()
+            if m.get("date"):
+                try:
+                    row_date = _dateparser.parse(m["date"]).date()
+                except Exception:
+                    pass
+            row_date_iso = row_date.isoformat()
+            if m.get("home_name") and m.get("away_name"):
+                already = batch_lib.find_existing_match(
+                    _auto_db, m["home_name"], m["away_name"], row_date_iso)
+                all_matches[i]["already_saved"] = already
+                all_matches[i]["already_saved_date"] = row_date_iso
+                if already:
+                    n_dup += 1
+        if n_dup:
+            st.info(f"{n_dup} of {len(all_matches)} match(es) already in the database.")
+        st.session_state["hbulk_matches"] = all_matches
 
 
 # ---------------------------------------------------------------------------
