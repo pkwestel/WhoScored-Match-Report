@@ -33,7 +33,7 @@ NOTES / ASSUMPTIONS (also written into the workbook's "Notes" tab):
     never count as progressive (they still feed the rolling baseline).
     Carries also feed the baseline so a short pass after a long carry is
     not falsely flagged. Passes starting in the defending 40% of the pitch
-    are excluded, unless they end in the box.
+    are excluded, unless they enter the box (start outside, end inside).
   - Progressive carry: WhoScored/Opta data has no explicit "carry" event
     (unlike StatsBomb-sourced data), so carries are inferred using the same
     approach as well-known open-source WhoScored report notebooks: for each
@@ -1430,11 +1430,13 @@ def _compute_progressive_flags(df):
             baseline = min(win) if len(win) > 0 else start_dist
             progress = baseline - end_dist
             ends_in_box = in_box(row['endX'], row['endY'])
+            starts_in_box = in_box(row['x'], row['y'])
+            enters_box = ends_in_box and not starts_in_box
             starts_def = row['x'] < DEFENSIVE_START_CUTOFF
             is_open_play = not bool(OPEN_PLAY_EXCLUDE_QUALIFIERS & qual_names(row['qualifiers_parsed']))
             is_progressive = is_open_play and \
-                              ((progress >= PROGRESSIVE_YARD_THRESHOLD) or ends_in_box) and \
-                              ((not starts_def) or ends_in_box)
+                              ((progress >= PROGRESSIVE_YARD_THRESHOLD) or enters_box) and \
+                              ((not starts_def) or enters_box)
             prog_pass_records.append({
                 'orig_index': row.name,
                 'minute': row['minute'], 'second': row['second'], 'team': team,
