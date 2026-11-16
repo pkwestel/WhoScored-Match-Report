@@ -119,7 +119,7 @@ def run_whoscored_only_report(ws_url, status_cb=None):
     team_carries, player_carries, carries_df = wr.compute_carries(df)
     sca_out = wr.compute_sca(df)
     shot_pairs = wr.compute_shot_pairs(sca_out)
-    goals_out = wr.compute_goals(df)
+    goals_out = wr.compute_goals(df, ws_home_name, ws_away_name)
     xt_received = wr.compute_xt_received(df)
     team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
                                                       passes_received, progressive_received,

@@ -2065,6 +2065,25 @@ def find_fouled_player(df, foul_idx, committer_team):
     return candidates.iloc[0]['playerName']
 
 
+_SITUATION_MAP = {
+    'RegularPlay': 'Open Play',
+    'FromCorner': 'Corner',
+    'SetPiece': 'Set Piece',
+    'DirectFreekick': 'Free Kick',
+    'FastBreak': 'Fast Break',
+    'ThrowIn': 'Throw-in',
+    'Penalty': 'Penalty',
+}
+
+
+def _shot_situation(shot_quals):
+    """Map Opta shot qualifiers to a human-readable situation label."""
+    for opta_key, label in _SITUATION_MAP.items():
+        if opta_key in shot_quals:
+            return label
+    return 'Open Play'  # fallback
+
+
 def compute_sca(df, minute_min=None, minute_max=None):
     """
     minute_min/minute_max: optional minute-range filter for a windowed
@@ -2136,7 +2155,7 @@ def compute_sca(df, minute_min=None, minute_max=None):
             'shotType': shot_row['type.displayName'],
             'shot_distance_yd': round(dist_to_goal_yd(shot_row['x'], shot_row['y']), 1),
             'bodyPart': body_part(shot_row),
-            'fastBreak': 'FastBreak' in shot_quals,
+            'Situation': _shot_situation(shot_quals),
             'sca1_player': None, 'sca1_action': None,
             'sca2_player': None, 'sca2_action': None,
             # Original df event-index for this shot, and for its SCA1 action
@@ -2181,10 +2200,12 @@ def compute_sca(df, minute_min=None, minute_max=None):
     return sca_out
 
 
-def compute_goals(df):
+def compute_goals(df, home_name=None, away_name=None):
     """
-    Goals tab: per-player goal tallies by team.
-    Columns: player, Goals (non-penalty), Penalties Attempted, Penalties Scored.
+    Goals tab: team-level goal totals (same layout as the Totals tab).
+    Row 1 = header, Row 2 = home team, Row 3 = away team.
+    Columns: team, Goals, Penalties Attempted, Penalties Scored.
+    Both teams are always present (0 if no goals/penalties).
     Own goals are excluded (they're credited to the wrong team by WhoScored).
     """
     own_goal_mask = df.apply(is_own_goal, axis=1)
@@ -2193,34 +2214,37 @@ def compute_goals(df):
     shots['is_penalty'] = shots['_quals'].apply(lambda qs: 'Penalty' in qs)
     shots['is_goal'] = shots['type.displayName'] == 'Goal'
 
-    records = []
-    for (team, player), grp in shots.groupby(['team', 'playerName']):
+    # Build per-team aggregates
+    team_data = {}
+    for team, grp in shots.groupby('team'):
         pen = grp[grp['is_penalty']]
         non_pen_goals = grp[~grp['is_penalty'] & grp['is_goal']]
-        pen_attempted = len(pen)
-        pen_scored = int(pen['is_goal'].sum())
-        goals = len(non_pen_goals)
-        if goals == 0 and pen_attempted == 0:
-            continue
-        records.append({
-            'team': team,
-            'player': player,
-            'Goals': goals,
-            'Penalties Attempted': pen_attempted,
-            'Penalties Scored': pen_scored,
-        })
+        team_data[team] = {
+            'Goals': len(non_pen_goals),
+            'Penalties Attempted': len(pen),
+            'Penalties Scored': int(pen['is_goal'].sum()),
+        }
+
+    # Ensure both teams are present (even with 0s)
+    teams = [t for t in [home_name, away_name] if t is not None]
+    if not teams:
+        teams = sorted(shots['team'].unique()) if not shots.empty else []
+    records = []
+    for t in teams:
+        row = team_data.get(t, {'Goals': 0, 'Penalties Attempted': 0, 'Penalties Scored': 0})
+        records.append({'team': t, **row})
 
     out = pd.DataFrame(records)
     if out.empty:
-        return pd.DataFrame(columns=['team', 'player', 'Goals', 'Penalties Attempted', 'Penalties Scored'])
-    return out.sort_values(['team', 'Goals'], ascending=[True, False]).reset_index(drop=True)
+        return pd.DataFrame(columns=['team', 'Goals', 'Penalties Attempted', 'Penalties Scored'])
+    return out
 
 
-def compute_player_totals(df):
+def compute_player_stats(df):
     """
-    Player Totals tab: per-player summary across the match.
+    Player Stats tab: per-player summary across the match.
     Columns: team, player, Shots, Goals, Assists, Penalties Attempted,
-    Penalties Scored.
+    Penalties Scored, Yellow Cards, Red Cards.
 
     - Shots: total shot attempts (excluding own goals) per player.
     - Goals: non-penalty goals scored.
@@ -2229,7 +2253,16 @@ def compute_player_totals(df):
       Opta flagged as an intentional assist. This is the same assist data
       WhoScored shows in their Match Centre chalkboard.
     - Penalties Attempted / Penalties Scored: from penalty shots only.
+    - Yellow Cards / Red Cards: from Card events with Yellow/Red qualifiers.
     """
+    _COLS = ['team', 'player', 'Shots', 'Goals', 'Assists',
+             'Penalties Attempted', 'Penalties Scored', 'Yellow Cards', 'Red Cards']
+
+    def _empty():
+        return {'Shots': 0, 'Goals': 0, 'Assists': 0,
+                'Penalties Attempted': 0, 'Penalties Scored': 0,
+                'Yellow Cards': 0, 'Red Cards': 0}
+
     own_goal_mask = df.apply(is_own_goal, axis=1)
     shots = df[(df['isShot'] == True) & ~own_goal_mask].copy()
     shots['_quals'] = shots['qualifiers_parsed'].apply(qual_names)
@@ -2242,19 +2275,14 @@ def compute_player_totals(df):
         pen = grp[grp['is_penalty']]
         non_pen_goals = grp[~grp['is_penalty'] & grp['is_goal']]
         records[(team, player)] = {
-            'team': team,
-            'player': player,
+            'team': team, 'player': player, **_empty(),
             'Shots': len(grp),
             'Goals': len(non_pen_goals),
-            'Assists': 0,
             'Penalties Attempted': len(pen),
             'Penalties Scored': int(pen['is_goal'].sum()),
         }
 
     # --- Assists from WhoScored's native IntentionalGoalAssist qualifier ---
-    # This qualifier appears on Pass events (live, corner, set piece) that
-    # Opta tagged as the intentional assist for a goal. It's always on a
-    # Pass, never on a take-on or shot, so only real pass assists count.
     assist_mask = df['qualifiers_parsed'].apply(
         lambda qs: 'IntentionalGoalAssist' in qual_names(qs)
     )
@@ -2265,18 +2293,29 @@ def compute_player_totals(df):
         if player and pd.notna(player):
             key = (team, player)
             if key not in records:
-                records[key] = {
-                    'team': team, 'player': player,
-                    'Shots': 0, 'Goals': 0, 'Assists': 0,
-                    'Penalties Attempted': 0, 'Penalties Scored': 0,
-                }
+                records[key] = {'team': team, 'player': player, **_empty()}
             records[key]['Assists'] += 1
+
+    # --- Yellow / Red Cards ---
+    cards = df[df['type.displayName'] == 'Card']
+    for _, row in cards.iterrows():
+        team = row['team']
+        player = row['playerName']
+        if not player or pd.isna(player):
+            continue
+        qn = qual_names(row['qualifiers_parsed'])
+        key = (team, player)
+        if key not in records:
+            records[key] = {'team': team, 'player': player, **_empty()}
+        if 'Yellow' in qn:
+            records[key]['Yellow Cards'] += 1
+        if 'Red' in qn:
+            records[key]['Red Cards'] += 1
 
     out = pd.DataFrame(list(records.values()))
     if out.empty:
-        return pd.DataFrame(columns=['team', 'player', 'Shots', 'Goals', 'Assists',
-                                      'Penalties Attempted', 'Penalties Scored'])
-    return out.sort_values(['team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
+        return pd.DataFrame(columns=_COLS)
+    return out[_COLS].sort_values(['team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
 
 
 def compute_shot_pairs(sca_out):
@@ -3831,13 +3870,9 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
 
     if goals_out is not None and not goals_out.empty:
         ws = wb.create_sheet('Goals')
-        teams_for_goals = [t for t in [home_name, away_name] if t is not None] or sorted(goals_out['team'].unique())
-        rG = 1
-        for t in teams_for_goals:
-            t_goals = goals_out[goals_out['team'] == t].drop(columns=['team'])
-            rG = write_table(ws, t_goals, start_row=rG, title=f'{t} - Goals') + 3
+        write_table(ws, goals_out, start_row=1)
         autosize(ws)
-        ws.freeze_panes = 'A3'
+        ws.freeze_panes = 'A2'
 
     ws = wb.create_sheet('Defensive Actions')
     teams_for_def = [t for t in [home_name, away_name] if t is not None] or sorted(defensive_actions['team'].unique())
