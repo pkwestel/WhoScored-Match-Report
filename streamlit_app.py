@@ -135,7 +135,7 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing goals..."):
                 goals_out = wr.compute_goals(df)
             with st.spinner("Computing player totals..."):
-                player_totals_tab = wr.compute_player_totals(df, sca_out)
+                player_totals_tab = wr.compute_player_totals(df)
             with st.spinner("Computing xT received..."):
                 xt_received = wr.compute_xt_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing touches..."):
@@ -337,8 +337,8 @@ if report:
     with tabPT:
         st.write(
             "Per-player totals for the match: Shots (all attempts excluding own goals), "
-            "Goals (non-penalty), Assists (the SCA1 player on a goal — the last pass/action "
-            "before the goal), Penalties Attempted, and Penalties Scored."
+            "Goals (non-penalty), Assists (from WhoScored's IntentionalGoalAssist qualifier "
+            "— the pass directly preceding a goal), Penalties Attempted, and Penalties Scored."
         )
         if player_totals_tab is not None and not player_totals_tab.empty:
             pt_teams = ([t for t in [home_name, away_name] if t is not None]
