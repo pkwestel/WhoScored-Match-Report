@@ -3826,7 +3826,7 @@ def autosize(ws):
 
 def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                     defensive_action_location, passing_pairs, home_name, away_name, against_totals=None,
-                    shot_pairs=None, on_off=None, goals_out=None):
+                    shot_pairs=None, on_off=None, goals_out=None, player_stats_out=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -3873,6 +3873,16 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         write_table(ws, goals_out, start_row=1)
         autosize(ws)
         ws.freeze_panes = 'A2'
+
+    if player_stats_out is not None and not player_stats_out.empty:
+        ws = wb.create_sheet('Player Stats')
+        ps_teams = [t for t in [home_name, away_name] if t is not None] or sorted(player_stats_out['team'].unique())
+        rPS = 1
+        for t in ps_teams:
+            t_ps = player_stats_out[player_stats_out['team'] == t].drop(columns=['team']).reset_index(drop=True)
+            rPS = write_table(ws, t_ps, start_row=rPS, title=f'{t} - Player Stats') + 3
+        autosize(ws)
+        ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Defensive Actions')
     teams_for_def = [t for t in [home_name, away_name] if t is not None] or sorted(defensive_actions['team'].unique())

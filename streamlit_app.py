@@ -175,6 +175,7 @@ if st.button("Generate Report", type="primary"):
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                 defensive_action_location, passing_pairs, home_name, away_name, against_totals,
                 shot_pairs, on_off, goals_out=goals_out,
+                player_stats_out=player_stats_tab,
             )
             buf = io.BytesIO()
             wb.save(buf)
