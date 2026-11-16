@@ -2216,6 +2216,68 @@ def compute_goals(df):
     return out.sort_values(['team', 'Goals'], ascending=[True, False]).reset_index(drop=True)
 
 
+def compute_player_totals(df, sca_out):
+    """
+    Player Totals tab: per-player summary across the match.
+    Columns: team, player, Shots, Goals, Assists, Penalties Attempted,
+    Penalties Scored.
+
+    - Shots: total shot attempts (excluding own goals) per player.
+    - Goals: non-penalty goals scored.
+    - Assists: the SCA1 player on a goal event (the last pass/action before
+      the goal — the closest thing WhoScored's event data has to a true
+      assist). Only counted when the SCA1 player is on the same team as the
+      scorer and is a different player.
+    - Penalties Attempted / Penalties Scored: from penalty shots only.
+    """
+    own_goal_mask = df.apply(is_own_goal, axis=1)
+    shots = df[(df['isShot'] == True) & ~own_goal_mask].copy()
+    shots['_quals'] = shots['qualifiers_parsed'].apply(qual_names)
+    shots['is_penalty'] = shots['_quals'].apply(lambda qs: 'Penalty' in qs)
+    shots['is_goal'] = shots['type.displayName'] == 'Goal'
+
+    # --- Shots, Goals, Penalties per player ---
+    records = {}
+    for (team, player), grp in shots.groupby(['team', 'playerName']):
+        pen = grp[grp['is_penalty']]
+        non_pen_goals = grp[~grp['is_penalty'] & grp['is_goal']]
+        records[(team, player)] = {
+            'team': team,
+            'player': player,
+            'Shots': len(grp),
+            'Goals': len(non_pen_goals),
+            'Assists': 0,
+            'Penalties Attempted': len(pen),
+            'Penalties Scored': int(pen['is_goal'].sum()),
+        }
+
+    # --- Assists from SCA data ---
+    # An assist is counted when: the shot was a Goal, and the SCA1 player
+    # (the immediately preceding contributing action) is on the same team
+    # and is a different player than the scorer.
+    if sca_out is not None and not sca_out.empty:
+        goal_rows = sca_out[sca_out['shotType'] == 'Goal']
+        for _, row in goal_rows.iterrows():
+            assister = row.get('sca1_player')
+            team = row['team']
+            scorer = row['player']
+            if assister and assister != scorer and pd.notna(assister):
+                key = (team, assister)
+                if key not in records:
+                    records[key] = {
+                        'team': team, 'player': assister,
+                        'Shots': 0, 'Goals': 0, 'Assists': 0,
+                        'Penalties Attempted': 0, 'Penalties Scored': 0,
+                    }
+                records[key]['Assists'] += 1
+
+    out = pd.DataFrame(list(records.values()))
+    if out.empty:
+        return pd.DataFrame(columns=['team', 'player', 'Shots', 'Goals', 'Assists',
+                                      'Penalties Attempted', 'Penalties Scored'])
+    return out.sort_values(['team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
+
+
 def compute_shot_pairs(sca_out):
     """
     Shot Pairs tab: every distinct passer -> shot-taker combination, with a

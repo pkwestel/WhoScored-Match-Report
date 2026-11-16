@@ -134,6 +134,8 @@ if st.button("Generate Report", type="primary"):
                 shot_pairs = wr.compute_shot_pairs(sca_out)
             with st.spinner("Computing goals..."):
                 goals_out = wr.compute_goals(df)
+            with st.spinner("Computing player totals..."):
+                player_totals_tab = wr.compute_player_totals(df, sca_out)
             with st.spinner("Computing xT received..."):
                 xt_received = wr.compute_xt_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing touches..."):
@@ -204,6 +206,7 @@ if st.button("Generate Report", type="primary"):
                 "passing_pairs": passing_pairs,
                 "shot_pairs": shot_pairs,
                 "on_off": on_off,
+                "player_totals_tab": player_totals_tab,
                 "wb_bytes": buf.getvalue(),
                 "filename": filename,
                 "n_events": len(df),
@@ -247,6 +250,7 @@ if report:
     passing_pairs = report["passing_pairs"]
     shot_pairs = report["shot_pairs"]
     on_off = report["on_off"]
+    player_totals_tab = report.get("player_totals_tab")
 
     st.success(f"Scraped {report['n_events']} events — {home_name} vs {away_name}")
 
@@ -257,10 +261,10 @@ if report:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabOO, tabP, tabPR = st.tabs(
+    tab0, tabA, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tabOO, tabPT, tabP, tabPR = st.tabs(
         ["Totals", "Against", "Touches", "Passing", "Shot Creating Actions",
          "Defensive Actions", "Defensive Action Location", "Passing Pairs", "Shot Pairs",
-         "On/Off", "Pass Map", "Passes Received"]
+         "On/Off", "Player Totals", "Pass Map", "Passes Received"]
     )
     with tab0:
         st.dataframe(totals_out, use_container_width=True)
@@ -330,6 +334,24 @@ if report:
                 ),
                 use_container_width=True,
             )
+    with tabPT:
+        st.write(
+            "Per-player totals for the match: Shots (all attempts excluding own goals), "
+            "Goals (non-penalty), Assists (the SCA1 player on a goal — the last pass/action "
+            "before the goal), Penalties Attempted, and Penalties Scored."
+        )
+        if player_totals_tab is not None and not player_totals_tab.empty:
+            pt_teams = ([t for t in [home_name, away_name] if t is not None]
+                        or sorted(player_totals_tab["team"].unique()))
+            for t in pt_teams:
+                st.subheader(t)
+                st.dataframe(
+                    player_totals_tab[player_totals_tab["team"] == t]
+                        .drop(columns=["team"]).reset_index(drop=True),
+                    use_container_width=True,
+                )
+        else:
+            st.info("No shot data found for this match.")
     with tabP:
         st.write(
             "Every pass attempted by one player, plotted on the pitch and colored by outcome: "
