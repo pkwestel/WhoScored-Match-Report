@@ -132,6 +132,8 @@ if st.button("Generate Report", type="primary"):
                 sca_out = wr.compute_sca(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing shot pairs..."):
                 shot_pairs = wr.compute_shot_pairs(sca_out)
+            with st.spinner("Computing goals..."):
+                goals_out = wr.compute_goals(df)
             with st.spinner("Computing xT received..."):
                 xt_received = wr.compute_xt_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing touches..."):
@@ -170,7 +172,7 @@ if st.button("Generate Report", type="primary"):
             wb = wr.build_workbook(
                 sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                 defensive_action_location, passing_pairs, home_name, away_name, against_totals,
-                shot_pairs, on_off,
+                shot_pairs, on_off, goals_out=goals_out,
             )
             buf = io.BytesIO()
             wb.save(buf)

@@ -2,7 +2,7 @@
 WhoScored match report generator.
 
 Scrapes a WhoScored match-centre page and produces a styled Excel workbook
-with tabs: Totals, Against, Touches, Passing, Shot Creating Actions,
+with tabs: Totals, Against, Touches, Passing, Shot Creating Actions, Goals,
 Defensive Actions, Defensive Action Location, Passing Pairs, Shot Pairs, and
 On-Off (plus a Notes tab documenting every definition/assumption used).
 
@@ -2128,6 +2128,7 @@ def compute_sca(df, minute_min=None, minute_max=None):
             j -= 1
 
         shot_row = df.loc[shot_i]
+        shot_quals = qual_names(shot_row['qualifiers_parsed'])
         rec = {
             'minute': shot_row['minute'],
             'team': shot_team,
@@ -2135,6 +2136,7 @@ def compute_sca(df, minute_min=None, minute_max=None):
             'shotType': shot_row['type.displayName'],
             'shot_distance_yd': round(dist_to_goal_yd(shot_row['x'], shot_row['y']), 1),
             'bodyPart': body_part(shot_row),
+            'fastBreak': 'FastBreak' in shot_quals,
             'sca1_player': None, 'sca1_action': None,
             'sca2_player': None, 'sca2_action': None,
             # Original df event-index for this shot, and for its SCA1 action
@@ -2177,6 +2179,41 @@ def compute_sca(df, minute_min=None, minute_max=None):
     if minute_max is not None and not sca_out.empty:
         sca_out = sca_out[sca_out['minute'] <= minute_max]
     return sca_out
+
+
+def compute_goals(df):
+    """
+    Goals tab: per-player goal tallies by team.
+    Columns: player, Goals (non-penalty), Penalties Attempted, Penalties Scored.
+    Own goals are excluded (they're credited to the wrong team by WhoScored).
+    """
+    own_goal_mask = df.apply(is_own_goal, axis=1)
+    shots = df[(df['isShot'] == True) & ~own_goal_mask].copy()
+    shots['_quals'] = shots['qualifiers_parsed'].apply(qual_names)
+    shots['is_penalty'] = shots['_quals'].apply(lambda qs: 'Penalty' in qs)
+    shots['is_goal'] = shots['type.displayName'] == 'Goal'
+
+    records = []
+    for (team, player), grp in shots.groupby(['team', 'playerName']):
+        pen = grp[grp['is_penalty']]
+        non_pen_goals = grp[~grp['is_penalty'] & grp['is_goal']]
+        pen_attempted = len(pen)
+        pen_scored = int(pen['is_goal'].sum())
+        goals = len(non_pen_goals)
+        if goals == 0 and pen_attempted == 0:
+            continue
+        records.append({
+            'team': team,
+            'player': player,
+            'Goals': goals,
+            'Penalties Attempted': pen_attempted,
+            'Penalties Scored': pen_scored,
+        })
+
+    out = pd.DataFrame(records)
+    if out.empty:
+        return pd.DataFrame(columns=['team', 'player', 'Goals', 'Penalties Attempted', 'Penalties Scored'])
+    return out.sort_values(['team', 'Goals'], ascending=[True, False]).reset_index(drop=True)
 
 
 def compute_shot_pairs(sca_out):
@@ -3687,7 +3724,7 @@ def autosize(ws):
 
 def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out, defensive_actions,
                     defensive_action_location, passing_pairs, home_name, away_name, against_totals=None,
-                    shot_pairs=None, on_off=None):
+                    shot_pairs=None, on_off=None, goals_out=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -3728,6 +3765,16 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         rSCA = write_table(ws, t_sca, start_row=rSCA, title=f'{t} - Shot Creating Actions') + 3
     autosize(ws)
     ws.freeze_panes = 'A3'
+
+    if goals_out is not None and not goals_out.empty:
+        ws = wb.create_sheet('Goals')
+        teams_for_goals = [t for t in [home_name, away_name] if t is not None] or sorted(goals_out['team'].unique())
+        rG = 1
+        for t in teams_for_goals:
+            t_goals = goals_out[goals_out['team'] == t].drop(columns=['team'])
+            rG = write_table(ws, t_goals, start_row=rG, title=f'{t} - Goals') + 3
+        autosize(ws)
+        ws.freeze_panes = 'A3'
 
     ws = wb.create_sheet('Defensive Actions')
     teams_for_def = [t for t in [home_name, away_name] if t is not None] or sorted(defensive_actions['team'].unique())
