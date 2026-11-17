@@ -3356,12 +3356,16 @@ def _render_team_page(db, team, season=None):
     st.markdown("<div style='height:1.4em;'></div>", unsafe_allow_html=True)
 
     possession_display = f"{stats['possession']:.1f}%" if stats["possession"] is not None else "-"
+    xg_display = f"{stats['xg_pg']:.2f}" if stats["xg_pg"] is not None else "-"
+    xga_display = f"{stats['xga_pg']:.2f}" if stats["xga_pg"] is not None else "-"
+    shots_display = f"{stats['shots_pg']:.2f}" if stats["shots_pg"] is not None else "-"
+    shots_a_display = f"{stats['shots_against_pg']:.2f}" if stats["shots_against_pg"] is not None else "-"
     headline_stats = [
         ("Avg Possession", possession_display, stats["possession_rank"]),
-        ("Shots", f"{stats['shots_pg']:.2f}", stats["shots_rank"]),
-        ("xG", f"{stats['xg_pg']:.2f}", stats["xg_rank"]),
-        ("Shots Against", f"{stats['shots_against_pg']:.2f}", stats["shots_against_rank"]),
-        ("xGA", f"{stats['xga_pg']:.2f}", stats["xga_rank"]),
+        ("Shots", shots_display, stats["shots_rank"]),
+        ("xG", xg_display, stats["xg_rank"]),
+        ("Shots Against", shots_a_display, stats["shots_against_rank"]),
+        ("xGA", xga_display, stats["xga_rank"]),
     ]
     headline_cols = st.columns(len(headline_stats))
     for col, (label, value, rank) in zip(headline_cols, headline_stats):

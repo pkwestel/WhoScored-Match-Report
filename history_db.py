@@ -770,6 +770,39 @@ def fetch_matches(db: DB) -> pd.DataFrame:
     return pd.DataFrame(cur.fetchall(), columns=cols)
 
 
+def _load_team_extras(db: DB) -> dict:
+    """
+    Load every team's extra_json from team_match_stats, keyed as
+    {match_id: {team: extra_dict}}.  Used by every read function below.
+    """
+    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
+    out = {}
+    for match_id, team, extra_json in cur.fetchall():
+        out.setdefault(match_id, {})[team] = json.loads(extra_json) if extra_json else {}
+    return out
+
+
+def _team_match_totals(extras: dict) -> dict:
+    """
+    Given ONE team's extra_dict from team_match_stats, return a merged
+    totals dict with the best available values, preferring fm_totals over
+    ws_totals where both exist.
+
+    Keys returned (may be None when neither source has the value):
+      Goals, Total xG, Shots, Ball possession
+    """
+    fm = extras.get("fm_totals") or {}
+    ws = extras.get("ws_totals") or {}
+    return {
+        "Goals": fm.get("Goals") if fm.get("Goals") is not None else ws.get("Goals"),
+        "Total xG": fm.get("Total xG"),                   # WhoScored has no xG
+        "Shots": fm.get("Shots") if fm.get("Shots") is not None else ws.get("Shots"),
+        "Ball possession": (fm.get("Ball possession")
+                            if fm.get("Ball possession") is not None
+                            else ws.get("Possession %")),
+    }
+
+
 def _season_label(date_str):
     """
     Derives a 'YYYY/YY' season label (e.g. '2026/27') from a match's date -
@@ -858,18 +891,14 @@ def fetch_fixtures(db: DB, include_hidden_seasons=False) -> pd.DataFrame:
     if matches.empty:
         return pd.DataFrame(columns=cols)
 
-    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
-    fm_totals_by_match = {}
-    for match_id, team, extra_json in cur.fetchall():
-        extra = json.loads(extra_json) if extra_json else {}
-        fm_totals_by_match.setdefault(match_id, {})[team] = extra.get("fm_totals") or {}
+    extras_by_match = _load_team_extras(db)
 
     records = []
     for _, m in matches.iterrows():
-        team_totals = fm_totals_by_match.get(m["match_id"], {})
-        home_totals = team_totals.get(m["home_team"], {})
-        away_totals = team_totals.get(m["away_team"], {})
-        home_goals, away_goals = home_totals.get("Goals"), away_totals.get("Goals")
+        match_extras = extras_by_match.get(m["match_id"], {})
+        home_merged = _team_match_totals(match_extras.get(m["home_team"], {}))
+        away_merged = _team_match_totals(match_extras.get(m["away_team"], {}))
+        home_goals, away_goals = home_merged["Goals"], away_merged["Goals"]
         score = (f"{int(home_goals)} - {int(away_goals)}"
                  if home_goals is not None and away_goals is not None else None)
         records.append({
@@ -879,9 +908,9 @@ def fetch_fixtures(db: DB, include_hidden_seasons=False) -> pd.DataFrame:
             "Matchweek": m.get("matchweek"),
             "Season": _season_label(m["match_date"]),
             "Home Team": m["home_team"],
-            "Home xG": home_totals.get("Total xG"),
+            "Home xG": home_merged["Total xG"],
             "Score": score,
-            "Away xG": away_totals.get("Total xG"),
+            "Away xG": away_merged["Total xG"],
             "Away Team": m["away_team"],
             "Referee": m.get("referee"),
         })
@@ -1040,13 +1069,22 @@ def fetch_match_summary(db: DB, match_id) -> pd.DataFrame:
     cols = [home_team, "Metric", away_team]
 
     cur = db.execute("SELECT team, extra_json FROM team_match_stats WHERE match_id = ?", (str(match_id),))
-    fm_totals_by_team = {}
+    merged_by_team = {}
     for team, extra_json in cur.fetchall():
         extra = json.loads(extra_json) if extra_json else {}
-        fm_totals_by_team[team] = extra.get("fm_totals") or {}
+        fm = extra.get("fm_totals") or {}
+        ws = extra.get("ws_totals") or {}
+        # Merge: fm_totals preferred, fall back to ws_totals for shared keys
+        merged = dict(fm)  # start with all fm_totals
+        for k, v in ws.items():
+            if k == "Possession %":
+                merged.setdefault("Ball possession", v)
+            else:
+                merged.setdefault(k, v)
+        merged_by_team[team] = merged
 
-    home_stats = fm_totals_by_team.get(home_team, {})
-    away_stats = fm_totals_by_team.get(away_team, {})
+    home_stats = merged_by_team.get(home_team, {})
+    away_stats = merged_by_team.get(away_team, {})
 
     records = []
     for label, key in _MATCH_SUMMARY_FIELDS:
@@ -2203,11 +2241,13 @@ def fetch_league_table(db: DB, competition=None, season=None) -> pd.DataFrame:
     which is exactly the bug this parameter fixes - a league table is
     meant to be one season's worth of results, not every match ever saved.
 
-    A match missing fm_totals.Goals for EITHER side (not yet saved with
-    FotMob data, or a genuinely unresolved team-name mismatch) is skipped
+    A match missing Goals for EITHER side (neither fm_totals nor ws_totals
+    has it, or a genuinely unresolved team-name mismatch) is skipped
     entirely rather than counted as a 0-0 draw or a partial result - an
     incomplete match should reduce both teams' Played count implicitly (by
-    not counting it), not silently corrupt their record.
+    not counting it), not silently corrupt their record. xG/xGA/xGD are
+    None for teams whose matches have no FotMob data (pre-2020-21 seasons
+    with WhoScored data only).
 
     Sorted by Points, then Goal Difference, then Goals For, all descending -
     the standard football league table tiebreaker order.
@@ -2225,23 +2265,19 @@ def fetch_league_table(db: DB, competition=None, season=None) -> pd.DataFrame:
         if matches.empty:
             return pd.DataFrame(columns=cols)
 
-    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
-    fm_totals_by_match = {}
-    for match_id, team, extra_json in cur.fetchall():
-        extra = json.loads(extra_json) if extra_json else {}
-        fm_totals_by_match.setdefault(match_id, {})[team] = extra.get("fm_totals") or {}
+    extras_by_match = _load_team_extras(db)
 
     stats = {}
 
     def _team_row(team):
         return stats.setdefault(team, {"Played": 0, "W": 0, "D": 0, "L": 0,
-                                        "GF": 0, "GA": 0, "xG": 0.0, "xGA": 0.0})
+                                        "GF": 0, "GA": 0, "xG": 0.0, "xGA": 0.0, "xGN": 0})
 
     for _, m in matches.iterrows():
-        team_totals = fm_totals_by_match.get(m["match_id"], {})
-        home_totals = team_totals.get(m["home_team"], {})
-        away_totals = team_totals.get(m["away_team"], {})
-        home_goals, away_goals = home_totals.get("Goals"), away_totals.get("Goals")
+        match_extras = extras_by_match.get(m["match_id"], {})
+        home_merged = _team_match_totals(match_extras.get(m["home_team"], {}))
+        away_merged = _team_match_totals(match_extras.get(m["away_team"], {}))
+        home_goals, away_goals = home_merged["Goals"], away_merged["Goals"]
         if home_goals is None or away_goals is None:
             continue  # incomplete data for this match - don't guess, just skip it
 
@@ -2253,10 +2289,16 @@ def fetch_league_table(db: DB, competition=None, season=None) -> pd.DataFrame:
         home_row["GA"] += away_goals
         away_row["GF"] += away_goals
         away_row["GA"] += home_goals
-        home_row["xG"] += home_totals.get("Total xG") or 0.0
-        home_row["xGA"] += away_totals.get("Total xG") or 0.0
-        away_row["xG"] += away_totals.get("Total xG") or 0.0
-        away_row["xGA"] += home_totals.get("Total xG") or 0.0
+        home_xg = home_merged["Total xG"]
+        away_xg = away_merged["Total xG"]
+        home_row["xG"] += home_xg or 0.0
+        home_row["xGA"] += away_xg or 0.0
+        away_row["xG"] += away_xg or 0.0
+        away_row["xGA"] += home_xg or 0.0
+        if home_xg is not None:
+            home_row["xGN"] += 1
+        if away_xg is not None:
+            away_row["xGN"] += 1
 
         if home_goals > away_goals:
             home_row["W"] += 1
@@ -2272,11 +2314,13 @@ def fetch_league_table(db: DB, competition=None, season=None) -> pd.DataFrame:
     for team, s in stats.items():
         gd = s["GF"] - s["GA"]
         points = s["W"] * 3 + s["D"]
+        has_xg = s["xGN"] > 0
         records.append({
             "Team": team, "Played": s["Played"], "W": s["W"], "D": s["D"], "L": s["L"],
             "GF": s["GF"], "GA": s["GA"], "GD": gd, "Points": points,
-            "xG": round(s["xG"], 2), "xGA": round(s["xGA"], 2),
-            "xGD": round(s["xG"] - s["xGA"], 2),
+            "xG": round(s["xG"], 2) if has_xg else None,
+            "xGA": round(s["xGA"], 2) if has_xg else None,
+            "xGD": round(s["xG"] - s["xGA"], 2) if has_xg else None,
         })
     df = pd.DataFrame(records, columns=cols)
     return df.sort_values(["Points", "GD", "GF"], ascending=False).reset_index(drop=True)
@@ -2438,10 +2482,7 @@ def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
     if scoped.empty:
         return pd.DataFrame(columns=cols)
 
-    cur = db.execute("SELECT match_id, team, extra_json FROM team_match_stats")
-    extra_by_match = {}
-    for match_id, team, extra_json in cur.fetchall():
-        extra_by_match.setdefault(match_id, {})[team] = json.loads(extra_json) if extra_json else {}
+    extras_by_match = _load_team_extras(db)
 
     stats = {}
 
@@ -2450,15 +2491,15 @@ def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
             "Played": 0, "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0,
             "HPlayed": 0, "HW": 0, "HD": 0, "HL": 0,
             "APlayed": 0, "AW": 0, "AD": 0, "AL": 0,
-            "xG": 0.0, "xGA": 0.0, "Shots": 0, "ShotsA": 0,
+            "xG": 0.0, "xGA": 0.0, "xGN": 0, "Shots": 0, "ShotsA": 0,
             "PossessionSum": 0.0, "PossessionN": 0,
         })
 
     for _, m in scoped.iterrows():
-        team_extras = extra_by_match.get(m["match_id"], {})
-        home_fm = (team_extras.get(m["home_team"]) or {}).get("fm_totals") or {}
-        away_fm = (team_extras.get(m["away_team"]) or {}).get("fm_totals") or {}
-        home_goals, away_goals = home_fm.get("Goals"), away_fm.get("Goals")
+        match_extras = extras_by_match.get(m["match_id"], {})
+        home_merged = _team_match_totals(match_extras.get(m["home_team"], {}))
+        away_merged = _team_match_totals(match_extras.get(m["away_team"], {}))
+        home_goals, away_goals = home_merged["Goals"], away_merged["Goals"]
         if home_goals is None or away_goals is None:
             continue  # incomplete data for this match - don't guess, just skip it
 
@@ -2471,16 +2512,22 @@ def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
         home_row["GA"] += away_goals
         away_row["GF"] += away_goals
         away_row["GA"] += home_goals
-        home_row["xG"] += home_fm.get("Total xG") or 0.0
-        home_row["xGA"] += away_fm.get("Total xG") or 0.0
-        away_row["xG"] += away_fm.get("Total xG") or 0.0
-        away_row["xGA"] += home_fm.get("Total xG") or 0.0
-        home_row["Shots"] += home_fm.get("Shots") or 0
-        home_row["ShotsA"] += away_fm.get("Shots") or 0
-        away_row["Shots"] += away_fm.get("Shots") or 0
-        away_row["ShotsA"] += home_fm.get("Shots") or 0
+        home_xg = home_merged["Total xG"]
+        away_xg = away_merged["Total xG"]
+        home_row["xG"] += home_xg or 0.0
+        home_row["xGA"] += away_xg or 0.0
+        away_row["xG"] += away_xg or 0.0
+        away_row["xGA"] += home_xg or 0.0
+        if home_xg is not None:
+            home_row["xGN"] += 1
+        if away_xg is not None:
+            away_row["xGN"] += 1
+        home_row["Shots"] += home_merged["Shots"] or 0
+        home_row["ShotsA"] += away_merged["Shots"] or 0
+        away_row["Shots"] += away_merged["Shots"] or 0
+        away_row["ShotsA"] += home_merged["Shots"] or 0
 
-        home_poss, away_poss = home_fm.get("Ball possession"), away_fm.get("Ball possession")
+        home_poss, away_poss = home_merged["Ball possession"], away_merged["Ball possession"]
         if home_poss is not None:
             home_row["PossessionSum"] += float(home_poss)
             home_row["PossessionN"] += 1
@@ -2522,8 +2569,8 @@ def _build_team_season_table(db: DB, season, competition) -> pd.DataFrame:
                             if s["PossessionN"] else None),
             "Shots_PG": round(s["Shots"] / played, 2) if played else 0.0,
             "ShotsA_PG": round(s["ShotsA"] / played, 2) if played else 0.0,
-            "xG_PG": round(s["xG"] / played, 2) if played else 0.0,
-            "xGA_PG": round(s["xGA"] / played, 2) if played else 0.0,
+            "xG_PG": round(s["xG"] / played, 2) if played and s["xGN"] else None,
+            "xGA_PG": round(s["xGA"] / played, 2) if played and s["xGN"] else None,
         })
     return pd.DataFrame(records, columns=cols)
 

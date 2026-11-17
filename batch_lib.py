@@ -356,6 +356,21 @@ def build_db_stats(report):
     for _, row in report["fm_totals_df"].iterrows():
         t = _to_ws_name(row["team"])
         team_stats.setdefault(t, {})["fm_totals"] = row.drop("team").to_dict()
+
+    # Fold WhoScored-derived goals into ws_totals so pre-2020-21 matches
+    # (WhoScored-only, no fm_totals) still have Goals/Penalties visible to
+    # dashboard read functions that need a score.  For combined reports that
+    # DO have fm_totals the dashboard already reads Goals from there; these
+    # ws_totals fields act purely as a fallback.
+    goals_out = report.get("goals_out")
+    if goals_out is not None and not goals_out.empty:
+        for _, grow in goals_out.iterrows():
+            t = grow["team"]
+            ws = team_stats.setdefault(t, {}).setdefault("ws_totals", {})
+            ws["Goals"] = int(grow.get("Goals", 0))
+            ws["Penalties Attempted"] = int(grow.get("Penalties Attempted", 0))
+            ws["Penalties Scored"] = int(grow.get("Penalties Scored", 0))
+
     # team_summary (compute_touches()'s team-level table: Total touches,
     # thirds, Attacking Box, Progressive Carries, Carries into Final Third/
     # Box, and their %s) - saved under 'ws_touches' so dashboard_app.py's
