@@ -1834,6 +1834,12 @@ def fetch_shot_creating_actions(db: DB, match_id, minute_min=None, minute_max=No
     df = pd.DataFrame(records, columns=_COMBINED_SHOTS_DISPLAY_COLUMNS)
     if df.empty:
         return df
+    # Drop xG/PSxG columns entirely when ALL values are None (WhoScored-
+    # only matches have no FotMob xG data — showing columns full of dashes
+    # is clutter, so remove them).
+    for xg_col in ('xG', 'PSxG'):
+        if xg_col in df.columns and df[xg_col].isna().all():
+            df = df.drop(columns=[xg_col])
     return df.sort_values(['Team', 'Minute', 'Added Time'], na_position='first').reset_index(drop=True)
 
 

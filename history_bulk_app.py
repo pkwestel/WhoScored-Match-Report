@@ -165,6 +165,38 @@ def run_whoscored_only_report(ws_url, status_cb=None):
         import hashlib
         ws_match_id = int(hashlib.md5(ws_url.encode()).hexdigest()[:12], 16)
 
+    # ---- Build WhoScored-only shots DataFrame from sca_out ----
+    # sca_out has WhoScored's shot data (Player, Team, minute, bodyPart,
+    # Situation, Distance, SCA1/SCA2) but in its own column format.
+    # Convert to the COMBINED_SHOTS_COLUMNS format so upsert_shots() can
+    # save it.  xG/PSxG are None (no FotMob), Outcome is derived from
+    # WhoScored's own shot type (SavedShot/MissedShots/ShotOnPost/Goal).
+    _WS_OUTCOME_MAP = {
+        'SavedShot': 'Saved',
+        'MissedShots': 'Missed',
+        'ShotOnPost': 'Woodwork',
+        'Goal': 'Goal',
+    }
+    if sca_out is not None and not sca_out.empty:
+        ws_shots = pd.DataFrame({
+            'Minute': sca_out['minute'],
+            'Added Time': None,
+            'Player': sca_out['player'],
+            'Team': sca_out['team'],
+            'xG': None,
+            'PSxG': None,
+            'Outcome': sca_out['shotType'].map(_WS_OUTCOME_MAP),
+            'Distance (yd)': sca_out['shot_distance_yd'],
+            'Body Part': sca_out['bodyPart'],
+            'Situation': sca_out['Situation'],
+            'SCA1_Player': sca_out['sca1_player'],
+            'SCA1_Action': sca_out['sca1_action'],
+            'SCA2_Player': sca_out['sca2_player'],
+            'SCA2_Action': sca_out['sca2_action'],
+        })
+    else:
+        ws_shots = pd.DataFrame()
+
     # ---- Build report dict (same shape as batch_lib's) ----
     # FotMob fields are set to empty DataFrames / None so build_db_stats()
     # and save_report_to_db() work unchanged.
@@ -194,7 +226,7 @@ def run_whoscored_only_report(ws_url, status_cb=None):
         "on_off": on_off,
         # FotMob-compatible fields — empty so build_db_stats() doesn't crash
         "fm_match_id": ws_match_id,
-        "combined_shots": pd.DataFrame(),
+        "combined_shots": ws_shots,
         "fm_totals_df": pd.DataFrame(),
         "plus_minus": pd.DataFrame(),
         "player_scoring": None,
