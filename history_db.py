@@ -2841,11 +2841,43 @@ def fetch_team_season_scoring_stats(db: DB, team, season, competition=None) -> p
     if team_matches.empty:
         return pd.DataFrame(columns=out_cols)
 
+    # ws_scoring (from compute_player_stats) uses different column names than
+    # fm_scoring (from compute_player_scoring_stats) for penalties:
+    _WS_SCORING_REMAP = {
+        "Penalties Attempted": "PK Attempted",
+        "Penalties Scored": "PK",
+    }
+
     sums, appearances, starts, ages, positions = {}, {}, {}, {}, {}
     for match_id in team_matches["match_id"]:
         df = _fetch_player_namespaces(
             db, match_id, ["fm_scoring", "ws_passing", "fm_lineup", "fm_cards", "fm_position"]
         )
+        # Fallback: if no fm_scoring data for this match (pre-2020-21
+        # WhoScored-only), try ws_scoring for Minutes/Goals/Assists/Shots/PK
+        has_fm_scoring = not df.empty and any(
+            c in df.columns for c in ("Minutes Played", "Goals", "NPxG"))
+        if not has_fm_scoring:
+            ws_df = _fetch_player_namespaces(db, match_id, ["ws_scoring"])
+            if not ws_df.empty:
+                ws_df = ws_df.rename(columns=_WS_SCORING_REMAP)
+                if df.empty:
+                    df = ws_df
+                else:
+                    # df has ws_passing etc. but no scoring columns — add them
+                    # by matching on Player within the same team
+                    for _, wr_row in ws_df.iterrows():
+                        mask = (df["Team"] == wr_row["Team"]) & (df["Player"] == wr_row["Player"])
+                        if mask.any():
+                            idx = df.index[mask][0]
+                            for col in ws_df.columns:
+                                if col not in ("Team", "Player") and col not in df.columns:
+                                    df.loc[idx, col] = wr_row[col]
+                                elif col not in ("Team", "Player") and pd.isna(df.loc[idx, col]):
+                                    df.loc[idx, col] = wr_row[col]
+                        else:
+                            # Player exists in ws_scoring but not in ws_passing — add row
+                            df = pd.concat([df, pd.DataFrame([wr_row])], ignore_index=True)
         if df.empty:
             continue
         sub = df[df["Team"] == team]
@@ -4919,12 +4951,12 @@ def fetch_team_match_log_team_style(db: DB, team, season, competition=None,
         ws = extra.get("ws_totals", {})
         fm = extra.get("fm_totals", {})
         tms_data[(mid, t)] = {
-            "Field Tilt %": ws.get("field_tilt"),
-            "PPDA": ws.get("ppda"),
-            "10+ Pass Seq": ws.get("sequences_10plus"),
-            "Pass/Seq": ws.get("passes_per_sequence"),
-            "Deep Comp": ws.get("deep_completions"),
-            "Def Line (m)": ws.get("defensive_line_height"),
+            "Field Tilt %": ws.get("Field Tilt %"),
+            "PPDA": ws.get("PPDA"),
+            "10+ Pass Seq": ws.get("10+ Pass Sequences"),
+            "Pass/Seq": ws.get("Avg Passes per Sequence"),
+            "Deep Comp": ws.get("Deep Completions"),
+            "Def Line (m)": ws.get("Defensive Action Height (m)"),
             "Sprints": fm.get("Number of sprints"),
         }
 

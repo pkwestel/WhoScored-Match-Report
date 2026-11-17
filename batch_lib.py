@@ -419,6 +419,17 @@ def build_db_stats(report):
         for _, row in player_third.iterrows():
             key = (row["team"], row["player"])
             player_stats.setdefault(key, {})["ws_touches"] = row.drop(["team", "player"]).to_dict()
+    # WhoScored-derived per-player scoring stats (compute_player_stats()):
+    # Minutes Played, Shots, Goals, Assists, Penalties Attempted/Scored,
+    # Yellow Cards, Red Cards.  Saved under 'ws_scoring' so the dashboard's
+    # General Stats table can fall back to these for pre-2020-21 matches
+    # that have no FotMob data (no 'fm_scoring' namespace).
+    player_stats_out = report.get("player_stats_out")
+    if player_stats_out is not None and not player_stats_out.empty:
+        for _, row in player_stats_out.iterrows():
+            key = (row["team"], row["player"])
+            player_stats.setdefault(key, {})["ws_scoring"] = row.drop(["team", "player"]).to_dict()
+
     if not report["plus_minus"].empty:
         for _, row in report["plus_minus"].iterrows():
             team = _to_ws_name(row["Team"])

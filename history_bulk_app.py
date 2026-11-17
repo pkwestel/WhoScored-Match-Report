@@ -190,6 +190,7 @@ def run_whoscored_only_report(ws_url, status_cb=None):
         "shot_pairs": shot_pairs,
         "sca_out": sca_out,
         "goals_out": goals_out,
+        "player_stats_out": player_stats_out,
         "on_off": on_off,
         # FotMob-compatible fields — empty so build_db_stats() doesn't crash
         "fm_match_id": ws_match_id,
