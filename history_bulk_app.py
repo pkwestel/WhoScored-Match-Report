@@ -120,7 +120,8 @@ def run_whoscored_only_report(ws_url, status_cb=None):
     sca_out = wr.compute_sca(df)
     shot_pairs = wr.compute_shot_pairs(sca_out)
     goals_out = wr.compute_goals(df, ws_home_name, ws_away_name)
-    player_stats_out = wr.compute_player_stats(df)
+    player_windows = wr.extract_player_windows(df)
+    player_stats_out = wr.compute_player_stats(df, player_windows=player_windows)
     xt_received = wr.compute_xt_received(df)
     team_summary, player_third = wr.compute_touches(df, team_carries, player_carries,
                                                       passes_received, progressive_received,
@@ -140,7 +141,6 @@ def run_whoscored_only_report(ws_url, status_cb=None):
     all_passes = wr.compute_all_passes(df)
     all_touches = wr.compute_all_touches(df)
     all_carries = wr.compute_all_carries(df)
-    player_windows = wr.extract_player_windows(df)
     on_off = wr.compute_on_off(df, player_windows, carries_df)
 
     # ---- Build the Excel workbook (WhoScored-only) ----

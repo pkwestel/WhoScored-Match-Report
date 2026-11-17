@@ -135,7 +135,8 @@ if st.button("Generate Report", type="primary"):
             with st.spinner("Computing goals..."):
                 goals_out = wr.compute_goals(df, home_name, away_name)
             with st.spinner("Computing player stats..."):
-                player_stats_tab = wr.compute_player_stats(df)
+                player_windows = wr.extract_player_windows(df)
+                player_stats_tab = wr.compute_player_stats(df, player_windows=player_windows)
             with st.spinner("Computing xT received..."):
                 xt_received = wr.compute_xt_received(df, minute_min=minute_min, minute_max=minute_max)
             with st.spinner("Computing touches..."):
@@ -162,12 +163,6 @@ if st.button("Generate Report", type="primary"):
                                                 defensive_stats, corners, home_name, away_name, df=df_windowed)
                 against_totals = wr.compute_against_totals(totals_out)
             with st.spinner("Computing On/Off splits..."):
-                # extract_player_windows/carries_df are always the FULL-
-                # match versions here (never df_windowed) - compute_on_off
-                # needs each player's TRUE on-pitch window to correctly
-                # intersect it with minute_min/minute_max itself; see that
-                # function's own docstring.
-                player_windows = wr.extract_player_windows(df)
                 on_off = wr.compute_on_off(df, player_windows, carries_df,
                                             minute_min=minute_min, minute_max=minute_max)
 

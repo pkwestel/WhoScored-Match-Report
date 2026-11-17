@@ -2240,12 +2240,13 @@ def compute_goals(df, home_name=None, away_name=None):
     return out
 
 
-def compute_player_stats(df):
+def compute_player_stats(df, player_windows=None):
     """
     Player Stats tab: per-player summary across the match.
-    Columns: team, player, Shots, Goals, Assists, Penalties Attempted,
-    Penalties Scored, Yellow Cards, Red Cards.
+    Columns: team, player, Minutes Played, Shots, Goals, Assists,
+    Penalties Attempted, Penalties Scored, Yellow Cards, Red Cards.
 
+    - Minutes Played: from extract_player_windows() if provided.
     - Shots: total shot attempts (excluding own goals) per player.
     - Goals: non-penalty goals scored.
     - Assists: from WhoScored's native 'IntentionalGoalAssist' Opta
@@ -2255,13 +2256,19 @@ def compute_player_stats(df):
     - Penalties Attempted / Penalties Scored: from penalty shots only.
     - Yellow Cards / Red Cards: from Card events with Yellow/Red qualifiers.
     """
-    _COLS = ['team', 'player', 'Shots', 'Goals', 'Assists',
+    _COLS = ['team', 'player', 'Minutes Played', 'Shots', 'Goals', 'Assists',
              'Penalties Attempted', 'Penalties Scored', 'Yellow Cards', 'Red Cards']
 
     def _empty():
-        return {'Shots': 0, 'Goals': 0, 'Assists': 0,
+        return {'Minutes Played': 0, 'Shots': 0, 'Goals': 0, 'Assists': 0,
                 'Penalties Attempted': 0, 'Penalties Scored': 0,
                 'Yellow Cards': 0, 'Red Cards': 0}
+
+    # Build a minutes lookup from player_windows if available
+    _minutes = {}
+    if player_windows is not None and not player_windows.empty:
+        for _, pw in player_windows.iterrows():
+            _minutes[(pw['Team'], pw['Player'])] = int(round(pw['Minutes Played']))
 
     own_goal_mask = df.apply(is_own_goal, axis=1)
     shots = df[(df['isShot'] == True) & ~own_goal_mask].copy()
@@ -2312,10 +2319,17 @@ def compute_player_stats(df):
         if 'Red' in qn:
             records[key]['Red Cards'] += 1
 
+    # --- Merge minutes played and ensure all players with minutes appear ---
+    for key, mins in _minutes.items():
+        if key not in records:
+            team, player = key
+            records[key] = {'team': team, 'player': player, **_empty()}
+        records[key]['Minutes Played'] = mins
+
     out = pd.DataFrame(list(records.values()))
     if out.empty:
         return pd.DataFrame(columns=_COLS)
-    return out[_COLS].sort_values(['team', 'Shots'], ascending=[True, False]).reset_index(drop=True)
+    return out[_COLS].sort_values(['team', 'Minutes Played'], ascending=[True, False]).reset_index(drop=True)
 
 
 def compute_shot_pairs(sca_out):
