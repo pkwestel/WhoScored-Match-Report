@@ -2206,7 +2206,11 @@ def compute_goals(df, home_name=None, away_name=None):
     Row 1 = header, Row 2 = home team, Row 3 = away team.
     Columns: team, Goals, Penalties Attempted, Penalties Scored.
     Both teams are always present (0 if no goals/penalties).
-    Own goals are excluded (they're credited to the wrong team by WhoScored).
+
+    Own goals are credited to the OPPOSING team: WhoScored's event data
+    tags the own-goal event with the team of the player who scored it, but
+    the goal counts for the other side (e.g. a West Brom own goal is a
+    Man Utd goal).
     """
     own_goal_mask = df.apply(is_own_goal, axis=1)
     shots = df[(df['isShot'] == True) & ~own_goal_mask].copy()
@@ -2214,7 +2218,7 @@ def compute_goals(df, home_name=None, away_name=None):
     shots['is_penalty'] = shots['_quals'].apply(lambda qs: 'Penalty' in qs)
     shots['is_goal'] = shots['type.displayName'] == 'Goal'
 
-    # Build per-team aggregates
+    # Build per-team aggregates from regular (non-own-goal) shots
     team_data = {}
     for team, grp in shots.groupby('team'):
         pen = grp[grp['is_penalty']]
@@ -2228,11 +2232,23 @@ def compute_goals(df, home_name=None, away_name=None):
     # Ensure both teams are present (even with 0s)
     teams = [t for t in [home_name, away_name] if t is not None]
     if not teams:
-        teams = sorted(shots['team'].unique()) if not shots.empty else []
+        teams = sorted(df['team'].unique()) if not df.empty else []
+    for t in teams:
+        team_data.setdefault(t, {'Goals': 0, 'Penalties Attempted': 0, 'Penalties Scored': 0})
+
+    # Credit own goals to the opposing team
+    own_goals = df[own_goal_mask]
+    if not own_goals.empty and len(teams) == 2:
+        other = {teams[0]: teams[1], teams[1]: teams[0]}
+        for _, og in own_goals.iterrows():
+            scoring_team = og['team']          # team of the player who scored OG
+            benefiting_team = other.get(scoring_team)
+            if benefiting_team and benefiting_team in team_data:
+                team_data[benefiting_team]['Goals'] += 1
+
     records = []
     for t in teams:
-        row = team_data.get(t, {'Goals': 0, 'Penalties Attempted': 0, 'Penalties Scored': 0})
-        records.append({'team': t, **row})
+        records.append({'team': t, **team_data[t]})
 
     out = pd.DataFrame(records)
     if out.empty:
