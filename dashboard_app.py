@@ -4113,25 +4113,69 @@ def _render_player_page(db, player, team):
     st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
     st.subheader("Pairs")
 
-    # Independent match selector for the Pairs section
-    pair_match_options = {"Full Season": None}
-    for mid, mdate, mlabel in player_matches:
-        pair_match_options[mlabel] = mid
-    pair_match_col, _pair_spacer = st.columns([2, 5])
-    with pair_match_col:
-        pair_match_label = st.selectbox(
-            "Match", list(pair_match_options.keys()),
-            key="player_page_pair_match",
+    # Match range selector for the Pairs section: "Full Season" or pick a
+    # contiguous range via From/To dropdowns.
+    pair_match_labels = [mlabel for _, _, mlabel in player_matches]
+    pair_match_id_by_label = {mlabel: mid for mid, _, mlabel in player_matches}
+
+    pr_mode_col, pr_from_col, pr_to_col, _pr_spacer = st.columns([1.5, 2, 2, 2])
+    with pr_mode_col:
+        pair_range_mode = st.selectbox(
+            "Scope", ["Full Season", "Match Range", "Single Match"],
+            key="player_page_pair_mode",
         )
-    pair_match_id = pair_match_options[pair_match_label]
+
+    pair_match_ids = None  # None = full season (all matches for this team/comp)
+    if pair_range_mode == "Single Match" and pair_match_labels:
+        with pr_from_col:
+            pair_single_label = st.selectbox(
+                "Match", pair_match_labels, key="player_page_pair_single",
+            )
+        pair_match_ids = {str(pair_match_id_by_label[pair_single_label])}
+    elif pair_range_mode == "Match Range" and len(pair_match_labels) >= 2:
+        with pr_from_col:
+            pair_from_label = st.selectbox(
+                "From", pair_match_labels, index=0,
+                key="player_page_pair_from",
+            )
+        from_idx = pair_match_labels.index(pair_from_label)
+        to_options = pair_match_labels[from_idx:]
+        with pr_to_col:
+            pair_to_label = st.selectbox(
+                "To", to_options, index=len(to_options) - 1,
+                key="player_page_pair_to",
+            )
+        to_idx = pair_match_labels.index(pair_to_label)
+        pair_match_ids = {
+            str(pair_match_id_by_label[pair_match_labels[i]])
+            for i in range(from_idx, to_idx + 1)
+        }
+    elif pair_range_mode == "Match Range" and len(pair_match_labels) < 2:
+        st.info("Need at least 2 matches for a range.")
 
     pair_tabs = st.tabs(["Passing Pairs", "Shot Pairs"])
 
     with pair_tabs[0]:
-        pass_pairs = hdb.fetch_team_passing_pairs(
-            db, team, match_id=pair_match_id,
-            competition=comp_filter if pair_match_id is None else None,
-        )
+        if pair_match_ids is not None and len(pair_match_ids) == 1:
+            # Single match — use the direct API
+            pass_pairs = hdb.fetch_team_passing_pairs(
+                db, team, match_id=next(iter(pair_match_ids)))
+        elif pair_match_ids is not None:
+            # Match range — fetch all passes then filter to the range
+            all_passes = hdb.fetch_passes(db, team=team, completed_only=True)
+            all_passes = all_passes[all_passes["match_id"].astype(str).isin(pair_match_ids)]
+            all_passes = all_passes.dropna(subset=["receiver"])
+            if all_passes.empty:
+                pass_pairs = pd.DataFrame(columns=["passer", "receiver", "count"])
+            else:
+                pass_pairs = (all_passes.groupby(["passer", "receiver"]).size()
+                              .reset_index(name="count")
+                              .sort_values("count", ascending=False)
+                              .reset_index(drop=True))
+        else:
+            # Full season
+            pass_pairs = hdb.fetch_team_passing_pairs(
+                db, team, match_id=None, competition=comp_filter)
         if pass_pairs.empty:
             st.info("No passing pair data found.")
         else:
@@ -4160,10 +4204,36 @@ def _render_player_page(db, player, team):
                                  height=_no_scroll_height(right))
 
     with pair_tabs[1]:
-        shot_pairs = hdb.fetch_team_shot_pairs(
-            db, team, match_id=pair_match_id,
-            competition=comp_filter if pair_match_id is None else None,
-        )
+        if pair_match_ids is not None and len(pair_match_ids) == 1:
+            shot_pairs = hdb.fetch_team_shot_pairs(
+                db, team, match_id=next(iter(pair_match_ids)))
+        elif pair_match_ids is not None:
+            # Match range — rebuild shot pairs from raw shots in range
+            all_shots = hdb.fetch_shots(db, team=team)
+            all_shots = all_shots[all_shots["match_id"].astype(str).isin(pair_match_ids)]
+            if all_shots.empty:
+                shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
+            else:
+                import json as _json
+                records = []
+                for _, r in all_shots.iterrows():
+                    extra = _json.loads(r["extra_json"]) if r.get("extra_json") else {}
+                    sca1_player = extra.get("SCA1_Player")
+                    sca1_action = extra.get("SCA1_Action")
+                    if sca1_player and str(sca1_action).startswith("Pass"):
+                        records.append({"shot_taker": r["player"], "passer": sca1_player})
+                if not records:
+                    shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
+                else:
+                    shot_pairs = (pd.DataFrame(records)
+                                  .groupby(["shot_taker", "passer"]).size()
+                                  .reset_index(name="count")
+                                  .sort_values("count", ascending=False)
+                                  .reset_index(drop=True))
+        else:
+            # Full season
+            shot_pairs = hdb.fetch_team_shot_pairs(
+                db, team, match_id=None, competition=comp_filter)
         if shot_pairs.empty:
             st.info("No shot pair data found.")
         else:
