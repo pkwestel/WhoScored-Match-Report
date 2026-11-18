@@ -4112,12 +4112,25 @@ def _render_player_page(db, player, team):
     # ── Passing Pairs / Shot Pairs ──
     st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
     st.subheader("Pairs")
+
+    # Independent match selector for the Pairs section
+    pair_match_options = {"Full Season": None}
+    for mid, mdate, mlabel in player_matches:
+        pair_match_options[mlabel] = mid
+    pair_match_col, _pair_spacer = st.columns([2, 5])
+    with pair_match_col:
+        pair_match_label = st.selectbox(
+            "Match", list(pair_match_options.keys()),
+            key="player_page_pair_match",
+        )
+    pair_match_id = pair_match_options[pair_match_label]
+
     pair_tabs = st.tabs(["Passing Pairs", "Shot Pairs"])
 
     with pair_tabs[0]:
         pass_pairs = hdb.fetch_team_passing_pairs(
-            db, team, match_id=selected_match_id,
-            competition=comp_filter if selected_match_id is None else None,
+            db, team, match_id=pair_match_id,
+            competition=comp_filter if pair_match_id is None else None,
         )
         if pass_pairs.empty:
             st.info("No passing pair data found.")
@@ -4148,8 +4161,8 @@ def _render_player_page(db, player, team):
 
     with pair_tabs[1]:
         shot_pairs = hdb.fetch_team_shot_pairs(
-            db, team, match_id=selected_match_id,
-            competition=comp_filter if selected_match_id is None else None,
+            db, team, match_id=pair_match_id,
+            competition=comp_filter if pair_match_id is None else None,
         )
         if shot_pairs.empty:
             st.info("No shot pair data found.")
