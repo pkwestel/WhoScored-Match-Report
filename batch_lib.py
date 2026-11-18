@@ -367,7 +367,7 @@ def build_db_stats(report):
         for _, grow in goals_out.iterrows():
             t = grow["team"]
             ws = team_stats.setdefault(t, {}).setdefault("ws_totals", {})
-            ws["Goals"] = int(grow.get("Goals", 0))
+            ws["Goals"] = int(grow.get("Goals", 0)) + int(grow.get("Penalties Scored", 0))
             ws["Penalties Attempted"] = int(grow.get("Penalties Attempted", 0))
             ws["Penalties Scored"] = int(grow.get("Penalties Scored", 0))
 
