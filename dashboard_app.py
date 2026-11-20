@@ -3885,10 +3885,6 @@ def _render_player_page(db, player, team):
             rest = [c for c in cat_result.columns if c not in front and c != "Player"]
             cat_result = cat_result[front + rest]
 
-            # Drop injected Minutes column if it's all-None (no scoring data)
-            if "Minutes" in cat_result.columns and cat_result["Minutes"].isna().all():
-                cat_result = cat_result.drop(columns=["Minutes"])
-
             # Sort by season descending
             cat_result = cat_result.sort_values("Season", ascending=False).reset_index(drop=True)
 
@@ -3909,6 +3905,16 @@ def _render_player_page(db, player, team):
                     )
 
             st.markdown(f"**{cat_title}**")
+
+            # Hide the injected Minutes column (used only for per-90 calc)
+            # unless this category natively carries it (General Stats, Plus Minus).
+            _native_minutes_cats = {"General Stats", "Plus Minus"}
+            if cat_title not in _native_minutes_cats and "Minutes" in cat_result.columns:
+                cat_result = cat_result.drop(columns=["Minutes"])
+
+            # Replace string "-" values (from _per90 helpers) with NaN so
+            # .style.format won't choke on non-numeric cells.
+            cat_result = cat_result.replace("-", pd.NA)
 
             # Format decimal columns for display
             all_decimal = set(decimal_cols) | {c for c in cat_result.columns if "(Per 90)" in c}
