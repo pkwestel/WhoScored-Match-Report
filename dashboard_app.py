@@ -3803,463 +3803,584 @@ def _render_player_page(db, player, team):
     # From here on, use active_team instead of the URL team
     team = active_team
 
-    # ── Match Log Tabs ──
-    st.subheader("Match Log")
-    ml_tabs = st.tabs(["Scoring", "Possession", "Passing", "Defensive Actions",
-                        "Defensive Action Locations"])
-
-    with ml_tabs[0]:
-        scoring_log = hdb.fetch_player_match_log_scoring(db, player, team, season, competition=comp_filter)
-        if scoring_log.empty:
-            st.info("No scoring stats found for this player/season.")
-        else:
-            _render_player_match_log_table(scoring_log, decimal_cols=("NPxG", "PS-xG", "xA"))
-
-    with ml_tabs[1]:
-        poss_log = hdb.fetch_player_match_log_possession(db, player, team, season, competition=comp_filter)
-        if poss_log.empty:
-            st.info("No possession stats found for this player/season.")
-        else:
-            _render_player_match_log_table(poss_log, decimal_cols=("xT Carry", "xT Received"))
-
-    with ml_tabs[2]:
-        pass_log = hdb.fetch_player_match_log_passing(db, player, team, season, competition=comp_filter)
-        if pass_log.empty:
-            st.info("No passing stats found for this player/season.")
-        else:
-            _render_player_match_log_table(pass_log, decimal_cols=("xT", "xG Buildup"))
-
-    with ml_tabs[3]:
-        def_log = hdb.fetch_player_match_log_defensive(db, player, team, season, competition=comp_filter)
-        if def_log.empty:
-            st.info("No defensive stats found for this player/season.")
-        else:
-            _render_player_match_log_table(def_log)
-
-    with ml_tabs[4]:
-        def_loc_log = hdb.fetch_player_match_log_defensive_locations(
-            db, player, team, season, competition=comp_filter
-        )
-        if def_loc_log.empty:
-            st.info("No defensive location stats found for this player/season.")
-        else:
-            _render_player_match_log_table(def_loc_log)
-
-    # ── Viz Section: Pass Maps, Passes Received, Touch Maps ──
-    st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
-    st.subheader("Maps")
-
-    # Match selector for individual match views
+    # Shared data needed by both Pass Maps and Passing Pairs tabs
     player_matches = hdb.fetch_player_matches(db, player, team, season, competition=comp_filter)
-    match_options = {"Full Season": None}
-    for mid, mdate, mlabel in player_matches:
-        match_options[mlabel] = mid
-    match_col, zone_col, _map_spacer = st.columns([2, 2, 3])
-    with match_col:
-        match_label = st.selectbox(
-            "Match", list(match_options.keys()),
-            key="player_page_map_match",
-        )
-    selected_match_id = match_options[match_label]
 
-    # Zone filter + matchweek range - only for Full Season view
-    if selected_match_id is None:
-        with zone_col:
-            pp_zone = st.selectbox("Pitch Zone", _PITCH_ZONE_OPTIONS,
-                                   key="player_page_map_zone")
-        # Matchweek range slider (narrows which matches are included)
-        all_matches_df = hdb.fetch_matches(db)
-        if not all_matches_df.empty and player_matches:
-            player_match_ids = {str(mid) for mid, _, _ in player_matches}
-            pp_matches_in_scope = all_matches_df[
-                all_matches_df["match_id"].astype(str).isin(player_match_ids)
-            ]
-            pp_mw_keep_ids, _pp_mw_narrowed = _matchweek_range_slider(
-                "player_page_map_matchweek", pp_matches_in_scope
+    # ── Top-level tabs ──
+    top_tabs = st.tabs(["Player Stats", "Match Log", "Pass Maps", "Passing Pairs"])
+
+    # ================================================================
+    # TAB 1 — Player Stats (cumulative season totals across all seasons)
+    # ================================================================
+    with top_tabs[0]:
+        _pp_per90_col, _pp_spacer = st.columns([1, 5])
+        with _pp_per90_col:
+            pp_show_per90 = st.toggle("Per 90", key="player_page_stats_per90",
+                                       help="Show per-90-minute rates instead of season totals.")
+
+        # Gather one row per season for each category.  For each season the
+        # player appears in, fetch the team-level season table and extract
+        # the player's own row.
+        _PP_CATEGORIES = [
+            ("General Stats", hdb.fetch_team_season_scoring_stats,
+             ("NPxG", "PS-xG", "xA")),
+            ("Possession", hdb.fetch_team_season_possession, ("xT Carry", "xT Received")),
+            ("Passing", hdb.fetch_team_season_passing, ("xT", "xG Buildup")),
+            ("Defensive Actions", hdb.fetch_team_season_defensive_actions, ()),
+            ("Defensive Action Locations", hdb.fetch_team_season_defensive_locations, ()),
+            ("Plus Minus", hdb.fetch_team_season_plus_minus,
+             ("xG For", "xG Against", "xG Diff", "xG For (Per 90)", "xG Against (Per 90)",
+              "xG Diff (Per 90)", "Goal Diff (Per 90)")),
+        ]
+
+        # Pre-fetch General Stats for each team/season — cache the full
+        # DataFrame so the General Stats category loop below doesn't re-query,
+        # and extract minutes for per-90 on categories that lack their own
+        # Minutes column (Possession/Passing/Defensive).
+        _pp_general_cache = {}  # (season, team) -> DataFrame
+        _pp_minutes = {}  # (season, team) -> minutes
+        for ts in team_seasons:
+            key = (ts["season"], ts["team"])
+            ss = hdb.fetch_team_season_scoring_stats(db, ts["team"], ts["season"], competition=None)
+            _pp_general_cache[key] = ss
+            if not ss.empty:
+                pr = ss[ss["Player"] == player]
+                if not pr.empty and "Minutes" in pr.columns:
+                    _pp_minutes[key] = pr.iloc[0]["Minutes"]
+
+        for cat_title, cat_fetcher, decimal_cols in _PP_CATEGORIES:
+            rows = []
+            for ts in team_seasons:
+                ts_season, ts_team = ts["season"], ts["team"]
+                # Use cached General Stats instead of re-fetching
+                if cat_fetcher is hdb.fetch_team_season_scoring_stats:
+                    cat_df = _pp_general_cache.get((ts_season, ts_team), pd.DataFrame())
+                else:
+                    cat_df = cat_fetcher(db, ts_team, ts_season, competition=None)
+                if cat_df.empty:
+                    continue
+                player_row = cat_df[cat_df["Player"] == player]
+                if player_row.empty:
+                    continue
+                row_dict = player_row.iloc[0].to_dict()
+                row_dict["Season"] = ts_season
+                row_dict["Team"] = _team_abbreviation(ts_team)
+                # Inject Minutes if not already present (Possession/Passing/
+                # Defensive tables don't carry it themselves)
+                if "Minutes" not in row_dict:
+                    row_dict["Minutes"] = _pp_minutes.get((ts_season, ts_team))
+                rows.append(row_dict)
+
+            if not rows:
+                st.markdown(f"**{cat_title}**")
+                st.info(f"No {cat_title.lower()} data found for {player}.")
+                continue
+
+            cat_result = pd.DataFrame(rows)
+            # Re-order columns: Season, Team (+ Position if present) first,
+            # then the rest (drop Player)
+            front = ["Season", "Team"]
+            if "Position" in cat_result.columns:
+                front.append("Position")
+            rest = [c for c in cat_result.columns if c not in front and c != "Player"]
+            cat_result = cat_result[front + rest]
+
+            # Drop injected Minutes column if it's all-None (no scoring data)
+            if "Minutes" in cat_result.columns and cat_result["Minutes"].isna().all():
+                cat_result = cat_result.drop(columns=["Minutes"])
+
+            # Sort by season descending
+            cat_result = cat_result.sort_values("Season", ascending=False).reset_index(drop=True)
+
+            # Per 90 conversion
+            if pp_show_per90 and "Minutes" in cat_result.columns:
+                passthrough = {"Season", "Team", "Position", "Player", "Age",
+                               "Appearances", "Starts", "Minutes"}
+                # Also skip columns that are already per-90 rates
+                passthrough.update(c for c in cat_result.columns if "(Per 90)" in c)
+                stat_cols = [c for c in cat_result.columns if c not in passthrough]
+                for c in stat_cols:
+                    cat_result[c] = cat_result.apply(
+                        lambda r, _c=c: round(r[_c] / r["Minutes"] * 90, 2)
+                        if pd.notna(r.get("Minutes")) and r.get("Minutes", 0) > 0
+                           and pd.notna(r[_c]) and isinstance(r[_c], (int, float))
+                        else r[_c],
+                        axis=1,
+                    )
+
+            st.markdown(f"**{cat_title}**")
+
+            # Format decimal columns for display
+            all_decimal = set(decimal_cols) | {c for c in cat_result.columns if "(Per 90)" in c}
+            if pp_show_per90:
+                # When per-90 is on, all stat columns become decimal
+                all_decimal.update(c for c in cat_result.columns
+                                   if c not in {"Season", "Team", "Position", "Player",
+                                                "Age", "Appearances", "Starts", "Minutes"})
+            format_dict = {c: "{:.2f}" for c in all_decimal if c in cat_result.columns}
+            st.dataframe(cat_result.style.format(format_dict, na_rep="-"),
+                         use_container_width=False, hide_index=True,
+                         height=_no_scroll_height(cat_result))
+            st.markdown("<div style='height:1.2em;'></div>", unsafe_allow_html=True)
+
+    # ================================================================
+    # TAB 2 — Match Log (existing content, unchanged)
+    # ================================================================
+    with top_tabs[1]:
+        ml_tabs = st.tabs(["Scoring", "Possession", "Passing", "Defensive Actions",
+                            "Defensive Action Locations"])
+
+        with ml_tabs[0]:
+            scoring_log = hdb.fetch_player_match_log_scoring(db, player, team, season, competition=comp_filter)
+            if scoring_log.empty:
+                st.info("No scoring stats found for this player/season.")
+            else:
+                _render_player_match_log_table(scoring_log, decimal_cols=("NPxG", "PS-xG", "xA"))
+
+        with ml_tabs[1]:
+            poss_log = hdb.fetch_player_match_log_possession(db, player, team, season, competition=comp_filter)
+            if poss_log.empty:
+                st.info("No possession stats found for this player/season.")
+            else:
+                _render_player_match_log_table(poss_log, decimal_cols=("xT Carry", "xT Received"))
+
+        with ml_tabs[2]:
+            pass_log = hdb.fetch_player_match_log_passing(db, player, team, season, competition=comp_filter)
+            if pass_log.empty:
+                st.info("No passing stats found for this player/season.")
+            else:
+                _render_player_match_log_table(pass_log, decimal_cols=("xT", "xG Buildup"))
+
+        with ml_tabs[3]:
+            def_log = hdb.fetch_player_match_log_defensive(db, player, team, season, competition=comp_filter)
+            if def_log.empty:
+                st.info("No defensive stats found for this player/season.")
+            else:
+                _render_player_match_log_table(def_log)
+
+        with ml_tabs[4]:
+            def_loc_log = hdb.fetch_player_match_log_defensive_locations(
+                db, player, team, season, competition=comp_filter
             )
-        else:
-            pp_mw_keep_ids = {str(mid) for mid, _, _ in player_matches} if player_matches else set()
-    else:
-        pp_zone = "All zones"
-        pp_mw_keep_ids = None  # not used for single-match view
+            if def_loc_log.empty:
+                st.info("No defensive location stats found for this player/season.")
+            else:
+                _render_player_match_log_table(def_loc_log)
 
-    map_tabs = st.tabs(["Pass Map", "Passes Received", "Touch Map", "Carries Map"])
+    # ================================================================
+    # TAB 3 — Pass Maps (existing content, unchanged)
+    # ================================================================
+    with top_tabs[2]:
+        # Match selector for individual match views
+        match_options = {"Full Season": None}
+        for mid, mdate, mlabel in player_matches:
+            match_options[mlabel] = mid
+        match_col, zone_col, _map_spacer = st.columns([2, 2, 3])
+        with match_col:
+            match_label = st.selectbox(
+                "Match", list(match_options.keys()),
+                key="player_page_map_match",
+            )
+        selected_match_id = match_options[match_label]
 
-    with map_tabs[0]:
-        if selected_match_id is not None:
-            player_passes = hdb.fetch_passes(db, match_id=selected_match_id, passer=player, team=team)
+        # Zone filter + matchweek range - only for Full Season view
+        if selected_match_id is None:
+            with zone_col:
+                pp_zone = st.selectbox("Pitch Zone", _PITCH_ZONE_OPTIONS,
+                                       key="player_page_map_zone")
+            # Matchweek range slider (narrows which matches are included)
+            all_matches_df = hdb.fetch_matches(db)
+            if not all_matches_df.empty and player_matches:
+                player_match_ids = {str(mid) for mid, _, _ in player_matches}
+                pp_matches_in_scope = all_matches_df[
+                    all_matches_df["match_id"].astype(str).isin(player_match_ids)
+                ]
+                pp_mw_keep_ids, _pp_mw_narrowed = _matchweek_range_slider(
+                    "player_page_map_matchweek", pp_matches_in_scope
+                )
+            else:
+                pp_mw_keep_ids = {str(mid) for mid, _, _ in player_matches} if player_matches else set()
         else:
-            player_passes = hdb.fetch_passes(db, passer=player, team=team)
-            if player_matches:
-                player_passes = player_passes[player_passes["match_id"].astype(str).isin(pp_mw_keep_ids)]
+            pp_zone = "All zones"
+            pp_mw_keep_ids = None  # not used for single-match view
 
-        if player_passes.empty:
-            st.info("No pass data found.")
-        else:
-            player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
-            # Zone filter (origin for passer) - Full Season only
-            if selected_match_id is None:
-                player_passes = player_passes[_pitch_zone_mask(player_passes, pp_zone, "x", "y")]
+        map_tabs = st.tabs(["Pass Map", "Passes Received", "Touch Map", "Carries Map"])
+
+        with map_tabs[0]:
+            if selected_match_id is not None:
+                player_passes = hdb.fetch_passes(db, match_id=selected_match_id, passer=player, team=team)
+            else:
+                player_passes = hdb.fetch_passes(db, passer=player, team=team)
+                if player_matches:
+                    player_passes = player_passes[player_passes["match_id"].astype(str).isin(pp_mw_keep_ids)]
+
             if player_passes.empty:
-                st.info("No passes found in this pitch zone.")
+                st.info("No pass data found.")
             else:
-                n_matches = player_passes["match_id"].nunique()
-                total = len(player_passes)
-                completed = int(player_passes["completed"].sum())
-                progressive = int(player_passes["is_progressive"].sum())
-                key_passes = int(player_passes["is_key_pass"].sum())
+                player_passes = player_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+                # Zone filter (origin for passer) - Full Season only
+                if selected_match_id is None:
+                    player_passes = player_passes[_pitch_zone_mask(player_passes, pp_zone, "x", "y")]
+                if player_passes.empty:
+                    st.info("No passes found in this pitch zone.")
+                else:
+                    n_matches = player_passes["match_id"].nunique()
+                    total = len(player_passes)
+                    completed = int(player_passes["completed"].sum())
+                    progressive = int(player_passes["is_progressive"].sum())
+                    key_passes = int(player_passes["is_key_pass"].sum())
 
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("Matches", n_matches)
-                c2.metric("Passes Attempted", total)
-                c3.metric("Completion %", f"{completed / total * 100:.0f}%" if total else "0%")
-                c4.metric("Progressive", progressive)
-                c5.metric("Key Passes", key_passes)
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Matches", n_matches)
+                    c2.metric("Passes Attempted", total)
+                    c3.metric("Completion %", f"{completed / total * 100:.0f}%" if total else "0%")
+                    c4.metric("Progressive", progressive)
+                    c5.metric("Key Passes", key_passes)
 
-                stat_items = [
-                    (f"{total} Attempted", TITLE_COLOR),
-                    (f"{completed / total * 100:.0f}% Completion" if total else "0% Completion", TITLE_COLOR),
-                    (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
-                    (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
-                ]
-                subtitle = f"{season}" if selected_match_id is None else match_label
-                fig = plot_pass_map(player_passes, player, team,
-                                    None, None, stat_items,
-                                    title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes", subtitle=subtitle)
-                png_buf = io.BytesIO()
-                fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
-                png_buf.seek(0)
-                st.image(png_buf, width=420)
+                    stat_items = [
+                        (f"{total} Attempted", TITLE_COLOR),
+                        (f"{completed / total * 100:.0f}% Completion" if total else "0% Completion", TITLE_COLOR),
+                        (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                        (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+                    ]
+                    subtitle = f"{season}" if selected_match_id is None else match_label
+                    fig = plot_pass_map(player_passes, player, team,
+                                        None, None, stat_items,
+                                        title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes", subtitle=subtitle)
+                    png_buf = io.BytesIO()
+                    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+                    png_buf.seek(0)
+                    st.image(png_buf, width=420)
 
-                download_buf = io.BytesIO()
-                fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
-                download_buf.seek(0)
-                st.download_button(
-                    label="Download Pass Map (PNG)",
-                    data=download_buf,
-                    file_name=f"{player.replace(' ', '_')}_pass_map.png",
-                    mime="image/png",
-                    key="player_page_passmap_download",
-                )
-                plt.close(fig)
+                    download_buf = io.BytesIO()
+                    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+                    download_buf.seek(0)
+                    st.download_button(
+                        label="Download Pass Map (PNG)",
+                        data=download_buf,
+                        file_name=f"{player.replace(' ', '_')}_pass_map.png",
+                        mime="image/png",
+                        key="player_page_passmap_download",
+                    )
+                    plt.close(fig)
 
-    with map_tabs[1]:
-        if selected_match_id is not None:
-            recv_passes = hdb.fetch_passes(db, match_id=selected_match_id,
-                                            receiver=player, team=team, completed_only=True)
-        else:
-            recv_passes = hdb.fetch_passes(db, receiver=player, team=team, completed_only=True)
-            if player_matches:
-                recv_passes = recv_passes[recv_passes["match_id"].astype(str).isin(pp_mw_keep_ids)]
+        with map_tabs[1]:
+            if selected_match_id is not None:
+                recv_passes = hdb.fetch_passes(db, match_id=selected_match_id,
+                                                receiver=player, team=team, completed_only=True)
+            else:
+                recv_passes = hdb.fetch_passes(db, receiver=player, team=team, completed_only=True)
+                if player_matches:
+                    recv_passes = recv_passes[recv_passes["match_id"].astype(str).isin(pp_mw_keep_ids)]
 
-        if recv_passes.empty:
-            st.info("No received pass data found.")
-        else:
-            recv_passes = recv_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
-            # Zone filter (destination for receiver) - Full Season only
-            if selected_match_id is None:
-                recv_passes = recv_passes[_pitch_zone_mask(recv_passes, pp_zone, "endX", "endY")]
             if recv_passes.empty:
-                st.info("No received passes found in this pitch zone.")
+                st.info("No received pass data found.")
             else:
-                n_matches = recv_passes["match_id"].nunique()
-                total = len(recv_passes)
-                progressive = int(recv_passes["is_progressive"].sum())
-                key_passes = int(recv_passes["is_key_pass"].sum())
+                recv_passes = recv_passes.rename(columns={"end_x": "endX", "end_y": "endY"})
+                # Zone filter (destination for receiver) - Full Season only
+                if selected_match_id is None:
+                    recv_passes = recv_passes[_pitch_zone_mask(recv_passes, pp_zone, "endX", "endY")]
+                if recv_passes.empty:
+                    st.info("No received passes found in this pitch zone.")
+                else:
+                    n_matches = recv_passes["match_id"].nunique()
+                    total = len(recv_passes)
+                    progressive = int(recv_passes["is_progressive"].sum())
+                    key_passes = int(recv_passes["is_key_pass"].sum())
 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Matches", n_matches)
-                c2.metric("Passes Received", total)
-                c3.metric("Progressive", progressive)
-                c4.metric("Key Passes", key_passes)
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Matches", n_matches)
+                    c2.metric("Passes Received", total)
+                    c3.metric("Progressive", progressive)
+                    c4.metric("Key Passes", key_passes)
 
-                stat_items = [
-                    (f"{total} Received", TITLE_COLOR),
-                    (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
-                    (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
-                ]
-                subtitle = f"{season}" if selected_match_id is None else match_label
-                fig = plot_pass_map(recv_passes, player, team,
-                                    None, None, stat_items,
-                                    title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes Received", subtitle=subtitle)
-                png_buf = io.BytesIO()
-                fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
-                png_buf.seek(0)
-                st.image(png_buf, width=420)
+                    stat_items = [
+                        (f"{total} Received", TITLE_COLOR),
+                        (f"{progressive} Progressive", PASS_CATEGORY_COLORS["Progressive"]),
+                        (f"{key_passes} Key Passes", PASS_CATEGORY_COLORS["Key Pass"]),
+                    ]
+                    subtitle = f"{season}" if selected_match_id is None else match_label
+                    fig = plot_pass_map(recv_passes, player, team,
+                                        None, None, stat_items,
+                                        title_suffix=f"{_ZONE_TITLE_PREFIX.get(pp_zone, 'All')} Passes Received", subtitle=subtitle)
+                    png_buf = io.BytesIO()
+                    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+                    png_buf.seek(0)
+                    st.image(png_buf, width=420)
 
-                download_buf = io.BytesIO()
-                fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
-                download_buf.seek(0)
-                st.download_button(
-                    label="Download Passes Received (PNG)",
-                    data=download_buf,
-                    file_name=f"{player.replace(' ', '_')}_passes_received.png",
-                    mime="image/png",
-                    key="player_page_passrecv_download",
-                )
-                plt.close(fig)
+                    download_buf = io.BytesIO()
+                    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+                    download_buf.seek(0)
+                    st.download_button(
+                        label="Download Passes Received (PNG)",
+                        data=download_buf,
+                        file_name=f"{player.replace(' ', '_')}_passes_received.png",
+                        mime="image/png",
+                        key="player_page_passrecv_download",
+                    )
+                    plt.close(fig)
 
-    with map_tabs[2]:
-        if selected_match_id is not None:
-            player_touches = hdb.fetch_touches(db, match_id=selected_match_id, player=player, team=team)
-        else:
-            player_touches = hdb.fetch_touches(db, player=player, team=team)
-            if player_matches:
-                player_touches = player_touches[player_touches["match_id"].astype(str).isin(pp_mw_keep_ids)]
+        with map_tabs[2]:
+            if selected_match_id is not None:
+                player_touches = hdb.fetch_touches(db, match_id=selected_match_id, player=player, team=team)
+            else:
+                player_touches = hdb.fetch_touches(db, player=player, team=team)
+                if player_matches:
+                    player_touches = player_touches[player_touches["match_id"].astype(str).isin(pp_mw_keep_ids)]
 
-        if player_touches.empty:
-            st.info("No touch data found.")
-        else:
-            # Zone filter - Full Season only
-            if selected_match_id is None:
-                player_touches = player_touches[_pitch_zone_mask(player_touches, pp_zone, "x", "y")]
             if player_touches.empty:
-                st.info("No touches found in this pitch zone.")
+                st.info("No touch data found.")
             else:
-                n_matches = player_touches["match_id"].nunique()
-                c1, c2 = st.columns(2)
-                c1.metric("Matches", n_matches)
-                c2.metric("Total Touches", len(player_touches))
+                # Zone filter - Full Season only
+                if selected_match_id is None:
+                    player_touches = player_touches[_pitch_zone_mask(player_touches, pp_zone, "x", "y")]
+                if player_touches.empty:
+                    st.info("No touches found in this pitch zone.")
+                else:
+                    n_matches = player_touches["match_id"].nunique()
+                    c1, c2 = st.columns(2)
+                    c1.metric("Matches", n_matches)
+                    c2.metric("Total Touches", len(player_touches))
 
-                subtitle = f"{season}" if selected_match_id is None else match_label
-                _zp_t = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
-                _touch_suffix = f"{_zp_t} Touches" if _zp_t != "All" else "Touch Map"
-                fig = plot_touch_map(player_touches, player, team,
-                                      subtitle=subtitle, title_suffix=_touch_suffix)
-                png_buf = io.BytesIO()
-                fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
-                png_buf.seek(0)
-                st.image(png_buf, width=420)
+                    subtitle = f"{season}" if selected_match_id is None else match_label
+                    _zp_t = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
+                    _touch_suffix = f"{_zp_t} Touches" if _zp_t != "All" else "Touch Map"
+                    fig = plot_touch_map(player_touches, player, team,
+                                          subtitle=subtitle, title_suffix=_touch_suffix)
+                    png_buf = io.BytesIO()
+                    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+                    png_buf.seek(0)
+                    st.image(png_buf, width=420)
 
-                download_buf = io.BytesIO()
-                fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
-                download_buf.seek(0)
-                st.download_button(
-                    label="Download Touch Map (PNG)",
-                    data=download_buf,
-                    file_name=f"{player.replace(' ', '_')}_touch_map.png",
-                    mime="image/png",
-                    key="player_page_touchmap_download",
-                )
-                plt.close(fig)
+                    download_buf = io.BytesIO()
+                    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+                    download_buf.seek(0)
+                    st.download_button(
+                        label="Download Touch Map (PNG)",
+                        data=download_buf,
+                        file_name=f"{player.replace(' ', '_')}_touch_map.png",
+                        mime="image/png",
+                        key="player_page_touchmap_download",
+                    )
+                    plt.close(fig)
 
-    with map_tabs[3]:
-        if selected_match_id is not None:
-            player_carries = hdb.fetch_carries(db, match_id=selected_match_id, player=player, team=team)
-        else:
-            player_carries = hdb.fetch_carries(db, player=player, team=team)
-            if player_matches:
-                player_carries = player_carries[player_carries["match_id"].astype(str).isin(pp_mw_keep_ids)]
+        with map_tabs[3]:
+            if selected_match_id is not None:
+                player_carries = hdb.fetch_carries(db, match_id=selected_match_id, player=player, team=team)
+            else:
+                player_carries = hdb.fetch_carries(db, player=player, team=team)
+                if player_matches:
+                    player_carries = player_carries[player_carries["match_id"].astype(str).isin(pp_mw_keep_ids)]
 
-        if player_carries.empty:
-            st.info("No carry data found.")
-        else:
-            player_carries = player_carries.rename(columns={"end_x": "endX", "end_y": "endY"})
-            # Zone filter (origin) - Full Season only
-            if selected_match_id is None:
-                player_carries = player_carries[_pitch_zone_mask(player_carries, pp_zone, "x", "y")]
             if player_carries.empty:
-                st.info("No carries found in this pitch zone.")
+                st.info("No carry data found.")
             else:
-                n_matches = player_carries["match_id"].nunique()
-                total = len(player_carries)
-                progressive = int(player_carries["is_progressive"].sum())
-                into_final_third = int(player_carries["into_final_third"].sum())
-                into_box = int(player_carries["into_box"].sum())
-                carry_to_shot = int(player_carries["ends_with_shot"].sum()) if "ends_with_shot" in player_carries.columns else 0
+                player_carries = player_carries.rename(columns={"end_x": "endX", "end_y": "endY"})
+                # Zone filter (origin) - Full Season only
+                if selected_match_id is None:
+                    player_carries = player_carries[_pitch_zone_mask(player_carries, pp_zone, "x", "y")]
+                if player_carries.empty:
+                    st.info("No carries found in this pitch zone.")
+                else:
+                    n_matches = player_carries["match_id"].nunique()
+                    total = len(player_carries)
+                    progressive = int(player_carries["is_progressive"].sum())
+                    into_final_third = int(player_carries["into_final_third"].sum())
+                    into_box = int(player_carries["into_box"].sum())
+                    carry_to_shot = int(player_carries["ends_with_shot"].sum()) if "ends_with_shot" in player_carries.columns else 0
 
-                c1, c2, c3, c4, c5, c6 = st.columns(6)
-                c1.metric("Matches", n_matches)
-                c2.metric("Total Carries", total)
-                c3.metric("Progressive", progressive)
-                c4.metric("Into Final Third", into_final_third)
-                c5.metric("Into Box", into_box)
-                c6.metric("Carry to Shot", carry_to_shot)
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
+                    c1.metric("Matches", n_matches)
+                    c2.metric("Total Carries", total)
+                    c3.metric("Progressive", progressive)
+                    c4.metric("Into Final Third", into_final_third)
+                    c5.metric("Into Box", into_box)
+                    c6.metric("Carry to Shot", carry_to_shot)
 
-                stat_items = [
-                    (f"{total} Carries", TITLE_COLOR),
-                    (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
-                    (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
-                    (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
-                    (f"{carry_to_shot} Carry to Shot", CARRY_CATEGORY_COLORS["Carry to Shot"]),
-                ]
-                xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
-                if xt_total > 0:
-                    stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
+                    stat_items = [
+                        (f"{total} Carries", TITLE_COLOR),
+                        (f"{progressive} Progressive", CARRY_CATEGORY_COLORS["Progressive"]),
+                        (f"{into_final_third} Into Final Third", CARRY_CATEGORY_COLORS["Into Final Third"]),
+                        (f"{into_box} Into Box", CARRY_CATEGORY_COLORS["Into Box"]),
+                        (f"{carry_to_shot} Carry to Shot", CARRY_CATEGORY_COLORS["Carry to Shot"]),
+                    ]
+                    xt_total = player_carries["xt_carry"].sum() if "xt_carry" in player_carries.columns else 0
+                    if xt_total > 0:
+                        stat_items.append((f"{xt_total:.2f} xT", TITLE_COLOR))
 
-                subtitle = f"{season}" if selected_match_id is None else match_label
-                _zp_c = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
-                fig = plot_carry_map(player_carries, player, team,
-                                      None, None, stat_items,
-                                      title_suffix=f"{_zp_c} Carries", subtitle=subtitle)
-                png_buf = io.BytesIO()
-                fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
-                png_buf.seek(0)
-                st.image(png_buf, width=420)
+                    subtitle = f"{season}" if selected_match_id is None else match_label
+                    _zp_c = _ZONE_TITLE_PREFIX.get(pp_zone, "All")
+                    fig = plot_carry_map(player_carries, player, team,
+                                          None, None, stat_items,
+                                          title_suffix=f"{_zp_c} Carries", subtitle=subtitle)
+                    png_buf = io.BytesIO()
+                    fig.savefig(png_buf, format="png", dpi=220, facecolor=fig.get_facecolor())
+                    png_buf.seek(0)
+                    st.image(png_buf, width=420)
 
-                download_buf = io.BytesIO()
-                fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
-                download_buf.seek(0)
-                st.download_button(
-                    label="Download Carries Map (PNG)",
-                    data=download_buf,
-                    file_name=f"{player.replace(' ', '_')}_carries_map.png",
-                    mime="image/png",
-                    key="player_page_carrymap_download",
+                    download_buf = io.BytesIO()
+                    fig.savefig(download_buf, format="png", dpi=300, facecolor=fig.get_facecolor())
+                    download_buf.seek(0)
+                    st.download_button(
+                        label="Download Carries Map (PNG)",
+                        data=download_buf,
+                        file_name=f"{player.replace(' ', '_')}_carries_map.png",
+                        mime="image/png",
+                        key="player_page_carrymap_download",
+                    )
+                    plt.close(fig)
+
+    # ================================================================
+    # TAB 4 — Passing Pairs (existing content, unchanged)
+    # ================================================================
+    with top_tabs[3]:
+        # Match range selector for the Pairs section: "Full Season" or pick a
+        # contiguous range via From/To dropdowns.
+        pair_match_labels = [mlabel for _, _, mlabel in player_matches]
+        pair_match_id_by_label = {mlabel: mid for mid, _, mlabel in player_matches}
+
+        pr_mode_col, pr_from_col, pr_to_col, _pr_spacer = st.columns([1.5, 2, 2, 2])
+        with pr_mode_col:
+            pair_range_mode = st.selectbox(
+                "Scope", ["Full Season", "Match Range", "Single Match"],
+                key="player_page_pair_mode",
+            )
+
+        pair_match_ids = None  # None = full season (all matches for this team/comp)
+        if pair_range_mode == "Single Match" and pair_match_labels:
+            with pr_from_col:
+                pair_single_label = st.selectbox(
+                    "Match", pair_match_labels, key="player_page_pair_single",
                 )
-                plt.close(fig)
+            pair_match_ids = {str(pair_match_id_by_label[pair_single_label])}
+        elif pair_range_mode == "Match Range" and len(pair_match_labels) >= 2:
+            with pr_from_col:
+                pair_from_label = st.selectbox(
+                    "From", pair_match_labels, index=0,
+                    key="player_page_pair_from",
+                )
+            from_idx = pair_match_labels.index(pair_from_label)
+            to_options = pair_match_labels[from_idx:]
+            with pr_to_col:
+                pair_to_label = st.selectbox(
+                    "To", to_options, index=len(to_options) - 1,
+                    key="player_page_pair_to",
+                )
+            to_idx = pair_match_labels.index(pair_to_label)
+            pair_match_ids = {
+                str(pair_match_id_by_label[pair_match_labels[i]])
+                for i in range(from_idx, to_idx + 1)
+            }
+        elif pair_range_mode == "Match Range" and len(pair_match_labels) < 2:
+            st.info("Need at least 2 matches for a range.")
 
-    # ── Passing Pairs / Shot Pairs ──
-    st.markdown("<div style='height:2em;'></div>", unsafe_allow_html=True)
-    st.subheader("Pairs")
+        pair_tabs = st.tabs(["Passing Pairs", "Shot Pairs"])
 
-    # Match range selector for the Pairs section: "Full Season" or pick a
-    # contiguous range via From/To dropdowns.
-    pair_match_labels = [mlabel for _, _, mlabel in player_matches]
-    pair_match_id_by_label = {mlabel: mid for mid, _, mlabel in player_matches}
-
-    pr_mode_col, pr_from_col, pr_to_col, _pr_spacer = st.columns([1.5, 2, 2, 2])
-    with pr_mode_col:
-        pair_range_mode = st.selectbox(
-            "Scope", ["Full Season", "Match Range", "Single Match"],
-            key="player_page_pair_mode",
-        )
-
-    pair_match_ids = None  # None = full season (all matches for this team/comp)
-    if pair_range_mode == "Single Match" and pair_match_labels:
-        with pr_from_col:
-            pair_single_label = st.selectbox(
-                "Match", pair_match_labels, key="player_page_pair_single",
-            )
-        pair_match_ids = {str(pair_match_id_by_label[pair_single_label])}
-    elif pair_range_mode == "Match Range" and len(pair_match_labels) >= 2:
-        with pr_from_col:
-            pair_from_label = st.selectbox(
-                "From", pair_match_labels, index=0,
-                key="player_page_pair_from",
-            )
-        from_idx = pair_match_labels.index(pair_from_label)
-        to_options = pair_match_labels[from_idx:]
-        with pr_to_col:
-            pair_to_label = st.selectbox(
-                "To", to_options, index=len(to_options) - 1,
-                key="player_page_pair_to",
-            )
-        to_idx = pair_match_labels.index(pair_to_label)
-        pair_match_ids = {
-            str(pair_match_id_by_label[pair_match_labels[i]])
-            for i in range(from_idx, to_idx + 1)
-        }
-    elif pair_range_mode == "Match Range" and len(pair_match_labels) < 2:
-        st.info("Need at least 2 matches for a range.")
-
-    pair_tabs = st.tabs(["Passing Pairs", "Shot Pairs"])
-
-    with pair_tabs[0]:
-        if pair_match_ids is not None and len(pair_match_ids) == 1:
-            # Single match — use the direct API
-            pass_pairs = hdb.fetch_team_passing_pairs(
-                db, team, match_id=next(iter(pair_match_ids)))
-        elif pair_match_ids is not None:
-            # Match range — fetch all passes then filter to the range
-            all_passes = hdb.fetch_passes(db, team=team, completed_only=True)
-            all_passes = all_passes[all_passes["match_id"].astype(str).isin(pair_match_ids)]
-            all_passes = all_passes.dropna(subset=["receiver"])
-            if all_passes.empty:
-                pass_pairs = pd.DataFrame(columns=["passer", "receiver", "count"])
-            else:
-                pass_pairs = (all_passes.groupby(["passer", "receiver"]).size()
-                              .reset_index(name="count")
-                              .sort_values("count", ascending=False)
-                              .reset_index(drop=True))
-        else:
-            # Full season
-            pass_pairs = hdb.fetch_team_passing_pairs(
-                db, team, match_id=None, competition=comp_filter)
-        if pass_pairs.empty:
-            st.info("No passing pair data found.")
-        else:
-            left = (pass_pairs.loc[pass_pairs["passer"] == player, ["receiver", "count"]]
-                    .rename(columns={"receiver": "Receiver", "count": "Passes Completed"})
-                    .sort_values("Passes Completed", ascending=False)
-                    .reset_index(drop=True))
-            right = (pass_pairs.loc[pass_pairs["receiver"] == player, ["passer", "count"]]
-                     .rename(columns={"passer": "Passer", "count": "Passes Completed"})
-                     .sort_values("Passes Completed", ascending=False)
-                     .reset_index(drop=True))
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Passes by {player}**")
-                if left.empty:
-                    st.info("No outgoing passes found.")
+        with pair_tabs[0]:
+            if pair_match_ids is not None and len(pair_match_ids) == 1:
+                # Single match — use the direct API
+                pass_pairs = hdb.fetch_team_passing_pairs(
+                    db, team, match_id=next(iter(pair_match_ids)))
+            elif pair_match_ids is not None:
+                # Match range — fetch all passes then filter to the range
+                all_passes = hdb.fetch_passes(db, team=team, completed_only=True)
+                all_passes = all_passes[all_passes["match_id"].astype(str).isin(pair_match_ids)]
+                all_passes = all_passes.dropna(subset=["receiver"])
+                if all_passes.empty:
+                    pass_pairs = pd.DataFrame(columns=["passer", "receiver", "count"])
                 else:
-                    st.dataframe(left, use_container_width=False, hide_index=True,
-                                 height=_no_scroll_height(left))
-            with col2:
-                st.markdown(f"**Passes Received by {player}**")
-                if right.empty:
-                    st.info("No incoming passes found.")
-                else:
-                    st.dataframe(right, use_container_width=False, hide_index=True,
-                                 height=_no_scroll_height(right))
-
-    with pair_tabs[1]:
-        if pair_match_ids is not None and len(pair_match_ids) == 1:
-            shot_pairs = hdb.fetch_team_shot_pairs(
-                db, team, match_id=next(iter(pair_match_ids)))
-        elif pair_match_ids is not None:
-            # Match range — rebuild shot pairs from raw shots in range
-            all_shots = hdb.fetch_shots(db, team=team)
-            all_shots = all_shots[all_shots["match_id"].astype(str).isin(pair_match_ids)]
-            if all_shots.empty:
-                shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
-            else:
-                import json as _json
-                records = []
-                for _, r in all_shots.iterrows():
-                    extra = _json.loads(r["extra_json"]) if r.get("extra_json") else {}
-                    sca1_player = extra.get("SCA1_Player")
-                    sca1_action = extra.get("SCA1_Action")
-                    if sca1_player and str(sca1_action).startswith("Pass"):
-                        records.append({"shot_taker": r["player"], "passer": sca1_player})
-                if not records:
-                    shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
-                else:
-                    shot_pairs = (pd.DataFrame(records)
-                                  .groupby(["shot_taker", "passer"]).size()
+                    pass_pairs = (all_passes.groupby(["passer", "receiver"]).size()
                                   .reset_index(name="count")
                                   .sort_values("count", ascending=False)
                                   .reset_index(drop=True))
-        else:
-            # Full season
-            shot_pairs = hdb.fetch_team_shot_pairs(
-                db, team, match_id=None, competition=comp_filter)
-        if shot_pairs.empty:
-            st.info("No shot pair data found.")
-        else:
-            left = (shot_pairs.loc[shot_pairs["passer"] == player, ["shot_taker", "count"]]
-                    .rename(columns={"shot_taker": "Shot Taker", "count": "Shots"})
-                    .sort_values("Shots", ascending=False)
-                    .reset_index(drop=True))
-            right = (shot_pairs.loc[shot_pairs["shot_taker"] == player, ["passer", "count"]]
-                     .rename(columns={"passer": "Passer", "count": "Shots"})
-                     .sort_values("Shots", ascending=False)
-                     .reset_index(drop=True))
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Assists by {player}**")
-                if left.empty:
-                    st.info("No assist data found.")
+            else:
+                # Full season
+                pass_pairs = hdb.fetch_team_passing_pairs(
+                    db, team, match_id=None, competition=comp_filter)
+            if pass_pairs.empty:
+                st.info("No passing pair data found.")
+            else:
+                left = (pass_pairs.loc[pass_pairs["passer"] == player, ["receiver", "count"]]
+                        .rename(columns={"receiver": "Receiver", "count": "Passes Completed"})
+                        .sort_values("Passes Completed", ascending=False)
+                        .reset_index(drop=True))
+                right = (pass_pairs.loc[pass_pairs["receiver"] == player, ["passer", "count"]]
+                         .rename(columns={"passer": "Passer", "count": "Passes Completed"})
+                         .sort_values("Passes Completed", ascending=False)
+                         .reset_index(drop=True))
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Passes by {player}**")
+                    if left.empty:
+                        st.info("No outgoing passes found.")
+                    else:
+                        st.dataframe(left, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(left))
+                with col2:
+                    st.markdown(f"**Passes Received by {player}**")
+                    if right.empty:
+                        st.info("No incoming passes found.")
+                    else:
+                        st.dataframe(right, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(right))
+
+        with pair_tabs[1]:
+            if pair_match_ids is not None and len(pair_match_ids) == 1:
+                shot_pairs = hdb.fetch_team_shot_pairs(
+                    db, team, match_id=next(iter(pair_match_ids)))
+            elif pair_match_ids is not None:
+                # Match range — rebuild shot pairs from raw shots in range
+                all_shots = hdb.fetch_shots(db, team=team)
+                all_shots = all_shots[all_shots["match_id"].astype(str).isin(pair_match_ids)]
+                if all_shots.empty:
+                    shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
                 else:
-                    st.dataframe(left, use_container_width=False, hide_index=True,
-                                 height=_no_scroll_height(left))
-            with col2:
-                st.markdown(f"**{player}'s Shots (by Assister)**")
-                if right.empty:
-                    st.info("No shot data found.")
-                else:
-                    st.dataframe(right, use_container_width=False, hide_index=True,
-                                 height=_no_scroll_height(right))
+                    import json as _json
+                    records = []
+                    for _, r in all_shots.iterrows():
+                        extra = _json.loads(r["extra_json"]) if r.get("extra_json") else {}
+                        sca1_player = extra.get("SCA1_Player")
+                        sca1_action = extra.get("SCA1_Action")
+                        if sca1_player and str(sca1_action).startswith("Pass"):
+                            records.append({"shot_taker": r["player"], "passer": sca1_player})
+                    if not records:
+                        shot_pairs = pd.DataFrame(columns=["shot_taker", "passer", "count"])
+                    else:
+                        shot_pairs = (pd.DataFrame(records)
+                                      .groupby(["shot_taker", "passer"]).size()
+                                      .reset_index(name="count")
+                                      .sort_values("count", ascending=False)
+                                      .reset_index(drop=True))
+            else:
+                # Full season
+                shot_pairs = hdb.fetch_team_shot_pairs(
+                    db, team, match_id=None, competition=comp_filter)
+            if shot_pairs.empty:
+                st.info("No shot pair data found.")
+            else:
+                left = (shot_pairs.loc[shot_pairs["passer"] == player, ["shot_taker", "count"]]
+                        .rename(columns={"shot_taker": "Shot Taker", "count": "Shots"})
+                        .sort_values("Shots", ascending=False)
+                        .reset_index(drop=True))
+                right = (shot_pairs.loc[shot_pairs["shot_taker"] == player, ["passer", "count"]]
+                         .rename(columns={"passer": "Passer", "count": "Shots"})
+                         .sort_values("Shots", ascending=False)
+                         .reset_index(drop=True))
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Assists by {player}**")
+                    if left.empty:
+                        st.info("No assist data found.")
+                    else:
+                        st.dataframe(left, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(left))
+                with col2:
+                    st.markdown(f"**{player}'s Shots (by Assister)**")
+                    if right.empty:
+                        st.info("No shot data found.")
+                    else:
+                        st.dataframe(right, use_container_width=False, hide_index=True,
+                                     height=_no_scroll_height(right))
 
 
 # ============================================================
