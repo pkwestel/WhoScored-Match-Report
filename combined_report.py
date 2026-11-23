@@ -282,6 +282,12 @@ def compute_combined_shots(sca_out, fm_shots_df):
     ws['_norm_team'] = ws['team'].apply(canonical_team_name)
     ws['_orig_order'] = range(len(ws))
 
+    # Drop WhoScored's own Situation column (added for the standalone SCA
+    # tab) before merging - the combined output uses FotMob's Situation
+    # field instead, and keeping both would cause pandas to suffix them
+    # (Situation_x / Situation_y) breaking the downstream column lookup.
+    if 'Situation' in ws.columns:
+        ws = ws.drop(columns=['Situation'])
     ws_sorted = ws.sort_values(['_norm_team', 'minute']).copy()
     ws_sorted['_rank_in_team'] = ws_sorted.groupby('_norm_team').cumcount()
 
