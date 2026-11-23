@@ -1966,6 +1966,50 @@ def extract_player_windows(match_json, player_minutes=None, shots_df=None):
         if len(eff):
             fallback_end = max(fallback_end, eff.max())
 
+    # Red card lookup — read from matchFacts.events (same source as
+    # extract_player_cards) to end a sent-off player's window at the card
+    # minute.  Covers both straight 'Red' and 'YellowRed' (second yellow).
+    red_card_lookup = {}  # (team, player) -> minute
+    _mf_events = None
+    content = match_json.get('content') if isinstance(match_json, dict) else None
+    if isinstance(content, dict):
+        mf = content.get('matchFacts')
+        if isinstance(mf, dict):
+            eo = mf.get('events')
+            if isinstance(eo, dict):
+                _mf_events = eo.get('events')
+    if not isinstance(_mf_events, list):
+        found = match_json.get('events') if isinstance(match_json, dict) else None
+        if isinstance(found, dict):
+            found = found.get('events')
+        if isinstance(found, list):
+            _mf_events = found
+    if not isinstance(_mf_events, list):
+        found = _search_for_key(match_json, {'events'})
+        if isinstance(found, dict):
+            found = found.get('events')
+        if isinstance(found, list):
+            _mf_events = found
+
+    home_name, away_name = extract_team_names(match_json)
+    if isinstance(_mf_events, list):
+        for ev in _mf_events:
+            if not isinstance(ev, dict) or ev.get('type') != 'Card':
+                continue
+            card_type = ev.get('card')
+            if card_type not in ('Red', 'YellowRed'):
+                continue
+            pi = ev.get('player') if isinstance(ev.get('player'), dict) else {}
+            pname = pi.get('name') or ev.get('nameStr') or ev.get('fullName')
+            if not pname:
+                continue
+            pteam = home_name if ev.get('isHome') else away_name
+            card_min = ev.get('time') or ev.get('min') or ev.get('minute')
+            if card_min is not None and pteam:
+                rc_key = (pteam, pname)
+                if rc_key not in red_card_lookup:
+                    red_card_lookup[rc_key] = card_min
+
     rows = []
     for side_key in ('homeTeam', 'awayTeam'):
         side = lineup.get(side_key)
@@ -1990,8 +2034,13 @@ def extract_player_windows(match_json, player_minutes=None, shots_df=None):
 
             start = sub_in if sub_in is not None else 0
             subbed_off = sub_out is not None
+            # Check for red card — ends window at card minute
+            sent_off_min = red_card_lookup.get((team_name, name))
             if subbed_off:
                 end = sub_out
+            elif sent_off_min is not None:
+                end = sent_off_min
+                subbed_off = True  # treat as subbed off for boundary purposes
             elif minutes_played is not None:
                 # FotMob's own per-player "Minutes Played" figure turns out
                 # to be a NOMINAL count, not stoppage-time-inclusive as this

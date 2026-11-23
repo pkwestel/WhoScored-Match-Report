@@ -945,6 +945,31 @@ def extract_player_windows(match_data, player_minutes=None, shots_df=None):
             if name_out:
                 sub_out_map[(team, name_out)] = minute
 
+    # Red card lookup — end a sent-off player's window at the card minute.
+    # Covers straight reds and second yellows (YellowRed).
+    red_card_lookup = {}  # (team, player) -> minute
+    for inc in (incidents if isinstance(incidents, list) else []):
+        if not isinstance(inc, dict):
+            continue
+        inc_type = str(inc.get('incidentType', inc.get('type', ''))).lower()
+        if inc_type != 'card':
+            continue
+        card_type = str(inc.get('incidentClass', inc.get('card', inc.get('cardType', '')))).lower()
+        if card_type not in ('red', 'yellowred', 'yellow_red', 'secondyellow', 'second_yellow'):
+            continue
+        is_home = inc.get('isHome')
+        team = home_name if is_home else away_name
+        card_min = inc.get('time', inc.get('minute'))
+        if card_min is None:
+            continue
+        pi = inc.get('player', {})
+        if isinstance(pi, dict):
+            pname = pi.get('name') or pi.get('shortName', '')
+            if pname:
+                rc_key = (team, pname)
+                if rc_key not in red_card_lookup:
+                    red_card_lookup[rc_key] = card_min
+
     fallback_end = 90.0
     if shots_df is not None and not shots_df.empty:
         eff = shots_df['Minute'].fillna(0) + shots_df['Added Time'].fillna(0)
@@ -989,8 +1014,12 @@ def extract_player_windows(match_data, player_minutes=None, shots_df=None):
 
             # End minute
             subbed_off = sub_out_time is not None
+            sent_off_min = red_card_lookup.get((team_name, name))
             if subbed_off:
                 end = sub_out_time
+            elif sent_off_min is not None:
+                end = sent_off_min
+                subbed_off = True  # treat as subbed off for boundary purposes
             elif minutes_played is not None:
                 end = max(start + minutes_played, fallback_end)
             else:

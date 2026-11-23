@@ -3463,10 +3463,12 @@ def extract_player_windows(df):
     they left (that belongs to whoever replaced them), while a player who
     finished the match does get the exact final minute.
 
-    KNOWN LIMITATION: a sent-off player (red card / second yellow) isn't
-    detected here - their window still runs to the final whistle rather
-    than ending at the card. See compute_on_off()'s own docstring for what
-    that means for its "Against" numbers on a match with a red card in it.
+    A sent-off player (red card / second yellow) has their window ended at
+    the minute of the card, with subbed_off=True - treated identically to a
+    substitution so that compute_on_off()/compute_plus_minus() stop counting
+    team events against them from the sending-off minute onwards. Detected
+    via Card events with a 'Red' qualifier (which WhoScored also uses for
+    second-yellow dismissals).
 
     Only players with at least one event of their own in this match's
     event stream get a row - a bench player who never actually appeared
@@ -3491,12 +3493,33 @@ def extract_player_windows(df):
     sub_on = d[d['type.displayName'] == 'SubstitutionOn']
     on_lookup = {(r.team, r.playerName): r.cumulative_mins for r in sub_on.itertuples()}
 
+    # Red card lookup — Card events with a 'Red' qualifier (covers both
+    # straight reds and second yellows, since WhoScored gives both a 'Red'
+    # qualifier).  A red card ends the player's window the same way a
+    # substitution does.
+    red_card_lookup = {}  # (team, player) -> cumulative_mins
+    cards = d[d['type.displayName'] == 'Card']
+    for _, crow in cards.iterrows():
+        qn = qual_names(crow['qualifiers_parsed'])
+        if 'Red' in qn:
+            ckey = (crow['team'], crow['playerName'])
+            # Keep the earliest red (shouldn't matter — only one per player)
+            if ckey not in red_card_lookup:
+                red_card_lookup[ckey] = crow['cumulative_mins']
+
     rows = []
     for r in players.itertuples():
         team, player = r.team, r.playerName
         start = on_lookup.get((team, player), 0.0)
         subbed_off = (team, player) in off_lookup
-        end = off_lookup[(team, player)] if subbed_off else match_end
+        sent_off = (team, player) in red_card_lookup
+        if subbed_off:
+            end = off_lookup[(team, player)]
+        elif sent_off:
+            end = red_card_lookup[(team, player)]
+            subbed_off = True  # treat as subbed off for boundary purposes
+        else:
+            end = match_end
         rows.append({
             'Team': team, 'Player': player,
             'start_minute': start, 'end_minute': end,
@@ -3565,14 +3588,9 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
     played to the final whistle does get credit for the exact final
     minute. Same boundary convention as fotmob_report.compute_plus_minus().
 
-    KNOWN LIMITATION: a red/second-yellow card isn't accounted for - a
-    sent-off player's own window still runs to the final whistle rather
-    than ending at the card, and this project has no explicit per-minute
-    "how many players were on the pitch" tracking, only each individual
-    player's own window - so a match with a red card in it will somewhat
-    understate how much the shorthanded team was actually under the cosh
-    for those minutes. Not expected to come up often, but worth knowing
-    before drawing conclusions from a match that had a sending-off in it.
+    A red/second-yellow card is handled by extract_player_windows(): the
+    sent-off player's window ends at the card minute (subbed_off=True), so
+    team events after the sending off are no longer counted for that player.
 
     Returns one DataFrame, sorted by Team then descending Minutes Played -
     split into two tables, one per team, when written to the
@@ -4159,8 +4177,8 @@ def build_workbook(sca_out, team_summary, player_third, passing_out, totals_out,
         " Crosses Completed use the same OPEN PLAY ONLY definitions as the Passing tab (excludes corners and"
         " free kicks) - all applied to each side's own attacking direction, so e.g. Final Third Against means"
         " the OPPONENT was in THEIR OWN attacking final third (deep in this player's own defensive third),"
-        " not the same physical end of the pitch as Final Third For. A red/second-yellow card isn't accounted"
-        " for - a sent-off player's window still runs to the final whistle rather than ending at the card.",
+        " not the same physical end of the pitch as Final Third For. A red/second-yellow card ends that"
+        " player's window at the card minute, same as a substitution.",
     ]
     for i, line in enumerate(notes, start=1):
         c = ws.cell(row=i, column=1, value=line)
