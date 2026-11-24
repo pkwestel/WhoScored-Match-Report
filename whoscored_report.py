@@ -3532,17 +3532,25 @@ def extract_player_windows(df):
 
 def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=None):
     """
-    On/Off tab: for every player, team totals - Shots, Total Touches, Own/
-    Middle/Final Third Touches, Attacking Box Touches, Carries into Final
-    Third, Carries into Box, Passes into Final 1/3, Passes into the Box,
-    Crosses Attempted, and Crosses Completed - split into "For" (their own
-    team's total) and "Against" (the opponent's total), counted only for
-    the minutes that player was actually on the pitch (their own window
-    from extract_player_windows() above) - the same on-pitch-window
-    concept fotmob_report.py's Plus Minus tab uses for FotMob's shot/goal/
-    xG data, applied here to WhoScored's own event stats instead. All 12
-    metrics' "For" columns are grouped together, followed by all 12
-    "Against" columns, rather than interleaved pair by pair.
+    On/Off tab: for every player, team totals - Goals For/Against, Shots,
+    Total Touches, Own/Middle/Final Third Touches, Attacking Box Touches,
+    Carries into Final Third, Carries into Box, Passes into Final 1/3,
+    Passes into the Box, Crosses Attempted, and Crosses Completed - split
+    into "For" (their own team's total) and "Against" (the opponent's
+    total), counted only for the minutes that player was actually on the
+    pitch (their own window from extract_player_windows() above) - the
+    same on-pitch-window concept fotmob_report.py's Plus Minus tab uses
+    for FotMob's shot/goal/xG data, applied here to WhoScored's own event
+    stats instead. All 12 metrics' "For" columns are grouped together,
+    followed by all 12 "Against" columns, rather than interleaved pair by
+    pair. Goals For/Against appear first, before the For/Against block.
+
+    Goals For/Against: regular goals (type == 'Goal' without OwnGoal
+    qualifier) are credited to the scoring team. Own goals are credited
+    to the OPPOSING team - if Man Utd's Martinez scores an own goal,
+    WhoScored attributes the event to Man Utd, but the goal counts for
+    Fulham: all Fulham players on the pitch get +1 Goals For, all Man Utd
+    players on the pitch get +1 Goals Against.
 
     Three more metrics - Interceptions, Blocked Passes, and Blocked Shots -
     are also included, but "For" only (no "Against" pair): these are
@@ -3614,7 +3622,7 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
     both) preserves this function's original full-match behavior exactly,
     including the original Minutes Played value.
     """
-    for_cols = ['Shots For', 'Total Touches For', 'Own Third For', 'Middle Third For',
+    for_cols = ['Goals For', 'Shots For', 'Total Touches For', 'Own Third For', 'Middle Third For',
                 'Final Third For', 'Attacking Box For', 'Carries into Final Third For',
                 'Carries into Box For', 'Passes into Final 1/3 For', 'Passes into the Box For',
                 'Crosses Attempted For', 'Crosses Completed For']
@@ -3635,6 +3643,13 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
     # an own goal is still a genuine touch on the ball, just not a shot.
     own_goal_mask = d.apply(is_own_goal, axis=1)
     d['is_real_shot'] = (d['isShot'] == True) & ~own_goal_mask
+
+    # Goals: regular goals (type == 'Goal' WITHOUT OwnGoal qualifier) are
+    # credited to the scoring team.  Own goals are credited to the OPPOSING
+    # team (the team that benefits) - WhoScored attributes the event to the
+    # team of the player who deflected it, same as FotMob's shotmap.
+    regular_goals = d[(d['type.displayName'] == 'Goal') & ~own_goal_mask]
+    own_goals = d[own_goal_mask]
 
     passes = _classify_passes(df)
 
@@ -3677,6 +3692,19 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
         own_touches = own[own['isTouch'] == True]
         opp_touches = opp_events[opp_events['isTouch'] == True]
 
+        # Goals For/Against: regular goals by this team + own goals by
+        # the opponent (they scored on themselves, benefiting this team).
+        # Goals Against: regular goals by the opponent + own goals by
+        # this team (this team scored on itself).
+        rg_mask = in_window(regular_goals['cumulative_mins'])
+        own_regular_goals = int(((regular_goals['team'] == team) & rg_mask).sum())
+        opp_regular_goals = int(((regular_goals['team'] == opp) & rg_mask).sum()) if opp else 0
+        og_mask = in_window(own_goals['cumulative_mins']) if not own_goals.empty else own_goals['cumulative_mins']
+        own_team_og = int(((own_goals['team'] == team) & og_mask).sum()) if not own_goals.empty else 0
+        opp_team_og = int(((own_goals['team'] == opp) & og_mask).sum()) if opp and not own_goals.empty else 0
+        goals_for = own_regular_goals + opp_team_og
+        goals_against = opp_regular_goals + own_team_og
+
         interceptions_for = int((own['type.displayName'] == 'Interception').sum())
         blocked_passes_for = int((own['type.displayName'] == 'BlockedPass').sum())
         if opp and not blocked_shot_events.empty:
@@ -3700,6 +3728,8 @@ def compute_on_off(df, player_windows, carries_df, minute_min=None, minute_max=N
             'Team': team,
             'Player': prow['Player'],
             'Minutes Played': minutes_played,
+            'Goals For': goals_for,
+            'Goals Against': goals_against,
             'Shots For': int(own['is_real_shot'].sum()),
             'Total Touches For': int(len(own_touches)),
             'Own Third For': int((own_touches['pitch_third'] == 'Own third').sum()),
