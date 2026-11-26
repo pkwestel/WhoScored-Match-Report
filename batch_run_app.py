@@ -303,6 +303,19 @@ if matches:
         st.warning("Maximum delay is less than minimum delay - using minimum delay for both.")
         max_delay = min_delay
 
+    _as_col1, _as_col2 = st.columns([1, 1])
+    auto_save = _as_col1.checkbox(
+        "Automatically save to database",
+        help="After all matches are scraped, every successful match is saved to the "
+             "database automatically — one click does everything.",
+        key="batch_auto_save",
+    )
+    auto_save_comp = _as_col2.selectbox(
+        "Competition (for auto-save)",
+        ["Premier League", "UEFA Champions League"],
+        index=0, key="batch_auto_save_comp",
+    )
+
     if st.button("Run batch", type="primary"):
         to_run = []
         for i in range(len(matches)):
@@ -348,6 +361,37 @@ if matches:
                     time.sleep(delay)
 
             st.session_state["batch_run_results"] = results
+
+            # --- Auto-save: save ALL successful matches after scraping completes ---
+            if auto_save:
+                _auto_db_url = st.session_state.get(
+                    "batch_db_url",
+                    os.environ.get("DATABASE_URL", "sqlite:///history.db"))
+                _auto_comp = st.session_state.get("batch_auto_save_comp", "Premier League")
+                successful = [r for r in results if r["success"]]
+                if successful:
+                    save_progress = st.progress(0.0)
+                    save_status = st.empty()
+                    n_saved = 0
+                    for si, r in enumerate(successful):
+                        report = r["report"]
+                        match_date = report["match_date"]
+                        match_date_iso = (match_date.isoformat()
+                                          if hasattr(match_date, "isoformat")
+                                          else str(match_date))
+                        try:
+                            match_id = batch_lib.save_report_to_db(
+                                _auto_db_url, report, _auto_comp, match_date_iso)
+                            n_saved += 1
+                            save_status.write(
+                                f"Saving {si + 1}/{len(successful)}: "
+                                f"{report['ws_home_name']} vs {report['ws_away_name']} ✓")
+                        except Exception as save_err:
+                            save_status.error(
+                                f"Failed to save {report['ws_home_name']} vs "
+                                f"{report['ws_away_name']}: {save_err}")
+                        save_progress.progress((si + 1) / len(successful))
+                    st.success(f"Auto-save complete: {n_saved}/{len(successful)} matches saved.")
 
 # ---------------------------------------------------------------------------
 # Step 4 + 5: review results, then save to database
