@@ -2359,7 +2359,8 @@ def compute_shot_breakdowns(shots_df, player_xa=None, player_minutes=None, playe
 # ============================================================
 # FotMob's shot "situation" values that count as a set piece (a stopped-ball
 # restart) - anything else (RegularPlay, FastBreak, etc.) counts as Open Play.
-SET_PIECE_SITUATIONS = {'SetPiece', 'FromCorner', 'Penalty'}
+# Penalties are excluded from both categories (matching FotMob's app).
+SET_PIECE_SITUATIONS = {'SetPiece', 'FromCorner'}
 # Extra-time periods get lumped into "2nd Half" rather than dropped, since
 # most matches never reach extra time and dropping them silently would be
 # worse than this simplification for the rare cup match that does.
@@ -2392,7 +2393,8 @@ def compute_xg_breakdown(shots_df, home_name, away_name):
         out[c] = 0.0
 
     if not shots_df.empty:
-        work = shots_df[shots_df['Outcome'] != 'Own Goal'].copy()
+        work = shots_df[(shots_df['Outcome'] != 'Own Goal') &
+                        (shots_df['Situation'] != 'Penalty')].copy()
         work['xG'] = work['xG'].fillna(0.0)
 
         first_half_mask = work['Period'] == 'FirstHalf'
@@ -2587,8 +2589,8 @@ def build_workbook(shots_df, totals_df, home_name, away_name, match_id, shot_bre
         " shot map - 1st Half Shots / 2nd Half Shots and 1st Half xG / 2nd Half xG (from FotMob's"
         " 'period' field; extra-time periods, if any, are lumped into 2nd Half rather than"
         " dropped), and Open Play xG / Set Piece xG (from FotMob's 'situation' field - Set Piece ="
-        " SetPiece/FromCorner/Penalty situations, Open Play = everything else, e.g."
-        " RegularPlay/FastBreak). These aren't mutually exclusive of each other - a set piece goal"
+        " SetPiece/FromCorner situations, Open Play = RegularPlay/FastBreak/etc.;"
+        " Penalties are excluded from both). These aren't mutually exclusive of each other - a set piece goal"
         " scored in the 2nd half adds to the 2nd Half Shots/xG columns as well as Set Piece xG.",
         "",
         "Unlike the WhoScored report, this data source does not provide a full",
