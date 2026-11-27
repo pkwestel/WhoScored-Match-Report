@@ -1062,7 +1062,9 @@ def compute_totals(match_json, shots_df, home_name, away_name):
     per-shot xG values, falling back to that shot-map sum only if FotMob
     didn't publish the stat for this match - by request, so this number
     always matches what fotmob.com itself shows rather than occasionally
-    drifting from it (confirmed happening on a real match).
+    drifting from it (confirmed happening on a real match). Penalties are
+    then subtracted from this figure using the flat PENALTY_XG (0.79) per
+    penalty to produce a non-penalty xG, matching FotMob's own treatment.
 
     Goals similarly prefers FotMob's own final score (see
     extract_final_score()) over counting the shot map, for the same
@@ -1071,21 +1073,27 @@ def compute_totals(match_json, shots_df, home_name, away_name):
     goals aren't on the scoring team's own shot list) or lag behind the
     real final score (an incomplete/mid-match scrape).
 
-    Outcome == 'Own Goal' rows are excluded from Shots / Shots on Target /
-    Total xG / Total post-shot xG, the same treatment Penalties get on the
-    Shot Breakdown tab (see compute_shot_breakdowns()) - an own goal is a
-    defender accidentally diverting the ball into their own net, not a shot
-    the team it's attributed to took at goal, so it shouldn't inflate that
-    team's shot volume or shot-map-derived xG. (Goals is unaffected either
-    way since it's overridden by extract_final_score() above/below, and
-    Outcome == 'Own Goal' never matched the 'Goal' equality check to begin
-    with.)
+    Penalties and Own Goals are both excluded from Shots / Shots on
+    Target / Total xG / Total post-shot xG - a penalty kick isn't a shot
+    in the run-of-play sense, and an own goal is a defender accidentally
+    diverting the ball into their own net. Neither should inflate the
+    team's shot volume or xG. (Goals is unaffected since it's overridden
+    by extract_final_score() above/below.)
     """
     teams_order = [t for t in [home_name, away_name] if t] or sorted(shots_df['Team'].dropna().unique())
     totals = pd.DataFrame({'team': teams_order}).set_index('team')
 
+    # Count penalties per team BEFORE filtering, so we can subtract their
+    # xG from FotMob's published total (which includes penalties).
+    pen_counts = pd.Series(dtype=int)
     if not shots_df.empty:
-        countable = shots_df[shots_df['Outcome'] != 'Own Goal']
+        pens = shots_df[(shots_df['Outcome'] != 'Own Goal') &
+                        (shots_df['Situation'] == 'Penalty')]
+        pen_counts = pens.groupby('Team').size()
+
+        # Exclude both own goals AND penalties from shot/xG counts.
+        countable = shots_df[(shots_df['Outcome'] != 'Own Goal') &
+                             (shots_df['Situation'] != 'Penalty')]
         agg = countable.groupby('Team').agg(
             Shots=('Outcome', 'size'),
             **{'Shots on Target': ('On Target', 'sum')},
@@ -1105,11 +1113,15 @@ def compute_totals(match_json, shots_df, home_name, away_name):
 
     stat_groups = _get_fotmob_stat_groups(match_json)
 
+    # FotMob's published xG includes penalties — subtract them out using
+    # the flat PENALTY_XG (0.79) per penalty, matching FotMob's own value.
     fm_xg_home, fm_xg_away = _fotmob_published_xg(stat_groups)
     if fm_xg_home is not None and home_name in totals.index:
-        totals.loc[home_name, 'Total xG'] = round(fm_xg_home, 2)
+        home_pens = int(pen_counts.get(home_name, 0))
+        totals.loc[home_name, 'Total xG'] = round(fm_xg_home - home_pens * PENALTY_XG, 2)
     if fm_xg_away is not None and away_name in totals.index:
-        totals.loc[away_name, 'Total xG'] = round(fm_xg_away, 2)
+        away_pens = int(pen_counts.get(away_name, 0))
+        totals.loc[away_name, 'Total xG'] = round(fm_xg_away - away_pens * PENALTY_XG, 2)
 
     home_score, away_score = extract_final_score(match_json, home_name, away_name)
     if home_score is not None and home_name in totals.index:
